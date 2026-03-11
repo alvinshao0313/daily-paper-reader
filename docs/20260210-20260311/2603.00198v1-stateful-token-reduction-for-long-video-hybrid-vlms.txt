@@ -1,0 +1,889 @@
+Title: Stateful Token Reduction for Long-Video Hybrid VLMs
+
+URL Source: https://arxiv.org/pdf/2603.00198v1
+
+Published Time: Tue, 03 Mar 2026 01:07:52 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+> 2026-3-3
+
+# Stateful Token Reduction for Long-Video Hybrid VLMs 
+
+Jindong Jiang* Amala Sanjay Deshmukh Kateryna Chumachenko Karan Sapra Zhiding Yu Guilin Liu Andrew Tao Pavlo Molchanov Jan Kautz Wonmin Byeon* 
+
+## NVIDIA 
+
+Token reduction is an effective way to accelerate long-video vision–language models (VLMs), but most existing methods are designed for dense Transformers and do not directly account for hybrid architectures that interleave attention with linear-time state-space blocks (e.g., Mamba). We study query-conditioned token reduction for hybrid video VLMs and analyze reduction behavior through two properties: layerwise sparsity 
+
+(how many tokens capture query-relevant information) and importance stability (whether token-importance rankings persist across depth). Although token importance is sparse within each layer, the set of important tokens changes across layers, so aggressive early pruning is unreliable. Motivated by this, we propose alow-to-high progressive reduction schedule and a unified language-aware scoring mechanism for both attention and Mamba blocks (using an implicit-attention proxy for Mamba), enabling all-layer token reduction in hybrids. Under an aggressive compression setting (retaining 25% of visual tokens), our approach delivers substantial prefilling speedups ( 3.8–4.2×) with near-baseline accuracy at test time, and light finetuning under reduction further improves performance on long-context video benchmarks. 
+
+## 1. Introduction 
+
+Video-based VLMs are moving toward long-horizon video understanding tasks. However, long videos produce a large number of visual tokens, making inference expensive, especially during prefilling. Prior work shows that many tokens are redundant and can be pruned or merged, yet aggressive reduction often degrades accuracy, particularly when pruning happens early and cannot be revisited later in the network. [ 1, 2, 3]. This becomes more challenging for long-context videos, where token relevance can shift across layers and over time [4, 5, 6]. Existing methods include query-aware pruning based on language–vision relevance [ 1, 2], token merg-ing that aggregates redundant tokens [ 7], and long-video token reduction that targets temporal redun-dancy [ 6 , 8, 5]. However, these approaches are primar-ily designed for Transformer-only models and provide limited guidance on how to score and schedule to-ken reduction inside non-attention blocks, which are central to hybrid architectures. In this work, we study token reduction for Mamba–Transformer hybrid video VLMs ,where a substantial fraction of layers are state-space (Mamba) blocks rather than only attention blocks [9 , 10 ]. Because hybrid architectures propagate infor-mation differently across depth, we compare token reduction behavior in hybrid and Transformer models using two properties: (1) sparsity , i.e., how many to-kens capture most of the query-relevant information, and (2) importance stability , i.e., whether token importance rankings persist across layers. While im-portance is often sparse within a layer, we find that the set of important tokens changes across layers (weak cross-layer correlation), making agressive early proning unreliable, especially in hybrid models. This analysis also highlights that the same pruning strategy can affect architectures differently. In Trans-formers, pruning is closer to dropping: once a token is removed, its contribution is permanently unavailable to subsequent layers [ 3]. In contrast, hybrid models maintain a recurrent latent state in Mamba blocks that aggregates information over time [ 11 ]. As a re-sult, token reduction in hybrids can behave more like compression: even after token removal, a summary of earlier information can persist in the state, alleviating information loss. Motivated by this, we propose a 
+
+progressive low-to-high reduction schedule that preserves more tokens in early layers (when impor-tance is unstable and state accumulation is limited) and prunes more aggressively later. This design is related to progressive dropping [ 3] and token merg-ing [ 7], but is specifically motivated by hybrid depth dynamics and state-space memory. To support progressive reduction in hybrid models, we introduce a query-conditioned token scoring method for both attention and Mamba layers. For attention layers, we compute token importance using standard text-to-vision attention [ 6, 5 ]. For Mamba  
+
+> * : Equal contribution
+> ©2026 NVIDIA. All rights reserved.
+> arXiv:2603.00198v1 [cs.CV] 27 Feb 2026 Stateful Token Reduction for Long-Video Hybrid VLMs
+
+layers, we derive an implicit-attention proxy from the unrolled selective-scan update to estimate query-conditioned token scores, enabling token reduction inside non-attention blocks. We use Nemotron-Nano-V2 VL 12B as the hy-brid model and Qwen3-VL 8B as the Transformer model in our experiments. We evaluate on long-context video benchmarks including VideoMME [ 12 ], LongVideoBench [ 13 ], and LVBench [ 14 ], under dif-ferent reduction types and schedules. Our results show that hybrid token reduction achieves significant prefilling speedups while maintaining near-baseline performance at test time, and further matches or ex-ceeds the non-reduction baseline with light finetuning under token reduction. A broader discussion of related work is provided in Section 4. 
+
+## 2. Method 
+
+2.1. Query-Conditioned Token Importance 
+
+Consider a multimodal sequence with 𝑀 text (user query) tokens and 𝑁 visual tokens. For long videos, 
+
+𝑁 can easily exceed 10K, creating computational bottlenecks, while the number of text tokens 𝑀 is typically much smaller (e.g., on the order of 100). Let 𝑢 (ℓ)1 , . . . , 𝑢 (ℓ) 
+
+> 𝑀
+
+and 𝑣 (ℓ)1 , . . . , 𝑣 (ℓ) 
+
+> 𝑁
+
+denote the hidden states of text token and visual token at layer ℓ, re-spectively. Our goal is to define a query-conditioned importance score 𝑠 (ℓ) 
+
+> 𝑖
+
+∈ R for each visual token to measur its relevance to the text query at layer ℓ that enables ranking and selective pruning: given budget 
+
+𝐾 < 𝑁 , we retain the top-𝐾 tokens by importance. 
+
+Attention Layers. For attention layers, impor-tance follows naturally from the attention mechanism. Let 𝑞 (ℎ) 
+
+> 𝑚
+
+and 𝑘 (ℎ) 
+
+> 𝑖
+
+denote the query and key projections of 𝑢 (ℓ) 
+
+> 𝑚
+
+and 𝑣 (ℓ) 
+
+> 𝑖
+
+at head ℎ (we omit the layer index for brevity). We compute the softmax-normalized atten-tion weights from text to visual tokens and aggregate: 
+
+𝑠 (ℓ, attn ) 
+
+> 𝑖
+
+= 1
+
+𝑀 𝐻 ∑︁ 𝑚,ℎ 
+
+softmax 𝑖 (︃ 𝑞 (ℎ) 
+
+> 𝑚
+
+· 𝑘 (ℎ)
+
+> 𝑖
+
+√𝑑 ℎ)︃ , (1) where 𝐻 is the number of heads and 𝑑 ℎ is the head dimension. 
+
+State-Space (Mamba) Layers. For Mamba lay-ers, we derive an implicit attention proxy from the selective state-space recurrence [ 15 ]. Each head in Mamba operates independently on input 𝑥 𝑡 ∈ R𝑝 
+
+(where 𝑝 is the head dimension) with hidden state 
+
+𝑆 𝑡 ∈ R𝑝 ×𝑛 (where 𝑛 is the state dimension). The state evolves as 𝑆 𝑡 = ¯𝐴 𝑡 𝑆 𝑡 −1 + 𝑥 𝑡 ¯𝑏 ⊤ 
+
+> 𝑡
+
+, with output 
+
+𝑦 𝑡 = 𝑆 𝑡 𝑐 𝑡 , where ¯𝐴 𝑡 is the discretized state transi-tion matrix with entries in (0 , 1) acting as a decay factor; ¯𝑏 𝑡 = Δ 𝑡 𝑏 𝑡 ∈ R𝑛 is the effective input projec-tion combining the discretization step Δ𝑡 > 0 with the input-dependent projection 𝑏 𝑡 ; and 𝑐 𝑡 ∈ R𝑛 is the output projection. Mamba groups heads such that 𝑏 𝑡 and 𝑐 𝑡 are shared within each group. Un-rolling the recurrence reveals an attention-like struc-ture 𝑦 𝑡 =∑︀ 𝑡 𝑗 =1 𝑤 𝑡,𝑗 𝑥 𝑗 , where 𝑤 𝑡,𝑗 is a scalar weight quantifying the contribution of token 𝑗 to the output at position 𝑡 :
+
+𝑤 𝑡,𝑗 =
+
+⎛⎝
+
+> 𝑡
+
+∏︁ 
+
+> 𝑢 =𝑗 +1
+
+¯𝐴 𝑢 
+
+⎞⎠ ¯𝑏 ⊤ 
+
+> 𝑗
+
+𝑐 𝑡 . (2) This weight depends on: (1) content alignment 
+
+¯𝑏 ⊤ 
+
+> 𝑗
+
+𝑐 𝑡 , where ¯𝑏 𝑗 and 𝑐 𝑡 act analogously to keys and queries [ 16 , 17 ], and (2) cumulative decay ∏︀ 𝑢 ¯𝐴 𝑢 .We provide detailed explanation of this attention con-nection in Section A.2. To compute visual token importance, we evaluate 𝑤 𝑡,𝑗 where 𝑡 indexes text positions and 𝑗 indexes visual positions, making ¯𝑏 ⊤ 
+
+> 𝑗
+
+𝑐 𝑡 
+
+a query-key alignment score. While |𝑤 𝑡,𝑗 | could di-rectly serve as an importance proxy, we empirically observe that certain Mamba layers exhibit strong de-cay that diminishes contributions from distant tokens regardless of their content relevance. We provide a visual inspection of this behavior in Section A.2.3. Therefore, we omit the decay term and define: 
+
+𝑠 (ℓ, ssm ) 
+
+> 𝑖
+
+= 1
+
+𝑀 𝐺 ∑︁ 𝑚,𝑔 ⃒⃒⃒ 
+
+¯𝑏 (𝑔 )⊤ 
+
+> 𝑖
+
+𝑐 (𝑔 )
+
+> 𝑚
+
+⃒⃒⃒ , (3) averaging over 𝑀 query (text) positions and 𝐺 groups. Here, ¯𝑏 𝑖 and 𝑐 𝑚 act as key and query projections whose dot product measures alignment between visual token 𝑖 and text token 𝑚 , with the gating factor Δ𝑖 
+
+absorbed into ¯𝑏 𝑖 .
+
+Token Selection. Given scores {𝑠 𝑖 }𝑁 𝑖 =1 , we select the top-𝐾 tokens while preserving temporal order. The budget 𝐾 may vary across layers according to a reduction schedule, which we motivate through the following analysis. 
+
+2.2. Sparsity and Importance Stability Analy-sis 
+
+Using the importance scores defined above, we analyze two key properties that determine how aggressively tokens can be pruned: (1) sparsity : how concen-trated is the importance mass among a subset of tokens, and (2) cross-layer stability : how consistent     
+
+> 2Stateful Token Reduction for Long-Video Hybrid VLMs (a) (b)
+> (c) (d)
+> Layer Correlation on Transformer Model Layer Correlation on Hybrid Model
+> Layer Density on Transformer Model Layer Density on Hybrid Model
+
+Figure 1 | Layer-Wise Attention Density and 
+
+Cross-Layer Stability of Token-importance Rankings . Top: Kendall’s 𝜏 correlation [ 18 ] of token-importance rankings across layers for the Trans-former model (a) and the Mamba–Transformer hybrid model (b). We consider values around 0.5 and below to indicate low cross-layer rank consistency. Bottom: 
+
+Layer-wise density (%) of token-importance scores for the Transformer (c) and the hybrid model (d), where each dot corresponds to an individual attention head (blue) or a Mamba group (green). Lower density indicates higher sparsity. are importance rankings across layers. We compare a Transformer-based VLM (Qwen3-VL) with a hybrid Mamba-Transformer VLM (Nemotron V2) on long-video understanding tasks using an 32 frames video sample from the validation set. 
+
+Sparsity Analysis Suggests Feasible Token Re-duction. Figure 1 (bottom) shows the fraction of tokens that account for 80% of the total importance mass at each layer. Each dot represents the den-sity level of an individual attention head (blue) or Mamba group (green). A value close to 0% indicates strong sparsity where 80% of the importance mass concentrates on a small subset of tokens, suggesting high potential for token reduction with minimal infor-mation loss. Conversely, a value approaching 100% indicates that importance is distributed uniformly across tokens, where aggressive reduction would more significantly affect model outputs. While individ-ual heads and groups exhibit varying sparsity levels, the majority fall below 40% in both architectures. On average across all layers and heads/groups, we observe approximately 10.9% density in the Trans-former model and 30.6% in the hybrid model. This concentration of importance mass indicates that a substantial portion of visual tokens contribute min-imally to query computation, suggesting that token reduction is feasible in principle for both model fam-ilies. Notably, Transformer attention layers tend to be sparser than Mamba layers, and within the hybrid model, attention layers also exhibit higher sparsity than their Mamba counterparts. However, sparsity alone does not determine reduction tolerance: as we show in Section 3, hybrid models tolerate significantly more aggressive reduction than Transformers despite their lower sparsity, a phenomenon we attribute to the memory effect of Mamba layers discussed in the following. 
+
+Limited Importance Consistency in Early Lay-ers. While sparsity indicates which tokens matter at a given layer, it does not reveal whether the same 
+
+tokens remain important across layers. In Figure 1 (top), we measure cross-layer stability of importance rankings by computing Kendall’s 𝜏 coefficient [ 18 ]between the importance rankings {𝑠 (ℓ) 
+
+> 𝑖
+
+} and {𝑠 (ℓ+1)  
+
+> 𝑖
+
+}
+
+at consecutive layers. This coefficient, defined as 
+
+𝜏 = ( 𝐶 − 𝐷 )/(︀ 𝑛 
+
+> 2
+
+)︀ where 𝐶 and 𝐷 count token pairs that maintain or swap their relative importance or-dering, quantifies whether the same tokens remain important across layers. A coefficient of 1.0 indicates that all pairwise orderings are preserved; values be-low 0.5 suggest that more than 25% of the token pairs have reverted ordering, indicating substantial importance ranking changes between layers. We observe that early layer correlations are unsta-ble for both architectures, making importance scores unreliable for early reduction decisions. For Trans-former models, correlation is low in early layers and only stabilizes after approximately one-third of the network depth. For hybrid models, correlation re-mains consistently low throughout. Interestingly, hy-brid models exhibit lower cross-layer consistency than Transformers on average. Yet despite this lower con-sistency, hybrid models tolerate significantly more aggressive reduction than Transformers at equivalent token budgets (Section 3, Table 2). We provide a hypothesis for this phenomenon in the following. 
+
+Mamba Memory State Is Key to Token Reduc-tion. The key insight is that cross-layer importance consistency and reduction tolerance are governed by different mechanisms. Transformer models rely ex-clusively on attention layers that process tokens in a memory-free fashion without persistent state, whereas hybrid models interleave attention with Mamba layers that maintain a recurrent memory state across posi-tions. For memory-free Transformers, token reduction is effectively dropping : once a token is pruned, its in-formation is permanently lost, and downstream layers 
+
+> 3Stateful Token Reduction for Long-Video Hybrid VLMs
+
+cannot recover it [ 19 ]. Low early layer correlation is therefore catastrophic, since tokens discarded based on unreliable early scores may become critical later. Hybrid models, in contrast, perform something closer to compression : the recurrent state in Mamba layers acts as an implicit memory that progressively accumu-lates information from all tokens into 𝑆 𝑡 . Even after a token is removed from active computation, its contri-bution persists in this compressed state representation. This retention enables minimal performance degreda-tion: hybrid models maintain an accuracy close to the baseline model under training-free reduction, and with fineturning it can even exceed the unreduced baseline (Section 3). This architectural distinction explains why hybrid models tolerate aggressive reduction despite lower cross-layer consistency, and motivates our progressive scheduling strategy: we preserve more tokens in early layers where importance scores are unreliable and the state has not yet accumulated sufficient informa-tion, then increase reduction as depth grows and the memory effect provides robustness. 
+
+2.3. Reduction Scheduling 
+
+We investigate how different reduction schedules in-teract with hybrid architectures, exploring a design space along two key dimensions: (1) where to apply reduction, i.e., which layer types; and (2) when to re-duce, i.e., early versus progressive. Figure 2 illustrates the schedules we consider. 
+
+Layer Type Selection. Hybrid models interleave attention and Mamba layers (see architecture in Fig-ure 2), raising the question of which layer types should perform reduction. We consider three options: 
+
+attention-only , where only attention layers compute importance scores and prune tokens while Mamba layers process the full sequence; attention + Mamba ,where we additionally insert one or two Mamba-based reduction between each pair of attention layers; and 
+
+all layers , where a fine-grain reduction is applied at every layer throughout the model. Attention-only re-duction is computationally simpler and leverages the natural sparsity of attention, while including Mamba layers enables finer-grained progressive pruning but requires computing the implicit importance scores defined in Equation (3). 
+
+Early versus Progressive Reduction. A second design choice is whether to perform a single aggressive reduction early or to distribute reduction gradually across layers. Early reduction prunes tokens once at the LLM input based on importance scores at early layers, following prior work on Transformer VLMs [ 20 ]. This minimizes overhead but commits to pruning deci-sions before the model has deeply processed the visual content. Progressive reduction instead preserves more tokens in early layers and gradually decreases the bud-get as depth increases, allowing the model to extract information before discarding tokens. Our analysis in Section 2.2 suggests that progressive schedules are better suited to the low cross-layer correlation we observe, since early importance scores are unreliable predictors of later relevance, deferring aggressive prun-ing reduces the risk of discarding critical information prematurely. For progressive schedules, we parameterize the to-ken retention ratio 𝑟 (ℓ) at layer ℓ as a monotonically decreasing function from an initial ratio 𝑟 start to a final target 𝑟 end . We consider two functional forms: (1) step decay , which holds the ratio constant across groups of layers before dropping, providing coarse-grained control; and (2) sigmoid decay [21 ], defined as 
+
+𝑟 (ℓ) = 𝑟 end + ( 𝑟 start − 𝑟 end ) · 𝜎 (−𝑘 (ℓ/𝐿 − 𝑥 0)) where 𝐿 
+
+is the total number of layers, 𝑘 controls the steepness, and 𝑥 0 determines the midpoint. The sigmoid form enables smooth transitions and concentrates reduc-tion in later layers when 𝑥 0 < 0.5; in our experiments, we fix 𝑘 = 20 and adjust 𝑥 0 to control the reduction position. For both functional forms, we evaluate tar-get token budgets of approximately 25%, 35%, and 50%. Our results show that the overall shape of re-duction, i.e., preserving more tokens in early layers, matters more than the specific functional form. We show the reduction curve on the functional forms in Figure 3. These scheduling choices interact with the archi-tectural properties identified in Section 2.2. The implicit memory in Mamba layers provides robust-ness to aggressive reduction; this benefit accumulates over depth as the state absorbs more information. Progressive schedules exploit this by allowing early layers to populate the state before aggressive pruning begins. Conversely, attention-only reduction avoids the overhead of computing Mamba importance scores while still benefiting from the state’s memory effect in unpruned Mamba layers. We evaluate these trade-offs empirically in Section 3. 
+
+## 3. Experiments 
+
+3.1. Experimental Setup Models. We adopt the pretrained SigLIP2 vision encoder [ 22 ] with patch size 16 at 384 ×384 resolu-tion, producing 576 patch tokens. An MLP projector then pools every four adjacent patches, yielding 144 visual tokens per frame. For the LLM stage, we study 
+
+> 4
+
+Stateful Token Reduction for Long-Video Hybrid VLMs M                                                                                                                     
+
+> P
+> AAttention
+> MLP
+> Mamba MToken Reduction Layers
+> A
+> MPMPMPMA
+> All attention + 1 Mamba reduction between attention layers (All attn+1M)
+> MPMPMPMAP
+> MPMPMPM
+> No Reduction (Baseline)
+> MPMPMPMAPA
+> MPPMPMAM
+> 1st attention layer (1st Attn)
+> MPPMPMPMA
+> MPPMPMA
+> All attention layers (All attn)
+> MPPMPMAPMM
+> MPPMPM
+> 1st Mamba layer (1st Mamba)
+> MPPMPMPAAMM
+> PPMPM
+> 2nd Mamba layer (2nd Mamba)
+> MPPMPMPAAMMM
+> MPMPMPMA
+> MPMPMPMA
+> 2143
+> 2143
+> MPMPMPMAP
+> MPMPMPMAP
+> 2143
+> 2143
+> All attention + 2 Mamba reduction between attention layers (All attn+2M, 2-3/1-3)
+
+Figure 2 | Hybrid Token Reduction Pat-terns used in our experiments. Layer types (Mamba/MLP/Attention) and reduction locations for baseline, attention-only, Mamba-only, and hybrid schedules ( All attn+1M /All attn+2M ). two architecture families: a dense Transformer and a Mamba–Transformer hybrid. For the Transformer set-ting, we use the pretrained Qwen3-VL 8B [ 23 ], built on a 36-layer Qwen3 Transformer with grouped-query attention. For the hybrid setting, we use Nemotron-Nano-V2 VL 12B [ 10 ], following the Nemotron-H hybrid [ 24 ] design that interleaves attention with Mamba-2 and FFN (MLP) blocks. Specifically, the 12B base architecture consists of 62 layers in total, with 28 Mamba-2, 28 FFN, and 6 self-attention layers (roughly 8%) evenly dispersed throughout the network. This setup enables us to study token reduction across both attention and Mamba layers and to compare its impact between Transformer and hybrid models. For both architectures, we reuse only the LLM backbones, integrate them with the SigLIP2 vision encoder and the random initialized vision-language projector and apply the identical multi-stage training recipe for both models to obtain the VLM models. 
+
+Training. Our training consists of four stages: (1) alignment (Stage 0), (2) SFT (Stage 1), (3) long-context finetuning (Stage 2), and (4) long-context finetuning with token-reduction (Stage 3). The max-imum number of frames per sample increases from 32 (Stage 1) to 64 (Stage 2) and 128 (Stage 3) to progressively adapt the model to long video inputs; the no-reduction baseline uses 96 frames in the final stage (without reduction), which is the largest that 0 10 20 30 40 50 60 
+
+Layer Index 
+
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> Token Retention Ratio (%)
+> Vertical lines indicate
+> attention layers
+> Token Reduction Across LLM Layers (Nemotron-H 12B)
+> No Reduction (Baseline)
+> Step Decay (All Attn)
+> Step Decay (All Attn + 2 Mamba)
+> Progressive Reduction (All)
+
+Figure 3 | Hybrid reduction schedules used in our experiments. We visualize how the token retention ratio changes with depth for Nemotron-Nano-V2 VL 12B. Curves compare (1) no reduction, (2) step decay at attention layers, (3) step decay at attention + inter-vening Mamba layers, and (4) progressive low-to-high reduction applied throughout the network. Vertical dotted lines indicate attention layers locations. fits in GPU memory. Following [ 25 ], Stage 0 uses 95K image–text pairs to align visual tokens to LLM by training only the MLP projector (vision encoder and LLM frozen). Stage 1 performs supervised fine-tuning (SFT) on a large, diverse mixture of ∼12.5M text/image/video examples (up to 32 frames). Stage 2 performs long-context finetuning on the LLaVA-Video dataset [ 26 ] (up to 64 frames). Finally, Stage 3 briefly finetunes the model with token reduction on long videos (up to 128 frames) using EAGLE-Video-110K [ 27 ], a dataset for long-video understanding that includes videos up to 3.5 hours. 
+
+Evaluation Benchmarks. We evaluate all token reduction techniques on three long-context video benchmarks: VideoMME [ 12 ], LongVideoBench (LongVB) [ 13 ], and LVBench [ 14 ]. VideoMME pro-vides broad video QA; we report VideoMME in the 
+
+w/o subtitles setting to isolate visual-temporal rea-soning without relying on transcript cues. LongVB evaluates QA over long clips (up to ∼1 hour), while LVBench targets substantially longer videos (30 min– 2 hrs), further emphasizes long-horizon reasoning. 
+
+Reduction Schedules. To systematically evaluate the design choices discussed in Section 2.3, we first test target token budgets of approximately 25%, 35%, and 50% under an attention-only reduction setting, which isolates the effect of budget on accuracy and latency (Table 2). We then fix the budget to 25% and compare different layer subsets, i.e., attention-only , Mamba-only , and attention+Mamba , to study how reduction interacts with layer type (Table 1). For Mamba-only , we additionally test early-layer-only reduction (1st vs. 2nd Mamba) to examine the spar-
+
+5Stateful Token Reduction for Long-Video Hybrid VLMs                                                                                                                                                                        
+
+> Token Reduction Reduction Layers # Red. Layers Comp. Rate (%) VideoMME (w/o sub) (1 ∼60m) LongVB (8s ∼60m) LVBench (30m ∼2h) Avg TTFT (s)
+> Baseline N/A 0100 69.22 65.30 51.39 61.97 2.26
+> Test-Time Reduction
+> Attn only 1st Attn 124.6 68 .93 (-0.29 )63 .05 (-2.25 )50 .23 (-1.16 )60 .74 (-1.23 )1.12 ( ×4.2) All attn 625.2 69 .22 (+ 0)64 .62 (-0.68 )51 .26 (-0.13 )61 .70 (-0.27 )1.14 ( ×4.1) Mamba only 1st Mamba 125.0 67 .70 (-1.52 )62 .60 (-2.7)48 .81 (-2.58 )59 .70 (-2.27 )1.2 ( ×3.9) 2nd Mamba 125.5 67 .93 (-1.29 )62 .23 (-3.07 )50 .94 (-0.45 )60 .37 (-1.6)1.22 ( ×3.8) Mamba+Attn All attn+1M 13 25.4 69 .22 (+ 0)63 .35 (-1.95 )53 .07 (+ 1.68 )61 .88 (-0.09 )1.2 ( ×3.9) All attn+2M 20 25.4 69 .26 (+ 0.04 )63 .05 (-2.25 )52 .10 (+ 0.71 )61 .47 (-0.5)1.2 ( ×3.9) All 32 25.1 68 .85 (-0.37 )64 .92 (-0.38 )52 .16 (+ 0.77 )61 .98
+> (+ 0.01 )1.21 ( ×3.8)
+> Train-Time Reduction
+> Attn only 1st attn 124.6 68 .74 (-0.48 )64 .92 (-0.38 )52 .87 (+ 1.48 )62 .18 (+ 0.21 )1.12 ( ×4.2) All attn 625.2 69 .59 (+ 0.37 )66 .12 (+ 0.82 )54 .10 (+ 2.71 )63 .27 (+ 1.3)1.14 ( ×4.1) Mamba only 1st Mamba 125.0 68 .04 (-1.18 )64 .10 (-1.2)51 .00 (-0.39 )61 .05 (-0.92 )1.2 ( ×3.9) 2nd Mamba 125.5 67 .07 (-2.15 )63 .50 (-1.8)52 .42 (+ 1.03 )61 .00 (-0.97 )1.22 ( ×3.8) Mamba+Attn All attn+1M 13 25.4 69 .00 (-0.22 )63 .35 (-1.95 )52 .62 (+ 1.23 )61 .66 (-0.31 )1.2 ( ×3.9) All attn+2M 20 25.4 69 .11 (-0.11 )63 .80 (-1.5)52 .81 (+ 1.42 )61 .91 (-0.06 )1.2 ( ×3.9) All 32 25.1 69 .70 (+ 0.48 )66 .04 (+ 0.74 )54 .29 (+ 2.9)63 .34
+> (+ 1.37 )1.21 ( ×3.8)
+
+Table 1 | Token Reduction Results with Various Reduction Patterns for Nemotron-Nano-V2 VL 12B . We report VideoMME (w/o subtitles), LongVideoBench (LongVB), and LVBench, comparing test-time (no finetuning) vs. train-time reduction (finetuned with reduction). "Reduction Layers" specifies where reduction is applied; "# Red. Layers" counts the layers with reduction; ( ·) donates change from baseline; TTFT speedups are relative to baseline. Reduction Patterns: 1st Attn /1st Mamba (first layer only), 
+
+All Attn (all attention), All Attn+1M/2M (all attention + 1/2 Mamba between attention blocks), All (all attention and Mamba); see Figure 2 for the pattern details. sity/stability effects observed by the analysis in Sec-tion 2.2. For attention-only , we compare pruning at a single attention layer (1st attention) vs. all atten-tion layers. Finally, to study reduction granularity, we evaluate intermediate hybrid configurations ( at-tention + 1 Mamba and attention + 2 Mamba ) that interpolate between attention-only and all-layer re-duction. We visualize the layer-wise schedules and hybrid layer-pattern variants used in our experiments in Figure 3 and Figure 2. We report all schedule parameters in Section A.3. 
+
+3.2. Results 
+
+Table 1 summarizes the impact of different token-reduction schedules on the Mamba–Transformer hy-brid model (Nemotron-Nano-V2 VL 12B) across three long-video benchmarks (VideoMME w/o subtitles, LongVideoBench (LongVB), and LVBench) together with Time to First Token (TTFT). When token re-duction is applied only at test time under a ∼ 25% 
+
+token budget (24.6–25.5%), accuracy is generally preserved but depends on where reduction is ap-plied. For instance, reducing only the first attention layer slightly lowers the average to 60.74 ( −1.23 ), while adding Mamba reduction between attention                    
+
+> Token Reduction Comp. Rate (%) Video MME (1 ∼
+> 60m) LongVB (8s ∼
+> 60m) LVBench (30m ∼
+> 2h) Avg TTFT(s)
+> Nemotron-Nano-V2 VLM 12B
+> Baseline 100 69.22 65.30 51.39 61.97 4.65 All attention layers 50.1 70 .00
+> (+ 0.78 )
+> 65 .74
+> (+ 0.44 )
+> 54 .42
+> (+ 3.03 )
+> 63 .39
+> (+ 1.42 )2.21 (×2.1) 34.7 70 .26
+> (+ 1.04 )
+> 66 .04
+> (+ 0.74 )
+> 54 .29
+> (+ 2.9)
+> 63 .53
+> (+ 1.56 )1.53 (×3) 25.2 69 .59
+> (+ 0.37 )
+> 66 .12
+> (+ 0.82 )
+> 54 .10
+> (+ 2.71 )
+> 63 .27
+> (+ 1.3)1.14 (×4.1)
+> Qwen3-VL 8B
+> Baseline 100 69.89 66.64 50.94 62.49 4.78 All attention layers 50.1 70 .52
+> (+ 0.63 )
+> 66 .79
+> (+ 0.15 )
+> 46 .93
+> (-4.01 )
+> 61 .41
+> (-1.08 )2.37 (×2) 34.7 68 .93
+> (-0.96 )
+> 66 .12
+> (-0.52 )
+> 45 .13
+> (-5.81 )
+> 60 .06
+> (-2.43 )1.61 (×3) 25.1 68 .41
+> (-1.48 )
+> 64 .62
+> (-2.02 )
+> 43 .19
+> (-7.75 )
+> 58 .74
+> (-3.75 )1.18 (×4.1)
+
+Table 2 | Varying compression rates with token reduction. We apply train-time token reduction at all attention layers (6 layers) for Nemotron-Nano-V2 VL 12B and Qwen3-VL 8B on VideoMME (w/o subtitles), LongVideoBench (LongVB), and LVBench. “Comp. Rate" is the remaining token ratio; ( ·) denote change from baseline. TTFT is measured on a single NVIDIA A100 with a 256-frame input. 
+
+6Stateful Token Reduction for Long-Video Hybrid VLMs                   
+
+> Token Reduct. Reduct. Layers (# Layers) TTFT (s) Reduct. Overhead (s)
+> Baseline N/A 4.65 0Attn only 1st attn (1) 1.12 ( ×4.2) 0.84 All attn (6) 1.14 ( ×4.1) 0.90 Mamba only 1st Mamba (1) 1.2 ( ×3.9) 0.94 2nd Mamba (1) 1.22 ( ×3.8) 0.97 Mamba +attn All attn+ 1M (13) 1.2 ( ×3.9) 0.98 All attn+ 2M (20) 1.2 ( ×3.9) 0.98 All (32) 1.21 ( ×3.8) 1.00
+
+Table 3 | Latency for Nemotron-Nano-V2 VL 12B . We report LLM-stage TTFT (including reduc-tion overhead) and reduction overhead on a single NVIDIA A100 with a 256-frame input. 1st Attn 
+
+/ 1st Mamba applies reduction only at the first at-tention/Mamba layer, while All Attn applies at all attention layers. All Attn + 1M/2M inserts one or two Mamba reduction between attention blocks, and 
+
+All applies reduction at every layer. See Figure 2 for the reduction patterns. blocks ( All attn+1M ) recovers long-horizon perfor-mance (LVBench 53.07, +1.68) and keep the aver-age near baseline (61.88, −0.09 ). In contrast, train-time reduction is consistently stronger. Reducing all attention layers ( All attn , 6 layers) improves all benchmarks (Avg 63.27, +1 .30 ), and reducing all at-tention and Mamba layers ( All , 32 layers) performs best overall (Avg 63.34, +1 .37 ). Overall, query-aware reduction improves efficiency and can also improve long-context reasoning, especially with train-time re-duction. 
+
+Compression Effects Across Architectures. 
+
+Table 2 varies the compression rate (token budget) for both hybrid and Transformer models while keeping the reduction pattern fixed to six attention-layers, with brief finetuning (train-time reduction). The two architectures show qualitatively different speed– quality behavior. For the hybrid model (Nemotron-Nano-V2), compression across all tested token budgets (50% to 25%) improves performance on all bench-marks (Avg +1 .3 – +1 .56 ), while reducing TTFT from 4.65 s to 2.21–1.14 s (2.1–4.1 ×). In contrast, the Transformer model (Qwen3-VL) improves only under mild compression (50%), and degrades across all benchmarks at 35.6% and 25.1%. This supports our analysis (Section 2.2) that aggressive compres-sion in dense Transformers (especially from the early layers) induces information loss that lightweight fine-tuning does not recover. We observe consistent trends under various reduction schedules (Section 3.5). In summary, token reduction improves both speed and quality in hybrids, while Transformers shows a more standard speed–accuracy trade-off. 32 64 128 256 512     
+
+> # Frames
+> 0
+> 1000
+> 2000
+> 3000
+> 4000
+> 5000
+> Latency (ms)
+> OOM
+> 3.8x faster
+> Hybrid 12B: Latency vs # Frames
+> No reduction
+> (baseline)
+> W/ reduction
+> (all layers)
+> 0
+> 800
+> 1600
+> 2400
+> Latency by Component
+> 82.1%
+> 57.2%
+> 2714 ms
+> 1080 ms
+> 2.51×
+> No reduction (baseline) W/ reduction (all layers) Vision Encoder Projector LLM
+
+Figure 4 | Latency Analysis for Nemotron-Nano-V2 VL 12B (hybrid). (left) LLM-stage latency vs. video frames on a single A100, with/without all-layer token reduction. (right) Component-wise latency (vision encoder / projector / LLM) for baseline vs. all-layer reduction on a 256-frame input. 
+
+3.3. Efficiency Analysis Latency Analysis. Table 3 reports a detailed TTFT analysis for Nemotron-Nano-V2 on a single NVIDIA A100 with a 256-frame input. At ∼ 25% 
+
+token budget, TTFT drops from 4.65 s to 1.12–1.22 s with 0.84–1.00 s reduction overhead. Adding Mamba-layer reduction slightly increases overhead, but all configurations still achieve 3.8–4.2 × speedups.              
+
+> Reduction Type Video-MME (w/o subtitle) TTFT (s)
+> Baseline 69.22 4.65 All query-based 69 .70 (+ 0.48 )1.21 ( ×1.9) Query-based (T) + Avg-pool (M) 66 .15 (-3.07 )1.18 ( ×1.9) All avg-pool 65 .67 (-3.55 )1.16 ( ×1.9)
+
+Table 4 | Token Reduction Types at 25% compres-sion. TTFT is LLM-stage latency on a single A100 with a 256-frame input.         
+
+> Reduction Pattern Video-MME (w/o subtitle)
+> Baseline 69.22 All A + 1 M (2) 69 .22 (+ 0)All A + 2 M (2-3) 69 .26 (+ 0.04 )All A + 2 M (1-3) 68 .26 (-0.96 )
+
+Table 5 | Mamba Token Reduction Patterns at 25% compression. ( ·) donates Mamba-layer indices where reduction is applied (see Figure 2 for the patterns details; the last three cases). 
+
+Component-wise Latency Analysis. Figure 4 (right) decomposes end-to-end latency for the hybrid model. The baseline is dominated by the LLM stage 
+
+7Stateful Token Reduction for Long-Video Hybrid VLMs                                                                                   
+
+> Model Type Model / Method Size VideoMME LongVB LVBench
+> (1 ∼60m) (8s ∼60m) (30m ∼2h)
+> Proprietary Models
+> Transformer GPT-4o [28] –71.9 66.7 34.7 Gemini-1.5-Pro [29] –75.0 64.0 33.1
+> Uniform Token Selection
+> Transformer LLaVA-Onevision [30] 7B 58.2 56.4 –Qwen2-VL [31] 7B 63.3 55.6 42.4 NVILA [32] 8B 64.2 57.7 –Apollo [33] 7B 61.3 58.5 –VideoLLaMA3 [34] 7B 66.2 59.8 45.3 Oryx-1.5 [35] 34B 67.3 62.0 30.8
+> Adaptive Token Selection/Reduction
+> Transformer MLLM-FS [36] 7B 58.7 57.0 –LongVU [37] 7B 60.6 ––SF-LLaVA-1.5 [38] 7B 63.9 62.5 45.3 ViLAMP [39] 7B 67.5 61.2 45.2 Qwen2.5 VL+SparseVILA [20] 7B 66.3 60.1 –Qwen2.5 VL+FlexSelect [6] 7B 68.2 62.4 51.2 LLaVA-Video+FlexSelect [6] 7B 68.9 61.9 52.9 Qwen2.5+FlexSelect [6] 72B 74.4 66.4 56.6 Our Token Reduction
+> Transformer Qwen3 VL + All layer reduction 8B 68.52 64.32 45.45 Hybrid Nemotron-Nano-V2 VL + All layer reduction 12B 69.70 66.04 54.29
+
+Table 6 | Comparison on Long-Video Benchmarks. We report scores on VideoMME (w/o subtitles), LongVB (LongVideoBench; 8s ∼60m), and LVBench (30m ∼2h) for proprietary, open-source LLMs with uniform/adaptive token selection, and our method. Ours use all-layer reduction for Qwen3-VL (Transformer) and Nemotron-Nano-V2 VL (Hybrid). (82.1%). With all-layer reduction, latency substan-tially decreases from 2714 ms to 1080 ms (2.51 ×) while the LLM portion of total runtime drops to 57.2%. 
+
+Latency Scaling with Video Length. Figure 4 (left) shows LLM-stage latency scaling with the num-ber of frames. Without reduction, latency grows steeply and hits out-of-memory (OOM) at 512 frames. With token reduction, latency grows more slowly with video length and the gap widens at longer inputs, high-lighting improved scalability for long-video inference. 
+
+3.4. Ablations Mamba Token-Reduction Patterns. Table 5 studies where Mamba-layer reduction is inserted when token reduction is applied to all attention layers (pat-terns shown in Figure 2). Adding one Mamba reduc-tion at the second inter-attention position ( All A + 1 M (2) ) matches baseline accuracy (69.22), and adding two reductions in middle positions ( All A + 2 M (2–3) ) slightly improves the accuracy (69.26, +0 .04 ). In contrast, including the earliest inter-attention loca-tion ( All A + 2 M (1–3) ) hurts performance (68.26, 
+
+−0.96 ), indicating that Mamba reduction is sensi-tive to the reduction location; applying reduction too early can remove information required by later layers, consistent with our analysis shown in Section 2.2. 
+
+Reduction Types. Table 4 compares the most common token selection/aggregation methods: query-based token selection and average pooling. Query-based selection at all layers achieves the best ac-curacy (69.70, +0.48) with a 1.9 × speedup. In contrast, replacing Mamba reduction with aver-age pooling ( Query-based (T) + Avg-pool (M) ) re-duces VideoMME to 66.15 ( −3.07 ), and average pool-ing everywhere performs worst (65.67, −3.55 ), de-spite similar speedups. Overall, query-based selection better preserves task-relevant information than local averaging under heavy compression. 
+
+3.5. Additional Results Transformer Results. Table 7 reports train-time token reduction on a Transformer architecture (Qwen3-VL 8B) using reduction positions aligned to the hybrid setup. Token reduction yields large TTFT gains (4.78 s → 1.07–1.18 s, up to 4.5 × speedup), com-parable to Nemotron-Nano-V2, but results in substan-tially larger accuracy drops, especially on LVBench. Across reduction schedules (6/13/20 layers and All ), the average decreases by roughly 3–4 points. Early-layer-only reduction is particularly harmful, consistent with our analysis (Section 2.2): importance is denser and less stable in early layers, so first-layer pruning discards information required by later layers. Fig-
+
+> 8
+
+Stateful Token Reduction for Long-Video Hybrid VLMs                   
+
+> Token Reduction Comp. Rate (%) Video MME (1 ∼
+> 60m) LongVB (8s ∼
+> 60m) LVBench (30m ∼
+> 2h) Avg TTFT (s)
+> Baseline 100 69.89 66.64 50.94 62.49 4.78
+> Train-Time Reduction
+> 1st layer 25.0 59 .52
+> (-10 .37 )
+> 55 .95
+> (-10 .69 )
+> 38 .28
+> (-12 .66 )
+> 51 .25 (-
+> 11 .24 )1.07 (×4.5) 6 layers 25.1 68 .41
+> (-1.48 )
+> 64 .62
+> (-2.02 )
+> 43 .19
+> (-7.75 )
+> 58 .74
+> (-3.75 )1.18 (×4.1) 13 layers 25.1 67 .93
+> (-1.96 )
+> 63 .65
+> (-2.99 )
+> 44 .29
+> (-6.65 )
+> 58 .62
+> (-3.87 )1.09 (×4.4) 20 layers 25.0 68 .00
+> (-1.89 )
+> 63 .87
+> (-2.77 )
+> 44 .16
+> (-6.78 )
+> 58 .68
+> (-3.81 )1.09 (×4.4) All 25.5 68 .52
+> (-1.37 )
+> 64 .32
+> (-2.32 )
+> 45 .45
+> (-5.49 )
+> 59 .43
+> (-3.06 )
+> 1.17 (×4.1)
+
+Table 7 | Token Reduction with Different Re-duction Patterns for Qwen3-VL 8B. Train-time reduction is applied at selected LLM layers (1st, 6/13/20, or all), using the same relative layer posi-tions as the hybrid setup. “Comp. Rate" is remaining tokens; ( ·) shows change from baseline. TTFT is LLM-stage latency on a single A100 with a 256-frame input. 32 64 128 256 512     
+
+> # Frames
+> 0
+> 2000
+> 4000
+> 6000
+> 8000
+> 10000
+> 12000
+> 14000
+> Latency (ms)
+> 4.9x faster
+> Transformer 8B: Latency vs # Frames
+> No reduction
+> (baseline)
+> W/ reduction
+> (all layers)
+> 0
+> 800
+> 1600
+> 2400
+> Latency by Component
+> 80.6%
+> 54.3%
+> 2381 ms
+> 1007 ms
+> 2.36×
+> No reduction (baseline) W/ reduction (all layers) Vision Encoder Projector LLM
+
+Figure 5 | Latency Analysis for Qwen3-VL 8B (Transformer). (left) LLM-stage latency vs. frames on a single A100, with/without token reduction. 
+
+(right) Component-wise latency (vision encoder / projector / LLM) on a 256-frame VideoMME input. ure 5 in the Appendix shows similar latency trends to the hybrid case: token reduction reduces LLM-stage latency increasingly with input length and reduces end-to-end latency by 2.36 × on a 256-frame input. 
+
+Comparisons with Other VLMs. Table 6 com-pares our method with proprietary models, open-source video LLMs, and prior uniform/adaptive token-selection approaches. A direct parameter-equivalent comparison is not always possible. To our knowl-edge, there is no publicly available hybrid video VLM in the 8B range, and existing 8B baselines dif-fer in vision backbones and training recipes, mak-ing strict apples-to-apples comparisons difficult. Ac-cordingly, our goal here is to demonstrate that our architecture-aware token reduction strategy is (i) effective on hybrids and (ii) competitive with strong Transformer token-selection methods. Despite these differences, our approach narrows the gap to much larger adaptive-selection models (e.g., 72B) on LongVideoBench and LVBench, while remaining com-petitive on VideoMME. 
+
+## 4. Related Works 
+
+Token reduction is widely used in multimodal LLMs to reduce redundant computation, especially for long video inputs. Token pruning methods are often grouped into query-agnostic approaches (based on visual similarity) and query-aware approaches (condi-tioned on language). Query-aware methods typically score tokens using text-to-vision attention or cross-modal similarity. FastV [ 1] prunes tokens using early attention signals, and SparseVLM [ 2] prunes visually irrelevant tokens using cross-attention scores. Instead of pruning, token merging aggregates redundant to-kens, such as multi-granular spatio-temporal token merging [ 7 ]. Most of these methods are designed around attention layers and do not explicitly model token importance inside non-attention blocks, which is important for hybrid architectures. Many works focus on long-video understanding by reducing temporal redundancy. FlexSelect [ 6 ], Dyn-Tok [ 8], and DyCoke [ 40 ] select or compress tokens for long videos, and METok [ 5 ] proposes multi-stage event-based compression. Our work also targets long-context video, but focuses on hybrid models and uses depth-dependent token-importance behavior to design reduction schedules. Another distinction is where reduction is applied. Some methods prune once early (before the LLM or at early layers) and keep the reduced set fixed. For example, FastV [ 1 ] prunes after early layers, and VisionSelector [ 41 ] selects tokens before the LLM. FlexSelect [ 6] and VISA [ 42 ] also produce a reduced token set for inference. Other methods prune pro-gressively across layers to reduce the sensitivity of early pruning. PyramidDrop [ 3] drops tokens across depth, and LaCo [ 43 ], VisionZip [ 44 ], DynTok [ 8], and METok [ 5] apply multi-layer or multi-stage reduction. Our method follows this direction and uses a progres-sive schedule that keeps more tokens early and prunes more later. 
+
+## 5. Conclusion 
+
+We studied query-conditioned token reduction for long-video VLMs with a focus on Mamba– Transformer hybrid. By analyzing layerwise sparsity 
+
+and importance stability across depth, we found weak 
+
+9Stateful Token Reduction for Long-Video Hybrid VLMs 
+
+cross-layer correlation in token importance, making aggressive early pruning unreliable. Guided by this observation, we proposed a low-to-high progressive reduction schedule and a unified language-aware scor-ing mechanism that enables reduction in both atten-tion and Mamba blocks. Across long-context video benchmarks, our approach achieves substantial pre-filling speedups under aggressive token budgets with near-baseline accuracy, and light finetuning further improves performance. 
+
+## 6. Impact Statements 
+
+This paper presents work whose goal is to advance the field of machine learning by improving the effi-ciency of long-video vision–language models. The primary intended impact is reduced inference latency and compute/energy cost for long-context video un-derstanding. Beyond this, we do not anticipate ad-ditional societal consequences that require specific discussion. 
+
+## 7. Acknowledgments 
+
+We would like to thank the NVIDIA Nemotron team for their help on the hybrid model and the NVIDIA VILA team for their support on the multimodal LLM codebase. We also thank Orazio Gallo, Abhishek Badki, and Hang Su for insightful discussions. 
+
+## References 
+
+[1] Liang Chen, Haozhe Zhao, Tianyu Liu, Shuai Bai, Junyang Lin, Chang Zhou, and Baobao Chang. An image is worth 1/2 tokens after layer 2: Plug-and-play inference acceleration for large vision-language models, 2024. [2] Yuan Zhang, Chun-Kai Fan, Junpeng Ma, Wenzhao Zheng, Tao Huang, Kuan Cheng, Denis Gudovskiy, Tomoyuki Okuno, Yohei Nakata, Kurt Keutzer, and Shanghang Zhang. Sparsevlm: Visual token sparsifi-cation for efficient vision-language model inference, 2025. [3] Long Xing, Qidong Huang, Xiaoyi Dong, Jiajie Lu, Pan Zhang, Yuhang Zang, Yuhang Cao, Conghui He, Jiaqi Wang, Feng Wu, et al. Pyramiddrop: Accel-erating your large vision-language models via pyra-mid visual redundancy reduction. arXiv preprint arXiv:2410.17247 , 2024. [4] Qizhe Zhang, Aosong Cheng, Ming Lu, Renrui Zhang, Zhiyong Zhuo, Jiajun Cao, Shaobo Guo, Qi She, and Shanghang Zhang. Beyond text-visual attention: Exploiting visual cues for effective token pruning in vlms. In Proceedings of the IEEE/CVF International Conference on Computer Vision , pages 20857–20867, 2025. [5] Mengyue Wang, Shuo Chen, Kristian Kersting, Volker Tresp, and Yunpu Ma. Metok: Multi-stage event-based token compression for efficient long video understanding. arXiv preprint arXiv:2506.02850 ,2025. [6] Yunzhu Zhang, Yu Lu, Tianyi Wang, Fengyun Rao, Yi Yang, and Linchao Zhu. Flexselect: Flexible token selection for efficient long video understanding. arXiv preprint arXiv:2506.00993 , 2025. [7] Jeongseok Hyun, Sukjun Hwang, Su Ho Han, Taeoh Kim, Inwoong Lee, Dongyoon Wee, Joon-Young Lee, Seon Joo Kim, and Minho Shim. Multi-granular spatio-temporal token merging for training-free ac-celeration of video llms. In Proceedings of the IEEE/CVF International Conference on Computer Vision , pages 23990–24000, 2025. [8] Hongzhi Zhang, Jingyuan Zhang, Xingguang Ji, Qi Wang, and Fuzheng Zhang. Dyntok: Dy-namic compression of visual tokens for efficient and effective video understanding. arXiv preprint arXiv:2506.03990 , 2025. [9] NVIDIA, :, Aarti Basant, Abhijit Khairnar, Abhijit Paithankar, Abhinav Khattar, Adithya Renduchin-tala, Aditya Malte, Akhiad Bercovich, Akshay Haz-are, Alejandra Rico, Aleksander Ficek, Alex Kon-dratenko, Alex Shaposhnikov, Alexander Bukharin, Ali Taghibakhshi, et al. Nvidia nemotron nano 2: An accurate and efficient hybrid mamba-transformer reasoning model, 2025. [10] NVIDIA, :, Amala Sanjay Deshmukh, Kateryna Chu-machenko, Tuomas Rintamaki, Matthieu Le, Tyler Poon, Danial Mohseni Taheri, Ilia Karmanov, Guilin Liu, Jarno Seppanen, Guo Chen, Karan Sapra, Zhid-ing Yu, Adi Renduchintala, Charles Wang, Peter Jin, Arushi Goel, Mike Ranzinger, Lukas Voegtle, Philipp Fischer, et al. Nvidia nemotron nano v2 vl, 2025. [11] Albert Gu and Tri Dao. Mamba: Linear-time se-quence modeling with selective state spaces. In First conference on language modeling , 2024. [12] Chaoyou Fu, Yuhan Dai, Yongdong Luo, Lei Li, Shuhuai Ren, Renrui Zhang, Zihan Wang, Chenyu Zhou, Yunhang Shen, Mengdan Zhang, et al. Video-mme: The first-ever comprehensive evaluation bench-mark of multi-modal llms in video analysis. In Pro-ceedings of the Computer Vision and Pattern Recog-nition Conference , pages 24108–24118, 2025. [13] Haoning Wu, Dongxu Li, Bei Chen, and Junnan Li. Longvideobench: A benchmark for long-context interleaved video-language understanding. Advances in Neural Information Processing Systems , 37:28828– 28857, 2024. 
+
+> 10 Stateful Token Reduction for Long-Video Hybrid VLMs
+
+[14] Weihan Wang, Zehai He, Wenyi Hong, Yean Cheng, Xiaohan Zhang, Ji Qi, Ming Ding, Xiaotao Gu, Shiyu Huang, Bin Xu, et al. Lvbench: An extreme long video understanding benchmark. In Proceedings of the IEEE/CVF International Conference on Computer Vision , pages 22958–22967, 2025. [15] Tri Dao and Albert Gu. Transformers are ssms: Generalized models and efficient algorithms through structured state space duality, 2024. [16] Angelos Katharopoulos, Apoorv Vyas, Nikolaos Pap-pas, and François Fleuret. Transformers are rnns: Fast autoregressive transformers with linear atten-tion. In International conference on machine learning ,pages 5156–5165. PMLR, 2020. [17] Shu Zhong, Mingyu Xu, Tenglong Ao, and Guang Shi. Understanding transformer from the perspective of associative memory. arXiv preprint arXiv:2505.19488 ,2025. [18] Maurice G Kendall. A new measure of rank correla-tion. Biometrika , 30(1-2):81–93, 1938. [19] Guangxuan Xiao. Why stacking sliding windows can’t see very far. https://guangxuanx.com/blog/ stacking-swa.html , 2025. [20] Samir Khaki, Junxian Guo, Jiaming Tang, Shang Yang, Yukang Chen, Konstantinos N Plataniotis, Yao Lu, Song Han, and Zhijian Liu. Sparsevila: Decou-pling visual sparsity for efficient vlm inference. In 
+
+Proceedings of the IEEE/CVF International Confer-ence on Computer Vision , pages 23784–23794, 2025. [21] Shiyu Zhao, Zhenting Wang, Felix Juefei-Xu, Xide Xia, Miao Liu, Xiaofang Wang, Mingfu Liang, Ning Zhang, Dimitris N Metaxas, and Licheng Yu. Acceler-ating multimodal large language models by searching optimal vision token reduction. In Proceedings of the Computer Vision and Pattern Recognition Confer-ence , pages 29869–29879, 2025. [22] Michael Tschannen, Alexey Gritsenko, Xiao Wang, Muhammad Ferjad Naeem, Ibrahim Alabdulmohsin, Nikhil Parthasarathy, Talfan Evans, Lucas Beyer, Ye Xia, Basil Mustafa, et al. Siglip 2: Multilingual vision-language encoders with improved semantic un-derstanding, localization, and dense features. arXiv preprint arXiv:2502.14786 , 2025. [23] Shuai Bai, Yuxuan Cai, Ruizhe Chen, Keqin Chen, Xionghui Chen, Zesen Cheng, Lianghao Deng, Wei Ding, Chang Gao, Chunjiang Ge, Wenbin Ge, Zhifang Guo, Qidong Huang, Jie Huang, Fei Huang, Binyuan Hui, Shutong Jiang, Zhaohai Li, Mingsheng Li, Mei Li, Kaixin Li, Zicheng Lin, Junyang Lin, Xuejing Liu, et al. Qwen3-vl technical report, 2025. [24] NVIDIA, :, Aaron Blakeman, Aarti Basant, Abhinav Khattar, Adithya Renduchintala, Akhiad Bercovich, Aleksander Ficek, Alexis Bjorlin, Ali Taghibakhshi, Amala Sanjay Deshmukh, Ameya Sunil Mahabalesh-warkar, Andrew Tao, Anna Shors, Ashwath Aithal, Ashwin Poojary, Ayush Dattagupta, Balaram Bud-dharaju, Bobby Chen, Boris Ginsburg, Boxin Wang, Brandon Norick, Brian Butterfield, Bryan Catanzaro, Carlo del Mundo, Chengyu Dong, et al. Nemotron-h: A family of accurate and efficient hybrid mamba-transformer models, 2025. [25] Jindong Jiang, Xiuyu Li, Zhijian Liu, Muyang Li, Guo Chen, Zhiqi Li, De-An Huang, Guilin Liu, Zhid-ing Yu, Kurt Keutzer, et al. Storm: Token-efficient long video understanding for multimodal llms. In 
+
+Proceedings of the IEEE/CVF International Confer-ence on Computer Vision , pages 5830–5841, 2025. [26] Yuanhan Zhang, Jinming Wu, Wei Li, Bo Li, Ze-jun Ma, Ziwei Liu, and Chunyuan Li. Video in-struction tuning with synthetic data. arXiv preprint arXiv:2410.02713 , 2024. [27] Guo Chen, Zhiqi Li, Shihao Wang, Jindong Jiang, Yicheng Liu, Lidong Lu, De-An Huang, Wonmin Byeon, Matthieu Le, Tuomas Rintamaki, et al. Ea-gle 2.5: Boosting long-context post-training for frontier vision-language models. arXiv preprint arXiv:2504.15271 , 2025. [28] Aaron Hurst, Adam Lerer, Adam P Goucher, Adam Perelman, Aditya Ramesh, Aidan Clark, AJ Os-trow, Akila Welihinda, Alan Hayes, Alec Rad-ford, et al. Gpt-4o system card. arXiv preprint arXiv:2410.21276 , 2024. [29] Gemini Team, Rohan Anil, Sebastian Borgeaud, Jean-Baptiste Alayrac, Jiahui Yu, Radu Soricut, Johan Schalkwyk, Andrew M Dai, Anja Hauth, Katie Milli-can, et al. Gemini: a family of highly capable mul-timodal models. arXiv preprint arXiv:2312.11805 ,2023. [30] Bo Li, Yuanhan Zhang, Dong Guo, Renrui Zhang, Feng Li, Hao Zhang, Kaichen Zhang, Peiyuan Zhang, Yanwei Li, Ziwei Liu, et al. Llava-onevision: Easy visual task transfer. arXiv preprint arXiv:2408.03326 ,2024. [31] Peng Wang, Shuai Bai, Sinan Tan, Shijie Wang, Zhi-hao Fan, Jinze Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin Ge, et al. Qwen2-vl: Enhancing vision-language model’s perception of the world at any res-olution. arXiv preprint arXiv:2409.12191 , 2024. [32] Zhijian Liu, Ligeng Zhu, Baifeng Shi, Zhuoyang Zhang, Yuming Lou, Shang Yang, Haocheng Xi, Shiyi Cao, Yuxian Gu, Dacheng Li, et al. Nvila: Efficient frontier visual language models. In Proceedings of the Computer Vision and Pattern Recognition Con-ference , pages 4122–4134, 2025. [33] Orr Zohar, Xiaohan Wang, Yann Dubois, Nikhil Mehta, Tong Xiao, Philippe Hansen-Estruch, Licheng Yu, Xiaofang Wang, Felix Juefei-Xu, Ning Zhang, et al. Apollo: An exploration of video understanding 
+
+> 11 Stateful Token Reduction for Long-Video Hybrid VLMs
+
+in large multimodal models. In Proceedings of the Computer Vision and Pattern Recognition Confer-ence , pages 18891–18901, 2025. [34] Boqiang Zhang, Kehan Li, Zesen Cheng, Zhiqiang Hu, Yuqian Yuan, Guanzheng Chen, Sicong Leng, Yuming Jiang, Hang Zhang, Xin Li, et al. Vide-ollama 3: Frontier multimodal foundation models for image and video understanding. arXiv preprint arXiv:2501.13106 , 2025. [35] Zuyan Liu, Yuhao Dong, Ziwei Liu, Winston Hu, Jiwen Lu, and Yongming Rao. Oryx mllm: On-demand spatial-temporal understanding at arbitrary resolution. arXiv preprint arXiv:2409.12961 , 2024. [36] Kai Hu, Feng Gao, Xiaohan Nie, Peng Zhou, Son Tran, Tal Neiman, Lingyun Wang, Mubarak Shah, Raffay Hamid, Bing Yin, et al. M-llm based video frame selection for efficient video understanding. In 
+
+Proceedings of the Computer Vision and Pattern Recognition Conference , pages 13702–13712, 2025. [37] Xiaoqian Shen, Yunyang Xiong, Changsheng Zhao, Lemeng Wu, Jun Chen, Chenchen Zhu, Zechun Liu, Fanyi Xiao, Balakrishnan Varadarajan, Florian Bor-des, et al. Longvu: Spatiotemporal adaptive compres-sion for long video-language understanding. arXiv preprint arXiv:2410.17434 , 2024. [38] Mingze Xu, Mingfei Gao, Shiyu Li, Jiasen Lu, Zhe Gan, Zhengfeng Lai, Meng Cao, Kai Kang, Yinfei Yang, and Afshin Dehghan. Slowfast-llava-1.5: Afamily of token-efficient video large language models for long-form video understanding. arXiv preprint arXiv:2503.18943 , 2025. [39] Chuanqi Cheng, Jian Guan, Wei Wu, and Rui Yan. Scaling video-language models to 10k frames via hierarchical differential distillation. arXiv preprint arXiv:2504.02438 , 2025. [40] Keda Tao, Can Qin, Haoxuan You, Yang Sui, and Huan Wang. Dycoke: Dynamic compression of tokens for fast video large language models. In Proceedings of the Computer Vision and Pattern Recognition Con-ference , pages 18992–19001, 2025. [41] Jiaying Zhu, Yurui Zhu, Xin Lu, Wenrui Yan, Dong Li, Kunlin Liu, Xueyang Fu, and Zheng-Jun Zha. Visionselector: End-to-end learnable visual token compression for efficient multimodal llms. arXiv preprint arXiv:2510.16598 , 2025. [42] Pengfei Jiang, Hanjun Li, Linglan Zhao, Fei Chao, Ke Yan, Shouhong Ding, and Rongrong Ji. Visa: Group-wise visual token selection and aggregation via graph summarization for efficient mllms infer-ence. In Proceedings of the 33rd ACM International Conference on Multimedia , pages 11130–11139, 2025. [43] Juntao Liu, Liqiang Niu, Wenchao Chen, Jie Zhou, and Fandong Meng. Laco: Efficient layer-wise com-pression of visual tokens for multimodal large lan-guage models. arXiv preprint arXiv:2507.02279 ,2025. [44] Senqiao Yang, Yukang Chen, Zhuotao Tian, Chengyao Wang, Jingyao Li, Bei Yu, and Jiaya Jia. Visionzip: Longer is better but not necessary in vision language models. In Proceedings of the Computer Vision and Pattern Recognition Conference , pages 19792–19802, 2025. [45] Songlin Yang, Bailin Wang, Yu Zhang, Yikang Shen, and Yoon Kim. Parallelizing linear transformers with the delta rule over sequence length. Advances in neural information processing systems , 37:115491– 115522, 2024. 
+
+> 12 Stateful Token Reduction for Long-Video Hybrid VLMs
+
+## A. Appendix 
+
+A.1. The Implicit Attention Mechanism of Mamba 
+
+We derive the implicit attention structure in selective state-space models (Mamba), showing how each out-put token aggregates information from all preceding tokens through learned, input-dependent weights. 
+
+A.1.1. State-Space Recurrence 
+
+Consider the discrete-time state-space recurrence in Mamba-2 [15]: 
+
+𝑆 𝑡 = ¯𝐴 𝑡 𝑆 𝑡 −1 + 𝑥 𝑡 (Δ 𝑡 𝑏 𝑡 )⊤, (4) 
+
+𝑦 𝑡 = 𝑆 𝑡 𝑐 𝑡 , (5) where 𝑆 𝑡 ∈ R𝑑 ×𝑛 is the hidden state matrix, ¯𝐴 𝑡 =exp (−Δ𝑡 𝐴 ) is the discretized state transition (a di-agonal matrix with entries in (0 , 1) ), 𝑥 𝑡 ∈ R𝑑 is the input, 𝑏 𝑡 , 𝑐 𝑡 ∈ R𝑛 are input-dependent projection vectors, and Δ𝑡 > 0 is the discretization step size. 
+
+A.1.2. Unrolling the Recurrence 
+
+Substituting Equation (4) into itself recursively: 
+
+𝑆 𝑡 = ¯𝐴 𝑡 𝑆 𝑡 −1 + 𝑥 𝑡 (Δ 𝑡 𝑏 𝑡 )⊤
+
+= ¯𝐴 𝑡 (︀ ¯𝐴 𝑡 −1𝑆 𝑡 −2 + 𝑥 𝑡 −1(Δ 𝑡 −1𝑏 𝑡 −1)⊤)︀ + 𝑥 𝑡 (Δ 𝑡 𝑏 𝑡 )⊤
+
+=
+
+> 𝑡
+
+∑︁ 
+
+> 𝑗 =1
+
+⎛⎝
+
+> 𝑡
+
+∏︁ 
+
+> 𝑢 =𝑗 +1
+
+¯𝐴 𝑢 
+
+⎞⎠ 𝑥 𝑗 (Δ 𝑗 𝑏 𝑗 )⊤. (6) Substituting into Equation (5): 
+
+𝑦 𝑡 = 𝑆 𝑡 𝑐 𝑡 =
+
+> 𝑡
+
+∑︁ 
+
+> 𝑗 =1
+
+⎛⎝
+
+> 𝑡
+
+∏︁ 
+
+> 𝑢 =𝑗 +1
+
+¯𝐴 𝑢 
+
+⎞⎠ 𝑥 𝑗 (Δ 𝑗 𝑏 𝑗 )⊤𝑐 𝑡 
+
+=
+
+> 𝑡
+
+∑︁ 
+
+> 𝑗 =1
+
+⎛⎝
+
+> 𝑡
+
+∏︁ 
+
+> 𝑢 =𝑗 +1
+
+¯𝐴 𝑢 
+
+⎞⎠ (Δ 𝑗 𝑏 𝑗 )⊤𝑐 𝑡 
+
+⏟ ⏞
+
+> 𝑤 𝑡,𝑗
+
+𝑥 𝑗 . (7) This reveals an attention-like structure: the out-put 𝑦 𝑡 is a weighted combination of all past inputs 
+
+{𝑥 𝑗 }𝑡 𝑗 =1 . The scalar weights 𝑤 𝑡,𝑗 depend on three factors: 1. Content alignment : 𝑏 ⊤ 
+
+> 𝑗
+
+𝑐 𝑡 measures the rele-vance between the input at position 𝑗 (encoded by 𝑏 𝑗 ) and the query at position 𝑡 (encoded by 
+
+𝑐 𝑡 ). 2. Input gating : Δ𝑗 controls how strongly position 
+
+𝑗 writes to the state. 3. Temporal decay :∏︀ 𝑡 𝑢 =𝑗 +1 ¯𝐴 𝑢 exponentially de-cays contributions from distant positions. Equation (7) suggests an intuitive role for 𝑏 and 
+
+𝑐 , we next formalize this by mapping the recurrence directly to the key-query formulation of Linear At-tention. This connection justifies our use of these projections for token selection.. 
+
+A.2. Token Selection via Mamba’s Recurrent Updates 
+
+Following existing works in analyzing the associative memory mechanism in attention [ 16 , 45 , 17 ], we draw a connection between standard Softmax attention and the recurrence in state-space models. This elucidates why the projections 𝑏 and 𝑐 function as keys and queries, respectively, and justifies their use as an importance metric. 
+
+A.2.1. Attention via Kernel Functions 
+
+We begin by expressing softmax attention in a more general form using kernel functions [ 17 ], which will reveal its structural similarity to Mamba’s recurrence. Standard softmax attention computes the output as a weighted sum of values: 
+
+𝑦 𝑡 =
+
+> 𝑡
+
+∑︁ 
+
+> 𝑗 =1
+
+exp( 𝑞 ⊤ 
+
+> 𝑡
+
+𝑘 𝑗 /√𝑑 )∑︀  
+
+> 𝑡 𝑖 =1
+
+exp( 𝑞 ⊤ 
+
+> 𝑡
+
+𝑘 𝑖 /√𝑑 ) 𝑣 𝑗 , (8) The key observation is that the exponential term 
+
+exp (𝑞 ⊤ 
+
+> 𝑡
+
+𝑘 𝑗 /√𝑑 ) can be viewed as a kernel function 
+
+𝜅 (𝑞 𝑡 , 𝑘 𝑗 ) that measures similarity between the query and key [ 16 ]. A kernel function can always be de-composed as an inner product in some (possibly high-dimensional) feature space: 𝜅 (𝑞 , 𝑘 ) = 𝜑 (𝑞 )⊤𝜑 (𝑘 ),where 𝜑 (·) is a feature map. This decomposition allows us to express the attention weight as a nor-malized inner product in feature space. By defining the normalization factor as 𝑍 𝑡 =∑︀ 𝑡 𝑖 =1 𝜑 (𝑞 𝑡 )⊤𝜑 (𝑘 𝑖 ),attention can be written as: 
+
+𝑦 𝑡 =
+
+> 𝑡
+
+∑︁ 
+
+> 𝑗 =1
+
+1
+
+𝑍 𝑡 
+
+⏟ ⏞ 
+
+> Normalization
+
+(︀ 
+
+𝜑 (𝑞 𝑡 )⊤𝜑 (𝑘 𝑗 ))︀ ⏟ ⏞
+
+> Attention Score
+
+𝑣 𝑗 . (9) This reformulation reveals that attention computes a weighted sum of values, where each weight is deter-mined by the similarity between the query and key in a feature space induced by 𝜑 . Different choices of the feature map 𝜑 yield different attention mechanisms: standard softmax attention corresponds to an expo-nential feature map 𝜑 (𝑥 ) = exp (𝑥 /√𝑑 ), while linear attention [16 ] uses the identity map 𝜑 (𝑥 ) = 𝑥 , giving 
+
+𝜅 (𝑞 , 𝑘 ) = 𝑞 ⊤𝑘 . The advantage of this kernel view is 
+
+> 13 Stateful Token Reduction for Long-Video Hybrid VLMs
+
+that when 𝜑 is simple (e.g., identity), the computation can be reorganized to avoid the quadratic complexity of standard attention. As we show below, Mamba’s recurrence can be viewed through this same lens, where the projections 
+
+𝑏 and 𝑐 play the roles of keys and queries, respec-tively. In this kernel form, the output decomposes into two factors: a normalization term (global 1/𝑍 𝑡 
+
+for attention, or temporal decay for Mamba) and a content-based alignment score 𝜑 (𝑞 𝑡 )⊤𝜑 (𝑘 𝑗 ) that mea-sures query-key compatibility. 
+
+A.2.2. The Implicit Attention in Mamba 
+
+Comparing this to the unrolled Mamba-2 output de-rived in Equation (7), we define the cumulative decay term 𝛼 𝑡,𝑗 to represent the aggregate state transition from step 𝑗 to 𝑡 : 𝛼 𝑡,𝑗 =∏︀ 𝑡 𝑢 =𝑗 +1 ¯𝐴 𝑢 . The Mamba update rule can then be written in a form structurally identical to Equation (9): 
+
+𝑦 𝑡 =
+
+> 𝑡
+
+∑︁ 
+
+> 𝑗 =1
+
+𝛼 𝑡,𝑗 
+
+⏟ ⏞ 
+
+> Decay
+
+(︀ 
+
+𝑐 ⊤ 
+
+> 𝑡
+
+(Δ 𝑗 𝑏 𝑗 ))︀ ⏟ ⏞
+
+> Attention Score
+
+𝑥 𝑗 . (10) This reveals a direct correspondence between the components of Softmax attention and Mamba: 
+
+• Query Mapping : The term 𝑐 𝑡 corresponds ex-actly to the mapped query 𝜑 (𝑞 𝑡 ).
+
+• Key Mapping : The term Δ𝑗 𝑏 𝑗 corresponds exactly to the mapped key 𝜑 (𝑘 𝑗 ).
+
+• Alignment Score : The dot product 𝑐 ⊤ 
+
+> 𝑡
+
+(Δ 𝑗 𝑏 𝑗 )
+
+acts as the kernel similarity 𝜅 (𝑞 𝑡 , 𝑘 𝑗 ), measuring the compatibility between position 𝑡 and position 
+
+𝑗 .The primary difference lies in the weighting term: whereas Attention uses a global normalization 1/𝑍 𝑡 
+
+(ensuring weights sum to 1), Mamba uses a time-dependent decay 𝛼 𝑡,𝑗 (ensuring older context fades away). 
+
+A.2.3. Resulting Token Selection Metric 
+
+Based on the mapping established above, we iden-tify ¯𝑏 ⊤ 
+
+> 𝑗
+
+𝑐 𝑡 (where ¯𝑏 𝑗 = Δ 𝑗 𝑏 𝑗 ) as a direct measure of query-visual alignment, analogous to the query-key dot product in attention. In our setting, where the input sequence consists of visual tokens followed by text (query) tokens, 𝑐 𝑡 is computed from the text token at position 𝑡 , while ¯𝑏 𝑗 is computed from the visual token at position 𝑗 with the gating factor Δ𝑗 
+
+absorbed. Mamba Layer 0 - No Decay Mamba Layer 0 - With Decay       
+
+> Mamba Layer 6 -No Decay Mamba Layer 6 -With Decay
+> Attention Weight Attention Weight
+> Visual Key Token Index Visual Key Token Index
+
+Figure 6 | Token Importance Heatmaps W/ and W/O the Decay Term on Two Mamba Layers. Left: using only the attention score |¯𝑏 ⊤ 
+
+> 𝑗
+
+𝑐 𝑡 | without decay (Equa-tion (3)) produces a more distributed importance pattern across the entire sequence. Right: following Mamba’s full implicit attention pattern |𝑤 𝑡,𝑗 | (Equa-tion (2)), these two layers concentrate the importance heavily on the most recent tokens. A logarithm color space is used in this figure. 
+
+Empirical Inspection of the Decay Effect. Fig-ure 6 visualizes token importance computed with and without the decay term across Mamba lay-ers. When following Mamba’s full implicit atten-tion pattern (Equation (10)), the cumulative decay 
+
+𝛼 𝑡,𝑗 =∏︀ 𝑡 𝑢 =𝑗 +1 ¯𝐴 𝑢 causes certain layers’ importance scores to concentrate heavily on tokens near the end of the visual sequence. This bias occurs when the diagonal elements of ¯𝐴 𝑢 (lie in (0 , 1) ) have relatively small values, causing the weights to decay exponen-tially with the distance between positions 𝑗 and 𝑡 .Consequently, early visual tokens receive near-zero importance regardless of their actual content relevance to the query. In contrast, when we compute importance us-ing only the attention score component ¯𝑏 ⊤ 
+
+> 𝑗
+
+𝑐 𝑡 with-out decay, the resulting heatmap shows a more dis-tributed importance pattern across the entire se-quence.Therefore, for token selection, we use the im-portance score: 
+
+𝑠 (ℓ, ssm ) 
+
+> 𝑖
+
+= 1
+
+𝑀 𝐺 ∑︁ 𝑚,𝑔 ⃒⃒⃒ 
+
+¯𝑏 (𝑔 )⊤ 
+
+> 𝑖
+
+𝑐 (𝑔 )
+
+> 𝑚
+
+⃒⃒⃒ , (11) averaging over 𝑀 query (text) positions and 𝐺 groups. 
+
+A.3. Reduction Schedule Configurations 
+
+Table 8 details the reduction schedule configurations used in our experiments on the Nemotron-Nano-V2 VL 12B hybrid model [ 10 ]. The model consists of 62 layers total (30 Mamba + 30 MLP + 6 attention), 
+
+> 14 Stateful Token Reduction for Long-Video Hybrid VLMs
+
+Layer Type Schedule Reduction Layers Comp. (%) Parameters 
+
+Attn Only: Token reduction applied only at the 6 attention layers at positions 7, 16, 25, 34, 43, 52 Attn Only Step Decay 1st Attn 24.6 𝛼 0:6 =1 .0; 𝛼 7:61 =0 .15 
+
+All Attn 25.2 𝛼 0:6 =1 .0; 𝛼 7:15 =0 .25 , 𝛼 16:33 =0 .20 , 𝛼 34:61 =0 .10 
+
+34.7 𝛼 0:6 =1.0; 𝛼 7:15 =0.50 , 𝛼 16:24 = 0.40 , 𝛼 25:33 =0.30 ,
+
+𝛼 34:42 =0 .20 , 𝛼 43:61 =0 .10 
+
+50.1 𝛼 0:6 =1.0; 𝛼 7:15 =0.65 , 𝛼 16:24 = 0.60 , 𝛼 25:33 =0.50 ,
+
+𝛼 34:42 =0 .40 , 𝛼 43:51 =0 .30 , 𝛼 52:61 =0 .20 
+
+Mamba Only: Token reduction only applied once at one early Mamba layer Mamba Only Step Decay 1st Mamba 25.0 𝛼 0:61 =0 .25 
+
+2nd Mamba 25.5 𝛼 0=1 .0; 𝛼 1:61 =0 .23 
+
+Mamba+Attn (Step Decay): Interleaving reduction with both attention layers and Mamba layers Mamba+Attn Step Decay All Attn+1M 25.4 𝛼 0= 1.0; 𝛼 1:33 : 0.32 →0.15 (6 attn + 1 mamba between each attn pair) All Attn+1M 25.4 𝛼 0= 1.0; 𝛼 1:33 : 0.32 →0.15 (6 attn + 2 mamba between each attn pair) 
+
+Mamba+Attn (Sigmoid): All layers reduction with sigmoid schedule 𝛼 ℓ = 𝛼 end + ( 𝛼 start − 𝛼 end ) · 𝜎 (𝑘 (𝑥 0 − ℓ/𝐿 )) 
+
+Mamba+Attn Sigmoid All 25.1 𝑘 =20 , 𝑥 0=0 .11 ; 𝛼 start =1 .0, 𝛼 end =0 .125 
+
+35.0 𝑘 =20 , 𝑥 0=0 .24 ; 𝛼 start =1 .0, 𝛼 end =0 .125 
+
+50.2 𝑘 =20 , 𝑥 0=0 .41 ; 𝛼 start =1 .0, 𝛼 end =0 .125 
+
+Table 8 | Complete reduction schedule configurations for hybrid models (Nemotron-Nano-V2 VL 12B). Following the official model configuration [ 10 ], we include layer indices for MLP layers when explaining the reduction parameters. Layer Type indicates the layer types performing token reduction: “Attn Only” applies reduction only at the 6 attention layers; “Mamba Only” includes reduction starting from a single Mamba layer; “Mamba+Attn” applies reduction at a subset or all 62 layers (excluding MLP layers). Reduction Layers specifies the layer subset: “1st Attn” reduces tokens starting from the first attention layer; “All attn” applies different rates at each of the 6 attention layers; “1st Mamba” and “2nd Mamba” for single Mamba layer configurations; “All Attn+1M” and “All Attn+2M” for 6 attention layers plus 1 or 2 Mamba reduction layers between each attention pair; “All” for all layers with progressive reduction. Layer indices are 0-indexed. All configurations enforce a minimum of 144 tokens to prevent reduction on single image data. where attention layers appear at positions 7, 16, 25, 34, 43, and 52 (0-indexed). In the table, 𝛼 ℓ denotes the token retention ratio at layer ℓ, i.e., the fraction of tokens kept after reduction (e.g., 𝛼 =0.25 means retaining 25% of tokens). We employ two schedule types: 
+
+Sigmoid Schedule. The retention rate 𝛼 ℓ at layer 
+
+ℓ follows a sigmoid function: 
+
+𝛼 ℓ = 𝛼 end + ( 𝛼 start − 𝛼 end ) · 𝜎 (︀ 𝑘 (𝑥 0 − ℓ/𝐿 ))︀ , (12) where 𝜎 (·) is the sigmoid function, 𝐿 is the total num-ber of layers, 𝑘 controls the steepness of the transition, and 𝑥 0 determines the midpoint point (as a fraction of total layers). A smaller 𝑥 0 delays reduction to later layers, implementing the low-to-high pattern that pre-serves more tokens early when importance scores are less reliable. Larger 𝑘 produces sharper transitions between high and low retention regions. In our experi-ments, we fix the steepness 𝑘 = 20 and the start value 
+
+𝛼 start = 1.0 (no reduction initially) and the end value 
+
+𝛼 end =0.125 (retain 12.5% at final layers), varying 
+
+𝑥 0 ∈ { 0.11 , 0.24 , 0.41 } to achieve compression rates of approximately 25%, 35%, and 50% respectively. The sigmoid schedule provides smooth, progressive transitions of the reduction rate across all layers. 
+
+Step Decay Schedule. The retention rate 𝛼 ℓ is specified explicitly for groups of layers, allowing fine-grained control over reduction patterns. For attention-only reduction, we define rates for the 6 attention positions. For example, 𝛼 0:6 = 1.0; 𝛼 7:61 = 0.15 means layers 0–6 retain all tokens while layers 7–61 (i.e., after the first attention layer) retain 15%. For hybrid reduc-tion spanning multiple layer types, we typically set 
+
+𝛼 0= 1.0 (no reduction at the first layer) and gradually decay across subsequent reduction layers. We hypoth-esize that this low-to-high sparsity levels allow the early Mamba layer to compress as much information as possible in the hidden state before the later layers 
+
+> 15 Stateful Token Reduction for Long-Video Hybrid VLMs
+
+starts to prune tokens. This pattern empirically yields better performance than uniform reduction variants, e.g., 1st Mamba or 2nd Mamba vatiants. 
+
+Layer Types. We evaluate three strategies for where to apply reduction: (1) Attention-only , reducing tokens only at the 6 attention layers; (2) Mamba-only ,reducing at early Mamba layers but maintain a rela-tively low sparsity on deeper layers; and (3) Hybrid (Mamba+Attn) , applying reduction at both attention and selected Mamba layers. For hybrid schedules, the notation “All Attn+1M” indicates 1 Mamba reduc-tion between each pair of attentions, so there are 6 attention layers plus 7 Mamba layers. Similarly, “All Attn+2M” indicates 2 Mamba layers between each pair of attentions. All configurations enforce a mini-mum of 144 tokens to preserve full tokens for image data in training.
