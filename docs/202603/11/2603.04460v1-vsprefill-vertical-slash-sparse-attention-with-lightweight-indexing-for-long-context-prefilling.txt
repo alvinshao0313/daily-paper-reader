@@ -1,0 +1,547 @@
+Title: VSPrefill: Vertical-Slash Sparse Attention with Lightweight Indexing for Long-Context Prefilling
+
+URL Source: https://arxiv.org/pdf/2603.04460v1
+
+Published Time: Fri, 06 Mar 2026 01:02:37 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# VSPrefill: Vertical-Slash Sparse Attention with Lightweight Indexing for Long-Context Prefilling 
+
+# Guanzhong Chen 
+
+School of Computer Science and Technology Tongji University 
+
+Abstract  
+
+> The quadratic complexity of self-attention during the prefill phase impedes long-context inference in large language models. Existing sparse attention methods face a trade-off among context adaptivity, sampling overhead, and fine-tuning costs. We propose VSPrefill, a mechanism requiring lightweight training that uses the vertical-slash structural pattern in attention distribu-tions. Our compact VSIndexer module predicts context-aware importance scores for vertical columns and slash diagonals from key-value representations augmented with RoPE. This approach constructs sparse masks with linear complexity without modifying the backbone pa-rameters. During inference, an adaptive cumulative-threshold strategy allocates sparsity budgets per layer, while a fused kernel executes attention with on-the-fly index merging. Evaluated on Qwen3-4B-Instruct and LLaMA-3.1-8B-Instruct across the LongBench and RULER benchmarks, VSPrefill preserves 98.35% of the full attention accuracy while delivering a 4.95 ×aver-age speedup at a context length of 128k. These results establish a new Pareto frontier in the trade-off between accuracy and efficiency.
+
+# 1 Introduction 
+
+Large language models (LLMs) have transformed paradigms across science and industry by demonstrating remarkable capabilities in comprehending and generating natural language. To address complex demands such as ultra-long document analysis and repository-level code generation, leading models like Qwen (Yang et al., 2025), Gemini (Team et al., 2023), and Claude (Caruccio et al., 2024) have scaled their context windows to the million-token level. However, this expansion introduces a computational bot-tleneck due to the quadratic complexity of the self-attention mechanism (Fu, 2024). As sequence length increases, the Time-to-First-Token (TTFT) grows significantly, which de-grades interactivity and increases deployment costs. This challenge has motivated research into sparse attention mech-anisms, based on the insight that full attention matrices are intrinsically sparse (Yuan et al., 2025; Li et al., 2024). Existing solutions generally fall into two categories, yet each faces limitations. Static approaches, such as BigBird (Zaheer et al., 2020) and StreamingLLM (Xiao et al., 2024), employ fixed, context-agnostic patterns. While efficient, their rigidity often fails to capture input-specific dependen-cies, leading to accuracy degradation. Dynamic approaches attempt to resolve this by adapting to the context. Training-free methods like Minference (Jiang et al., 2024) and Flex-Prefill (Lai et al., 2025) estimate patterns on-the-fly, but they often incur high runtime overhead due to iterative sampling. Among trainable methods, NativeSparseAttention (Yuan et al., 2025) requires fine-tuning the entire backbone, resulting in high training costs. While SeerAttention (Gao et al., 2024) adopts a frozen-backbone strategy, it remains restricted by the quadratic complexity of its 2D block-wise prediction, which limits acceleration potential. To address these limitations, we introduce VSPrefill, a sparse prefilling mechanism that achieves the accuracy of trainable methods with the efficiency of static patterns. Our approach is grounded in the empirical observation that salient attention weights naturally organize into a vertical-slash structure, which comprises global ”heavy hitters” (ver-tical) and relative position-dependent correlations (slash). VSPrefill exploits this structural prior through alightweight, frozen-backbone training paradigm consisting of three main components. First, we design a parameter-efficient VSIndexer that predicts vertical and slash impor-tance scores directly from RoPE-augmented keys and val-ues, decoupling mask construction from the quadratic at-tention map. Second, we employ a distillation scheme with a customized kernel that aggregates ground-truth vertical-slash distributions, enabling the indexer to learn accurate global patterns without materializing full attention matrices. Finally, we implement an adaptive inference pipeline with a fused TileLang kernel that performs on-the-fly index merg-ing and execution, achieving linear-complexity index pre-diction. We evaluate VSPrefill on state-of-the-art LLMs, includ-ing Qwen3-4B-Instruct and LLaMA-3.1-8B-Instruct, across the LongBench (Bai et al., 2024) and RULER (Hsieh et al., 2024) benchmarks. Experimental results demonstrate that VSPrefill significantly accelerates inference speed while preserving, and in some cases enhancing, model fidelity across diverse tasks and sequence lengths. 1VSIndexer  
+
+> Concat([K,V])
+> Full
+> Attn Q
+> K
+> VS Aggregate
+> KLdiv Loss 𝐴 𝑣
+> 𝐴 𝑠
+> መ𝐴 𝑣
+> መ𝐴 𝑠
+> Q
+> VSIndexer
+> Concat([K,V])
+> መ𝐴 𝑣
+> መ𝐴 𝑠
+> 𝐼 𝑣
+> 𝐼 𝑠
+> Top -k
+> KT
+> V
+> O
+> VS Sparse Attn
+> VS Mask
+> Training VSIndexer Inference with VSIndexer
+
+Figure 1: Overview of VSPrefill. The VSIndexer employs a shared-weight bilayer linear network that accepts concatenated key-value pairs as input and outputs vertical and slash attention scores, denoted as ˆAv and ˆAs. These scores are trained to approximate the ground-truth full attention weights aggregated along the corresponding directional patterns. During inference, 
+
+ˆAv and ˆAs undergo top-k selection with a dynamic sparsity budget to construct the vertical-slash sparse attention mask. Imple-mentation details, including the architecture of VSIndexer, RoPE, and sparse attention computation, are omitted for clarity. 
+
+# 2 Background 
+
+## 2.1 LLM Inference 
+
+Modern large language models (LLMs) are predominantly built upon the Transformer architecture (Vaswani et al., 2017), which stacks multiple decoder layers, each compris-ing a self-attention module and a multi-layer perceptron (MLP). Inference in LLMs operates through two distinct compu-tational phases: the prefill stage and the decoding stage (Fu, 2024; Zhen et al., 2025). The prefill stage processes the en-tire input sequence of length n in a single parallel forward pass. Here, the self-attention mechanism computes scores across all token pairs, which results in a quadratic time com-plexity Θ( n2). Unlike the decoding phase that benefits from linear complexity Θ( n), the prefill stage becomes computa-tionally prohibitive for long sequences. Experimental results with Qwen3-4B-Instruct (Yang et al., 2025) on H20 GPUs quantify this bottleneck. For a con-text of 256k tokens, self-attention consumes 57.76 seconds, representing 89.51% of the Time-to-First-Token (TTFT). Scaling to 1M tokens dramatically increases this cost, where attention computation exceeds one hour and accounts for 98.56% of the total latency. These observations confirm that the quadratic complexity of prefill attention constitutes the primary performance barrier in long-context scenarios. 
+
+## 2.2 Attention Computation 
+
+In the standard attention mechanism, the input sequence is projected into query, key, and value matrices, denoted as 
+
+Q, K, V ∈ Rn×d, where n represents the sequence length and d denotes the head dimension. The core operation com-putes the output O via the Scaled Dot-Product Attention: 
+
+P = QK ⊤ ∈ Rn×n, (1) 
+
+A = softmax 
+
+ P
+
+√d
+
+
+
+∈ [0 , 1] n×n, (2) 
+
+O = AV ∈ Rn×d. (3) Here, P represents the unnormalized attention scores cap-turing pairwise token interactions, and A denotes the nor-malized attention probability matrix. While FlashAtten-tion (Dao et al., 2022) optimizes memory access through tiling and kernel fusion, it does not reduce the theoretical FLOPs count. The inherent Θ( n2) complexity of the ma-trix multiplication QK ⊤ remains a critical bottleneck for processing million-token contexts, necessitating the devel-opment of efficient approximations. 
+
+## 2.3 Sparse Attention Formulation 
+
+Empirical studies demonstrate that the attention matrix A is inherently sparse, characterized by a heavy-tailed distribu-tion where a small subset of elements contributes the major-ity of the probability mass (Yuan et al., 2025; Li et al., 2024). This observation motivates sparse attention, which approxi-mates the full computation by retaining only a selected sub-set of query-key pairs indexed by a sparsity pattern S. The masked attention scores are computed as: 
+
+MS [i, j ] = 
+
+0 if (i, j ) ∈ S
+
+−∞ otherwise (4) 
+
+ˆA = softmax 
+
+ P
+
+√d + MS
+
+
+
+(5) To evaluate the information retention of a sparse pattern, we utilize the Attention Recall metric. For a given index set S,the recall R(S) is defined as the proportion of the original 2Figure 2: Accuracy and Perplexity Trends Across Different Attention Recall Levels on HotPotQA dataset. attention mass preserved within the selected indices: 
+
+R(S) = 1
+
+n
+
+> n−1
+
+X
+
+> i=0
+> n−1
+
+X
+
+> j=0
+
+A[i, j ] · I (i, j ) ∈ S, (6) where I(·) denotes the indicator function. The relevance of this metric is substantiated in Figure 2, which reveals a strong correlation between Attention Recall and down-stream metrics. Notably, the model achieves functional via-bility when Attention Recall exceeds 50%, characterized by stabilized perplexity and a plateauing accuracy curve. Fur-thermore, surpassing 90% recall yields performance indis-tinguishable from full attention. This monotonic relationship validates the use of Recall as a faithful surrogate objective for maintaining model fidelity. Consequently, the design of an optimal sparse attention mechanism can be formulated as a constrained optimization problem that maximizes recall subject to a computational budget k:
+
+max  
+
+> S
+
+R(S) (7) s.t. |S| ≤ k. (8) This formulation highlights the fundamental trade-off be-tween approximation fidelity and inference efficiency. Our proposed method, VSPrefill, addresses this optimization by predicting the structure of S through a decomposed vertical-slash representation. 
+
+# 3 Motivation 
+
+Recent scholarship has established that the self-attention mechanism possesses inherent sparsity (Yuan et al., 2025; Ji et al., 2021; Zaheer et al., 2020; Li et al., 2024; Jiang et al., 2024). However, this sparsity is dynamic, exhibit-ing a heterogeneous nature that fluctuates across model ar-chitectures, input contexts, and individual attention heads. Such dynamism presents substantial hurdles for the design of efficient sparse attention mechanisms. In this section, we first characterize these dynamic behaviors through empiri-cal analysis. Subsequently, we identify and provide a theo-retical basis for a prevalent structural phenomenon, termed the vertical-slash pattern , which underpins these dynamics. Finally, leveraging this structural insight, we decompose the intractable mask prediction problem into two sub-problems with linear complexity. 
+
+## 3.1 Dynamic Nature of Attention Sparsity 
+
+Through a systematic examination of attention distributions within the Qwen3-4B-Instruct model on the LongBench benchmark (Bai et al., 2024), we demonstrate that atten-tion sparsity is a dynamic property, as visualized in Figure 3, characterized by the following distinct features: • Intra-Group Consistency versus Inter-Group Diver-gence: Attention patterns remain highly consistent across heads within the same KV group (Figures 3a, 3b), validat-ing our strategy of sharing sparse masks per group. Con-versely, significant structural divergence exists between distinct KV groups and layers (Figures 3a, 3c, 3d), which necessitates group-specific prediction rather than a global uniform pattern. • Context Sensitivity: The sparse topology is strictly input-dependent. As shown in Figures 3a and 3e, varying input prompts induce observably different attention maps even under identical model configurations. • Model Dependence: Different architectures yield unique attention signatures, as evidenced by the distinct spar-sity profiles of Qwen3-4B-Instruct versus LLaMA-3.1-8B-Instruct (Figures 3a, 3f). These dynamic properties render static patterns, such as the fixed structures employed in StreamingLLM (Xiao et al., 2024), fundamentally insufficient for capturing ground-truth attention. To maintain high fidelity without performance degradation, a mechanism must dynamically determine both the topology , which dictates which tokens to select, and the 
+
+cardinality , which governs the size of the sparse index set. 
+
+## 3.2 Vertical-Slash Attention Sparse Pattern 
+
+Our empirical investigation reveals a pervasive and struc-tured motif within the attention matrices of long-context LLMs, which we term the vertical-slash pattern (visual-ized in Figure 3). This pattern exhibits a dual characteristic. The vertical lines represent ”heavy hitters,” which are global anchor tokens that sustain high attention regardless of dis-tance. Conversely, the slash lines denote position-dependent correlations where attention is maintained at specific rela-tive offsets. This structure generalizes the static ”A-shaped” prior (Xiao et al., 2024) by capturing not just local context and initial tokens, but also long-range, periodic dependen-cies inherent to complex reasoning. To analyze the genesis of the slash component, we visual-ize the aggregated attention scores along diagonal offsets in Figure 4. This heatmap exposes two properties. First, a high-intensity band near the main diagonal validates the strong inductive bias of local sliding windows for maintaining lin-guistic continuity. Second, discrete, high-activation vertical bands emerge at specific long-range offsets. These bands correspond to the ”slash” lines in the full matrix and persist across multiple heads within the same KV group. This ob-servation suggests that sparse attention correlations are sys-3(a) Reference Head (b) Intra-Group Head (c) Inter-Group Head (d) Different Layer (e) Different Prompt (f) Different Model 
+
+Figure 3: Visualization of dynamic attention sparsity patterns. (a-c) Comparisons reveal high structural similarity within the same KV group (Intra-Group) contrasted with distinct topologies across different groups (Inter-Group). (d) Sparsity patterns evolve significantly as network depth increases. (e-f) The distribution of salient weights shifts in response to varying input prompts and model architectures. 
+
+Figure 4: Diagonal-aggregated attention heatmap for Layer 0 of Qwen3-4B-Instruct on LongBench. The x-axis denotes the relative diagonal offset ( i−j) where 0 corresponds to the main diagonal. The emergence of distinct vertical bands at distal offsets validates the existence of consistent slash pat-terns, characterized by strong correlations at fixed relative distances across multiple heads. tematically established at specific relative distances rather than being randomly dispersed. We theoretically attribute this phenomenon to the Ro-tary Positional Embedding (RoPE) mechanism. In Ap-pendix A.1, we prove that under multivariate Gaussian as-sumptions for query and key distributions, the attention score expectation evolves as a function of the relative posi-tion i − j. This derivation mathematically elucidates why at-tention peaks manifest at regular intervals, providing a solid theoretical foundation for the observed slash pattern. 
+
+## 3.3 Linear-Complexity Mask Construction 
+
+The central challenge in sparse attention lies in accurately identifying the most salient query-key pairs within the atten-tion matrix. Existing block-wise prediction methods, such as SeerAttention (Gao et al., 2024), fail to escape quadratic complexity. By using the vertical-slash structure, we decom-pose the mask construction problem from a quadratic search space into two decoupled linear subspaces, thereby reducing the computational complexity to O(n).Formally, we define the sparse mask MS as follows: 
+
+MS [i, j ] = 
+
+0 if j ∈ Iv or (i − j) ∈ Is,
+
+−∞ otherwise , (9) where Iv and Is denote the sets of selected indices for the vertical and slash components, respectively. This decompo-sition allows us to reframe the original problem into two in-dependent constrained optimization tasks. For each direction 
+
+d ∈ { v, s }, we formulate the objective as maximizing the Attention Recall ( R), defined as the proportion of attention mass preserved by the selected indices, subject to a sparsity budget kd. The optimization problem is expressed as: 
+
+max 
+
+> Id
+
+R(Id)
+
+s.t. |Id| ≤ kd. (10) This formulation explicitly addresses the trade-off be-tween approximation fidelity (maximizing R) and compu-tational efficiency (adhering to budget kd). Our proposed method, VSPrefill, solves these linear-complexity problems via lightweight training to predict accurate, context-aware sparse patterns with minimal overhead. 
+
+# 4 Method 
+
+This section presents VSPrefill, a lightweight-training sparse attention mechanism that predicts context-aware vertical-slash patterns with favorable computational effi-ciency. Although existing approaches such as FlexPre-fill (Lai et al., 2025) and Sample Attention (Zhu et al., 2025) implicitly exploit vertical-slash structures through query sampling, they face a trade-off: single-point sampling incurs modest overhead yet fails to capture global patterns, whereas multi-point sampling reduces estimation variance at the cost of substantial computation that undermines accel-eration benefits. To resolve this, we propose a lightweight trainable module that accurately predicts vertical-slash pat-terns with minimal overhead. Our method comprises three core components: the VSIndexer prediction module design, vertical-slash aggregation for distillation training, and effi-cient vertical-slash sparse attention inference. 
+
+## 4.1 VSIndexer Design 
+
+The VSIndexer module predicts vertical and slash patterns with minimal additional computation. Its input is formed 4by concatenating the key matrix K (with Rotary Positional Embedding applied) and the value matrix V , forming X =concat( K, V ) ∈ Rn×2d. This design uses complementary signal sources: keys augmented with RoPE encode rich po-sitional relationships that substantially contribute to slash pattern detection, while values carry semantic information critical for identifying high-importance vertical columns. To maximize parameter efficiency and minimize both training and inference overhead, both vertical and slash scor-ing pathways share an initial linear up-projection layer fol-lowed by a non-linear activation σ:
+
+X = concat( K, V), (11) 
+
+Z = σ(XW U + bU ), (12) 
+
+ˆAv = softmax( ZW V + bV ), (13) 
+
+ˆAs = softmax( ZW S + bS ), (14) where WU ∈ R2d×dh and bU ∈ Rdh denote the shared projection parameters. Parameters WV , WS and their cor-responding biases bV , bS constitute independent down-projection layers that generate directional scoring vectors 
+
+Av , A s ∈ Rn, where each element corresponds to the im-portance score of a vertical column or slash diagonal. The use of softmax mimics the sharp, peak-dominated distribu-tions observed in ground-truth aggregated attention maps, thereby facilitating effective index selection by emphasizing the most salient positions. This design remains parameter-efficient while incurring a linear computational overhead of 
+
+O(nd h) per attention head. 
+
+## 4.2 Vertical-Slash Aggregation for Distillation Training 
+
+Direct co-training of the VSIndexer with the backbone model proves computationally prohibitive. Instead, we adopt a distillation paradigm that freezes all original parameters of the model and trains only the VSIndexer module using ground-truth attention distributions derived from full atten-tion computation. 
+
+Obtaining Ground Truth We aggregate full attention weights A = softmax( QK ⊤/√d) along vertical columns and slash diagonals to obtain target distributions Av and As.Conceptually, higher aggregated scores indicate greater con-tributions to attention recall, making accurate prediction of these distributions essential for effective sparse pattern se-lection. However, explicit extraction of A is infeasible for long sequences because modern LLM inference relies on FlashAttention (Dao et al., 2022), which fuses all attention operations into a single kernel and deliberately avoids ma-terializing intermediate attention matrices to maintain favor-able memory complexity. To address this challenge, we implement a customized FlashAttention kernel using TileLang that preserves the original computation flow while performing online aggrega-tion during block-wise attention computation. Specifically, after computing partial attention scores within each tile, our kernel accumulates contributions along vertical columns and slash diagonals without storing the full n × n matrix. Since aggregation compresses the n × n attention matrix into two 
+
+n-dimensional vectors whose elements sum to n, we nor-malize both Av and As by dividing by n to form proper probability distributions suitable for distillation. 
+
+Loss function design We employ KL divergence to align the predicted distributions ˆAv , ˆAs with their ground-truth counterparts Av , As:
+
+Av , A s = VSAggregate  softmax( QK ⊤
+
+√d ), (15) 
+
+ˆAv , ˆAs = VSIndexer( K, V), (16) 
+
+L = DKL ( ˆAv ∥ Av ) + DKL ( ˆAs ∥ As). (17) KL divergence encourages distributional matching rather than absolute magnitude learning, which proves more ef-fective than MSE for capturing the skewed, peaky nature of attention distributions. Moreover, separating losses for verti-cal and slash components enables the model to learn distinct characteristics of each pattern independently. 
+
+## 4.3 Efficient Vertical-Slash Sparse Attention Inference 
+
+After distillation training, the VSIndexer outputs scoring vectors ˆAv and ˆAs for vertical columns and slash offsets, respectively. 
+
+Adaptive Sparse Index Selection To achieve optimal re-source allocation, we employ a cumulative-threshold strat-egy that dynamically determines sparsity budgets based on the distribution of predicted importance scores. Unlike static or length-proportional methods, our approach first estab-lishes the sparsity budgets kv and ksby identifying the min-imum top-ranked elements needed to meet the cumulative mass thresholds τv and τs. Formally, for each direction 
+
+d ∈ { v, s }, the budget determination and subsequent index selection are defined as: 
+
+kd = min 
+
+(
+
+k
+
+> k
+
+X
+
+> i=1
+
+sort( ˆAd)i ≥ τd
+
+)
+
+, (18) 
+
+Id = TopK( ˆAd, k d). (19) This data-driven mechanism instills adaptivity across three critical dimensions: 1) context-awareness, where budgets automatically expand for high-complexity inputs and con-tract for simpler ones; 2) layer-specificity, allowing distinct layers to autonomously prioritize global information aggre-gation (vertical patterns) or local linguistic coherence (slash patterns); and 3) model-dependence, as the learned scoring distributions inherently capture the unique attention signa-tures of the underlying architecture. 
+
+Fused attention kernel implementation Implementing vertical-slash sparse attention efficiently presents non-trivial engineering challenges, as standard FlashAttention tiling strategies assume contiguous memory access patterns which are violated by the non-contiguous query-key pairs in our 5sparsity pattern, and naive index precomputation would in-cur prohibitive memory overhead. To address these issues, our fused kernel incorporates three key optimizations within a unified pipeline. First, we adopt a tiling strategy that reads sparse indices block-wise and fetches corresponding key-value pairs on demand, thereby reusing the optimized fused computation pipeline of FlashAttention. Second, rather than materializing a full index matrix, we compute merged in-dices on-the-fly during each query block processing; since both vertical and slash index lists are naturally sorted, their union is generated via an efficient GPU-parallel merge oper-ation based on the Merge Path algorithm (Green, McColl, and Bader, 2012), which partitions the workload evenly across threads. Third, the entire pipeline is implemented in TileLang to maximize hardware utilization and minimize kernel launch overhead, maintaining high GPU occupancy while avoiding excessive intermediate storage. 
+
+# 5 Experiments 
+
+We evaluate VSPrefill against state-of-the-art baselines to assess its performance in long-context scenarios. We first de-tail our experimental setup, including model architectures, benchmark datasets, and baseline methods. Subsequently, we analyze the performance across diverse tasks, examin-ing both the preservation of accuracy and the acceleration of inference under varying sequence lengths. 
+
+## 5.1 Experimental Setup 
+
+Models We evaluate VSPrefill on two widely adopted open-source LLMs: Qwen3-4B-Instruct (Yang et al., 2025) and LLaMA-3.1-8B-Instruct (Touvron et al., 2023). These models represent distinct architectural families and training paradigms, thereby providing a robust testbed for the as-sessment of generalization. All experiments employ the de-fault chat template provided by the official implementation of each model without modification. 
+
+Benchmarks We adopt two established long-context eval-uation suites to assess model capabilities across heteroge-neous tasks. LongBench (Bai et al., 2024) comprises multi-domain challenges spanning single- and multi-document question answering, summarization, few-shot learning, syn-thetic reasoning, and code generation. Complementarily, RULER (Hsieh et al., 2024) extends the needle-in-a-haystack paradigm with customizable sequence lengths and task complexities, introducing tasks of varying intrinsic dif-ficulty alongside novel evaluation dimensions such as multi-hop variable tracing and common word extraction. Together, these benchmarks provide orthogonal perspectives on long-context comprehension and retrieval fidelity. 
+
+Baselines We compare VSPrefill against four represen-tative attention mechanisms spanning the spectrum from dense computation to sparse approximation. FlashAtten-tion (Dao et al., 2022) serves as the exact attention base-line, employing hardware-aware kernel fusion to optimize memory I/O without compromising mathematical equiva-lence. StreamingLLM (Xiao et al., 2024) is a static sparse mechanism that retains initial attention sinks alongside a lo-cal sliding window; for evaluation, we configure it with 128 initial tokens and a 2048-token window. FlexPrefill (Lai et al., 2025) represents a training-free dynamic sparse attention method that estimates global patterns through local sam-pling and determines sparsity budgets via Jensen–Shannon divergence thresholds. We adopt its recommended hyperpa-rameters of 128 block size, γ = 0 .9, τ = 0 .1, and a mini-mum budget of 1024 tokens. Finally, SeerAttention (Gao et al., 2024) is a lightweight trainable approach that predicts block-wise sparse patterns through pooled query-key statis-tics and linear projection. We implement the configuration combining Qavg and Kmax-min-avg pooling strategies as sug-gested by the authors. 
+
+Implementation details We distill the VSIndexer mod-ule using the LongAlpaca dataset (Chen et al., 2024), which provides diverse long-form instruction-following examples with sequence lengths spanning from 2k to 32k tokens. Training utilizes AdamW with a peak learning rate of 1 ×
+
+10 −3, a 500-step linear warmup, and cosine decay. Training comprises 8,000 optimization steps with 8 gradient accumu-lation steps. VSIndexer employs SiLU activation and a 1024 intermediate dimension. Critically, the backbone is frozen and KV inputs are detached, restricting gradient updates ex-clusively to VSIndexer parameters. This design enables ef-ficient single-GPU training on an H20 GPU, completing the Qwen3-4B-Instruct adaptation within 6 GPU hours. To avoid the memory cost of materializing full atten-tion matrices during distillation, we implement a customized fused kernel based on TileLang that extends the FlashAtten-tion algorithm (Dao et al., 2022). Our kernel performs online aggregation of attention weights along vertical columns and slash diagonals directly within the block-wise computation pipeline, eliminating intermediate storage while preserving numerical accuracy. 
+
+## 5.2 Main Results 
+
+LongBench Table 2 summarizes performance across 13 diverse tasks. Baselines exhibit distinct task-specific deficits: StreamingLLM suffers on retrieval-intensive benchmarks due to its restricted local window; FlexPrefill struggles with complex multi-hop reasoning tasks like HotpotQA; and SeerAttention, while accurate, offers limited acceleration. VSPrefill surmounts these limitations, consistently ranking as the runner-up to full attention and occasionally surpassing it. This gain likely stems from the regularization effect induced by sparse computation, which mitigates overfitting to spurious long-range correla-tions. Overall, VSPrefill demonstrates exceptional fidelity, retaining 98.35% and 98.13% of the full attention accu-racy on Qwen3-4B-Instruct and LLaMA-3.1-8B-Instruct, respectively. 
+
+RULER Table 1 details the scalability analysis across se-quence lengths ranging from 4k to 128k tokens. Existing methods exhibit distinct limitations: StreamingLLM suf-fers catastrophic accuracy collapse beyond 32k despite high 6Table 1: Performance evaluation on the RULER benchmark across context lengths ranging from 4k to 128k. Bold values indicate the highest score within each model group (excluding FlashAttn); underlined values indicate the second-highest score. Speedup is relative to full attention.                                                                                                                                                                                                                                      
+
+> Model Method Length Avg. Score Avg. Speedup 4k 8k 16k 32k 64k 128k
+> Qwen3-4B-Instruct FlashAttn 77.99 79.40 80.23 78.96 84.00 77.41 79.67 –StrLLM 70.85 64.84 58.47 52.31 47.56 36.16 55.03 4.79 FlexPre 74.32 76.62 76.87 76.87 79.44 74.44 76.43 1.83 SeerAttn 77.10 78.24 79.92 77.16 81.43 64.45 76.38 1.67 VSPrefill 77.46 77.27 80.00 78.29 83.47 75.15 78.61 1.91 LLaMA-3.1-8B-Instruct FlashAttn 96.48 94.70 89.84 79.82 77.48 74.27 85.43 –StrLLM 82.02 69.76 45.56 30.77 12.52 6.64 41.21 6.71 FlexPre 93.19 93.41 90.83 77.58 75.27 73.80 84.01 1.69 SeerAttn 93.83 93.83 90.00 78.86 75.19 72.29 84.00 1.59 VSPrefill 96.67 94.50 90.68 78.26 75.34 72.76 84.70 1.75 Table 2: Performance evaluation on the LongBench benchmark across 13 diverse tasks. Bold values indicate the highest score within each model group (excluding FlashAttn); underlined values indicate the second-highest score.
+> Model Method Qasper MNews Trec 2WikiQA LCC MF-en GovRep PsgRetr PsgCnt SamSum RBench HotPot TriviQA Avg.
+> Qwen3-4B-Instruct FlashAttn 40.66 22.12 72.67 40.28 6.41 50.53 30.75 100.00 1.45 35.98 8.25 57.61 85.49 42.48 StrLLM 31.62 22.22 73.00 26.57 6.07 33.76 30.60 38.17 2.89 36.64 7.13 35.83 84.29 32.98 FlexPre 37.90 22.40 74.00 31.50 4.68 50.85 30.22 51.78 2.06 36.72 7.24 47.91 83.24 36.96 SeerAttn 41.90 22.11 70.33 38.68 5.00 47.31 30.64 100.00 1.48 34.08 7.46 57.39 84.04 41.57 VSPrefill 42.39 22.33 73.67 37.50 5.09 48.11 30.71 100.00 1.21 36.15 9.24 52.59 84.21 41.78
+> LLaMA-3.1-8B-Instruct FlashAttn 42.98 26.18 8.00 43.46 26.28 55.25 34.93 99.67 11.72 8.13 22.81 60.94 88.76 40.70 StrLLM 34.47 25.59 5.67 29.12 26.97 32.53 34.35 69.00 10.54 8.27 23.75 36.66 90.49 32.88 FlexPre 39.79 25.93 8.67 33.15 27.73 53.49 34.30 80.67 5.86 16.59 26.22 55.31 89.58 38.25 SeerAttn 42.74 24.88 6.33 41.04 26.12 52.76 35.10 99.33 11.60 8.03 22.56 57.73 87.59 39.68 VSPrefill 43.52 26.02 4.67 41.52 26.05 54.04 35.12 99.33 11.39 8.06 22.46 58.58 88.41 39.94
+
+speed; FlexPrefill degrades at extreme lengths due to accu-mulated sampling errors; and SeerAttention provides only modest acceleration due to quadratic prediction overhead. In contrast, VSPrefill achieves a superior equilibrium. On Qwen3-4B-Instruct, it delivers a 1.91 × average speedup while limiting accuracy degradation to within 1.1% rel-ative to the full attention baseline, even at 128k tokens. This robustness consistently generalizes to LLaMA-3.1-8B-Instruct, where our method achieves 1.75 × acceleration with negligible accuracy loss ( < 1.5% ). Collectively, these findings validate VSPrefill as a robust solution that con-sistently harmonizes inference speed with retrieval fidelity across varying sequence lengths. 
+
+Accuracy–speedup trade-off Figure 5 visualizes the Pareto frontier of accuracy versus speedup for Qwen3-4B-Instruct across three representative sequence lengths. While StreamingLLM occupies the extreme speedup region at the cost of severe quality degradation, and both Seer-Attention and FlexPrefill serve as intermediate operating points, VSPrefill establishes a new Pareto-optimal curve that demonstrates exceptional scalability. In the 32k–64k regime, our method achieves lossless acceleration and superior gen-eralization, consistently outperforming all baselines. Criti-cally, this robustness persists into the extreme 128k context, where VSPrefill preserves 98.35% of full attention accuracy while delivering a 4.95 × speedup. Under aggressive bud-gets, this acceleration can be further extended to 8.42 ×. Col-lectively, these results demonstrate that VSPrefill effectively addresses the performance degradation issues common in prior works without requiring backbone retraining. These results collectively demonstrate that VSPrefill ef-fectively bridges the gap between static patterns and heavy-weight trainable methods. Its lightweight training paradigm yields context-aware sparse patterns with minimal overhead, while the vertical-slash decomposition ensures theoretically grounded linear-complexity sparse pattern prediction. Con-sequently, VSPrefill delivers state-of-the-art performance across accuracy, speedup, and adaptability dimensions for long-context LLM inference. 7(a) 32K Context (b) 64K Context (c) 128K Context 
+
+Figure 5: Accuracy vs. Speedup across different Attention mechanism on context length ranging from 32k to 128k. Table 3: Attention Recall (%) comparison across different sparsity rates.         
+
+> Method Sparsity Rate 50% 90% 95% 99%
+> Random 47.70 9.73 4.94 0.98 Sampling 66.33 57.36 46.57 27.78
+> VSPrefill 97.50 88.48 83.68 72.15
+
+Table 4: Ablation study on loss functions (70% sparsity).      
+
+> Loss Function Recall (%)
+> KL Divergence 92.65
+> MSE 85.00 MSLE 85.65 Cosine Similarity 89.88
+
+## 5.3 Ablation Study 
+
+Analysis of Sparsity Strategies To evaluate robustness across sparsity levels from 50% to 99%, we benchmark VSPrefill against Random selection and Importance Sam-pling. Random selection exhibits a strict linear decay in re-call relative to the retention rate which indicates a funda-mental inability to distinguish salient information. While Importance Sampling performs better, it degrades rapidly to 27.78% at the extreme. In contrast, VSPrefill demonstrates superior resilience by sustaining a Recall of 72.15% even at 99% sparsity and validates the efficacy of learned vertical-slash patterns in isolating high-utility information. 
+
+Analysis of Loss Functions We compare the Attention Recall of models trained using four loss functions includ-ing KL divergence, MSE, MSLE, and Cosine Similarity at a fixed 70% sparsity level. MSE and MSLE priori-tize numerical magnitude over distributional nuances and consequently yield suboptimal Recall scores around 85%. Although Cosine Similarity captures vector orientation to achieve 89.88%, KL divergence proves optimal. It attains the highest Recall of 92.65% by explicitly aligning probability Table 5: Ablation study on VSIndexer input feature combi-nations.             
+
+> Input Type Recall (%) Loss
+> Query (Q) 91.08 5.78 Key (K) 92.34 3.59 Value (V) 91.97 4.23 Query-Key (QK) 92.26 3.61
+> Key-Value (KV) 92.66 3.46
+
+distributions to minimize the divergence from ground-truth patterns. 
+
+Analysis of Input Combinations To determine the opti-mal configuration for VSIndexer, we examine five feature combinations including single and dual feature sets. We strictly ensure fairness by normalizing the parameter count across experiments and assign a hidden dimension of 2048 to single-feature inputs and 1024 to dual-feature combina-tions. The results identify the RoPE-encoded Key matrix as the decisive predictor since configurations lacking K sig-nificantly underperform. Specifically, the Q-only input in-curs the highest loss of 5.78. Ultimately, the KV combi-nation attains the lowest Loss of 3.46 and a peak Recall of 92.66%. This superiority arises because the Key matrix en-codes both critical positional cues and dominant semantic information while the Value matrix provides essential sup-plementary features to perfect the sparse pattern reconstruc-tion. 
+
+# 6 Conclusion and Future Work 
+
+This paper introduces VSPrefill, a lightweight sparse at-tention mechanism that exploits the vertical-slash struc-tural pattern inherent in long-context attention to acceler-ate LLM inference while preserving fidelity. Our approach employs a compact VSIndexer network to predict context-aware vertical and slash patterns per KV group with min-imal training overhead, keeping the backbone frozen. Spe-cialized fused kernels facilitate efficient attention aggrega-tion during distillation and high-throughput sparse execution 8during inference. Experiments across mainstream LLMs and long-context benchmarks demonstrate that VSPrefill main-tains near-full attention accuracy while delivering substan-tial speedups, establishing a new Pareto frontier in the accuracy–efficiency trade-off. Future work includes inte-grating sparse pattern prediction into pre-training for in-herent acceleration without accuracy loss, and extending vertical-slash principles to the decoding stage via adaptive KV cache compression for extremely long-generation tasks. 
+
+# References 
+
+Bai, Y.; Lv, X.; Zhang, J.; Lyu, H.; Tang, J.; Huang, Z.; Du, Z.; Liu, X.; Zeng, A.; Hou, L.; Dong, Y.; Tang, J.; and Li, J. 2024. LongBench: A bilingual, multitask bench-mark for long context understanding. In Proceedings of the 62nd Annual Meeting of the Association for Computa-tional Linguistics (Volume 1: Long Papers) , 3119–3137. Bangkok, Thailand: Association for Computational Lin-guistics. Caruccio, L.; Cirillo, S.; Polese, G.; Solimando, G.; Sun-daramurthy, S.; and Tortora, G. 2024. Claude 2.0 large language model: Tackling a real-world classifica-tion problem with a new iterative prompt engineering ap-proach. Intelligent Systems with Applications 21:200336. Chen, Y.; Qian, S.; Tang, H.; Lai, X.; Liu, Z.; Han, S.; and Jia, J. 2024. Longlora: Efficient fine-tuning of long-context large language models. In The International Con-ference on Learning Representations (ICLR) .Dao, T.; Fu, D. Y.; Ermon, S.; Rudra, A.; and R´ e, C. 2022. FlashAttention: Fast and memory-efficient exact attention with IO-awareness. In Advances in Neural Information Processing Systems (NeurIPS) .Fu, Y. 2024. Challenges in deploying long-context trans-formers: A theoretical peak performance analysis. arXiv preprint arXiv:2405.08944 .Gao, Y.; Zeng, Z.; Du, D.; Cao, S.; So, H. K.-H.; Cao, T.; Yang, F.; and Yang, M. 2024. Seerattention: Learning intrinsic sparse attention in your llms. arXiv preprint arXiv:2410.13276 .Green, O.; McColl, R.; and Bader, D. A. 2012. Gpu merge path: A gpu merging algorithm. In Proceedings of the 5th Workshop on General Purpose Processing with GPUs ,61–68. ACM. Hsieh, C.-P.; Sun, S.; Kriman, S.; Acharya, S.; Rekesh, D.; Jia, F.; Zhang, Y.; and Ginsburg, B. 2024. Ruler: What’s the real context size of your long-context language mod-els? arXiv preprint arXiv:2404.06654 .Ji, T.; Jain, S.; Ferdman, M.; Milder, P.; Schwartz, H. A.; and Balasubramanian, N. 2021. On the distribution, spar-sity, and inference-time quantization of attention values in transformers. In Findings of the Association for Compu-tational Linguistics: ACL-IJCNLP 2021 , 4147–4157. On-line: Association for Computational Linguistics. Jiang, H.; Li, Y.; Zhang, C.; Wu, Q.; Luo, X.; Ahn, S.; Han, Z.; Abdi, A. H.; Li, D.; Lin, C.-Y.; Yang, Y.; and Qiu, L. 2024. MInference 1.0: Accelerating pre-filling for long-context LLMs via dynamic sparse attention. In The Thirty-eighth Annual Conference on Neural Information Processing Systems .Lai, X.; Lu, J.; Luo, Y.; Ma, Y.; and Zhou, X. 2025. Flex-prefill: A context-aware sparse attention mechanism for efficient long-sequence inference. In The Thirteenth In-ternational Conference on Learning Representations .Li, Y.; Huang, Y.; Yang, B.; Venkitesh, B.; Locatelli, A.; Ye, H.; Cai, T.; Lewis, P.; and Chen, D. 2024. SnapKV: LLM knows what you are looking for before generation. In The Thirty-eighth Annual Conference on Neural Information Processing Systems .Team, G.; Anil, R.; Borgeaud, S.; Alayrac, J.-B.; Yu, J.; Sori-cut, R.; Schalkwyk, J.; Dai, A. M.; Hauth, A.; Millican, K.; et al. 2023. Gemini: a family of highly capable mul-timodal models. arXiv preprint arXiv:2312.11805 .Touvron, H.; Lavril, T.; Izacard, G.; Martinet, X.; Lachaux, M.-A.; Lacroix, T.; Rozi` ere, B.; Goyal, N.; Hambro, E.; Azhar, F.; et al. 2023. Llama: Open and efficient founda-tion language models. arXiv preprint arXiv:2302.13971 .Xiao, G.; Tian, Y.; Chen, B.; Han, S.; and Lewis, M. 2024. Efficient streaming language models with attention sinks. In The Twelfth International Conference on Learning Representations .Yang, A.; Li, A.; Yang, B.; Zhang, B.; Hui, B.; Zheng, B.; Yu, B.; Gao, C.; Huang, C.; Lv, C.; et al. 2025. Qwen3 technical report. arXiv preprint arXiv:2505.09388 .Yuan, J.; Gao, H.; Dai, D.; Luo, J.; Zhao, L.; Zhang, Z.; Xie, Z.; Wei, Y.; Wang, L.; Xiao, Z.; Wang, Y.; Ruan, C.; Zhang, M.; Liang, W.; and Zeng, W. 2025. Native sparse attention: Hardware-aligned and natively trainable sparse attention. In Che, W.; Nabende, J.; Shutova, E.; and Pile-hvar, M. T., eds., Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , 23078–23097. Vienna, Austria: Associ-ation for Computational Linguistics. Zaheer, M.; Guruganesh, G.; Dubey, K. A.; Ainslie, J.; Pham, C.; Kale, S.; Li, S.; Ahn, S.; Bertoldi, M.; Dogan, C.; et al. 2020. Big bird: Transformers for longer se-quences. In Advances in Neural Information Processing Systems , volume 33, 17283–17297. Zhen, R.; Li, J.; Ji, Y.; Yang, Z.; Liu, T.; Xia, Q.; Duan, X.; Wang, Z.; Huai, B.; and Zhang, M. 2025. Taming the titans: A survey of efficient LLM inference serving. In Flek, L.; Narayan, S.; Phuong, L. H.; and Pei, J., eds., 
+
+Proceedings of the 18th International Natural Language Generation Conference , 522–541. Hanoi, Vietnam: Asso-ciation for Computational Linguistics. Zhu, Q.; Duan, J.; Chen, C.; Liu, S.; Li, X.; Feng, G.; Lv, X.; Chuanfu, X.; Lin, D.; and Yang, C. 2025. Sampleatten-tion: Near-lossless acceleration of long context llm infer-ence with adaptive structured sparse attention. Proceed-ings of Machine Learning and Systems 7. 9A Appendix 
+
+## A.1 Slash Pattern Analysis 
+
+In this section, we investigate the origin of the slash-shaped attention pattern through a combination of empirical analysis and theoretical derivation. By visualizing attention distributions after averaging queries and keys along different dimensions, we hypothesize that the feature-dimensional distributions of Q and K follow a multivariate Gaussian with structured covariance. This hypothesis is validated through feature-wise distribution visualizations in the Qwen3-4B-Instruct model. Based on this statistical characterization, we analytically derive that the expected value of the QK ⊤ product depends solely on the relative positional offset between tokens. This derivation formally explains the emergence of the slash pattern as a direct consequence of the rotational encoding of RoPE under Gaussian-distributed query and key representations. 
+
+Attention pattern under dimensional averaging We visualize slash-pattern attention distributions after averaging queries and keys along the sequence and/or feature dimensions prior to RoPE encoding (Figure 7). The results reveal a clear asym-metry: averaging along the sequence dimension preserves the slash pattern with minimal distortion, whereas averaging along the feature dimension —either alone or jointly with the sequence dimension—significantly degrades the pattern. The latter cases exhibit two characteristic artifacts: (1) shifts in attention peak locations and (2) diffusion of attention mass, causing the distribution to become flatter and spatially blurred. This indicates that the positional encoding of RoPE is highly sensitive to feature-level averaging but robust to sequence-level smoothing. This not only demonstrates a strong association between the slash pattern and the positional encoding of RoPE, but also suggests that the feature-dimensional distribution of Q and K may follow a multivariate Gaussian with a structured covariance that encodes positional relationships. 
+
+Gaussian fitting of feature-dimensional activations Visualizing the query and key activations of the Qwen3-4B-Instruct model on the LongBench dataset provides strong empirical support for the multivariate Gaussian hypothesis. Histograms of feature-dimensional values in both Q and K are well fitted by Gaussian curves, despite considerable variation in means and variances between dimensions. This consistent fitting behavior is observed in both query and key matrices, reinforcing the hypothesis that their feature-dimensional distributions follow a multivariate Gaussian with structured covariance. 
+
+# Theoretical Derivation of Slash Pattern under Multivariate Gaussian Assumption 
+
+## A.2 Notation and Simplifying Assumptions 
+
+Multivariate Gaussian Model For arbitrary positions m, n ∈ [0 , L ), we model the query and the key vectors as: 
+
+qm ∼ N (μq , Σq ), qm ∈ RD (20) 
+
+kn ∼ N (μk, Σk), kn ∈ RD (21) where μq , μk ∈ RD are mean vectors and Σq , Σk ∈ RD×D are covariance matrices capturing inter-dimensional correlations. 
+
+Simplifying assumption For analytical tractability, we temporarily assume qm ⊥⊥ kn (statistical independence). This as-sumption enables a closed-form derivation of the slash pattern mechanism. We emphasize that this is a theoretical simplification 
+
+to isolate the core geometric effect of RoPE. 
+
+RoPE Matrix Representation The rotary positional embedding matrix R(t) ∈ RD×D has a block-diagonal structure: 
+
+R(t) = 
+
+> D/ 2−1
+
+M
+
+> p=0
+
+cos( tθ p) − sin( tθ p)sin( tθ p) cos( tθ p)
+
+
+
+, θp = 10000 −2p/D (22) with properties R(m)R(n)⊤ = R(m − n) and R(t)⊤R(t) = I.
+
+Derivation of Expectation E[Pm,n ] Under the independence assumption, the attention score Pm,n = q⊤
+
+> m
+
+R(m − n)kn has the following expectation: 
+
+E[Pm,n ] = E[qm]⊤R(m − n)E[kn] = μq⊤R(m − n)μk (23) Expanding in RoPE rotation planes (2 p, 2p + 1) using complex representation: 10 E[Pm,n ] = 
+
+> D/ 2−1
+
+X
+
+> p=0
+
+ℜ
+
+
+
+μq 
+
+> (p)
+
+· μk∗ 
+
+> (p)
+
+· ei(m−n)θp
+
+
+
+(24) 
+
+=
+
+> D/ 2−1
+
+X
+
+> p=0
+
+ℜ
+
+
+
+(μq 
+
+> 2p
+
++ iμ q
+
+> 2p+1
+
+)( μk 
+
+> 2p
+
+− iμ k
+
+> 2p+1
+
+)ei(m−n)θp
+
+
+
+(25) 
+
+=
+
+> D/ 2−1
+
+X
+
+> p=0
+
+ℜ
+
+
+
+(μq
+
+> 2p
+
+μk 
+
+> 2p
+
++ μq
+
+> 2p+1
+
+μk
+
+> 2p+1
+
+)
+
+| {z }
+
+> ap
+
++i (−μq
+
+> 2p
+
+μk 
+
+> 2p+1
+
++ μq
+
+> 2p+1
+
+μk
+
+> 2p
+
+)
+
+| {z }
+
+> bp
+
+
+
+ei(m−n)θp (26) 
+
+=
+
+> D/ 2−1
+
+X
+
+> p=0
+
+ ap cos(( m − n)θp) − bp sin(( m − n)θp) (27) 
+
+=
+
+> D/ 2−1
+
+X
+
+> p=0
+
+rp cos  αp + ( m − n)θp
+
+ (28) where: 
+
+rp =
+
+q
+
+a2 
+
+> p
+
++ b2
+
+> p
+
+, (29) 
+
+αp = arctan( − bp
+
+ap
+
+), (30) 
+
+ap = μq
+
+> 2p
+
+μk 
+
+> 2p
+
++ μq
+
+> 2p+1
+
+μk
+
+> 2p+1
+
+, (31) 
+
+bp = −μq
+
+> 2p
+
+μk 
+
+> 2p+1
+
++ μq
+
+> 2p+1
+
+μk 
+
+> 2p
+
+(32) Under the assumption that the query and key vectors follow multivariate Gaussian distributions with structured covariance, the expectation E[Pm,n ] of the attention score Pm,n = QmK⊤ 
+
+> n
+
+depends solely on the relative positional offset (m − n). This positional invariance induces a periodic structure aligned with the diagonal, which constitutes the theoretical origin of the slash pattern. In practice, however, the input Q and K deviate from ideal multivariate Gaussians, are not perfectly orthogonal, and undergo subsequent softmax normalization. These factors prevent the expectation-based conclusion from being directly applicable to the actual computation of attention. Nevertheless, this theoretical framework successfully explains the emergence of the slash pattern observed in causal LLM inference. 11 Figure 6: Attention weights aggregated along the vertical direction across different heads on Qwen3-4B-Instruct using the LongBench dataset. 12 (a) No averaging (b) Sequence-wise averaging  
+
+> (c) Feature-wise averaging (d) Joint sequence-feature averaging
+
+Figure 7: Slash-aggregated attention weights under four configurations of query-key averaging before RoPE application: (a) no averaging, (b) averaging along the sequence dimension, (c) averaging along the feature dimension, and (d) averaging along both dimensions. In each case, Q and K are first averaged along the specified dimension(s), then element-wise replicated to restore their original shapes, followed by RoPE encoding.  
+
+> (a) Query (b) Key
+
+Figure 8: Dimension-wise histogram statistics of Query and Key vectors with Gaussian fits. The distributions display dimension-dependent means and variances, revealing heterogeneous statistical properties of attention projections. 13
