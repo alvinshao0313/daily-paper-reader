@@ -1,0 +1,522 @@
+Title: Detecting Overflow in Compressed Token Representations for Retrieval-Augmented Generation
+
+URL Source: https://arxiv.org/pdf/2602.12235v2
+
+Published Time: Mon, 16 Feb 2026 01:44:42 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# Detecting Overflow in Compressed Token Representations for Retrieval-Augmented Generation 
+
+Julia Belikova 1,2 , Danila Rozhevskii 1, Dennis Svirin 1,4 ,Konstantin Polev 2, and Alexander Panchenko 1,3 
+
+> 1
+
+Skoltech, 2Sber AI Lab, 3AIRI 
+
+> 4
+
+Institute for Information Transmission Problems of the Russian Academy of Sciences  
+
+> Correspondence: {julia.belikova, a.panchenko}@skol.tech
+
+Abstract 
+
+Efficient long-context processing remains a crucial challenge for contemporary large lan-guage models (LLMs), especially in resource-constrained environments. Soft compression architectures promise to extend effective con-text length by replacing long token sequences with smaller sets of learned compressed tokens .Yet, the limits of compressibility – and when compression begins to erase task-relevant con-tent – remain underexplored. In this paper, we define token overflow as a regime in which com-pressed representations no longer contain suffi-cient information to answer a given query, and propose a methodology to characterize and de-tect it. In the xRAG soft-compression setting, we find that query-agnostic saturation statis-tics reliably separate compressed from uncom-pressed token representations, providing a prac-tical tool for identifying compressed tokens but showing limited overflow detection capabil-ity. Lightweight probing classifiers over both query and context xRAG representations detect overflow with 0.72 AUC-ROC on average on HotpotQA, SQuADv2, and TriviaQA datasets, demonstrating that incorporating query infor-mation improves detection performance. These results advance from query-independent diag-nostics to query-aware detectors, enabling low-cost pre-LLM gating to mitigate compression-induced errors. 
+
+1 Introduction 
+
+Large language models (LLMs) remain computa-tionally constrained when processing long contexts, even as architectural advances and extended con-text windows become widely available (Vaswani et al., 2017; Liu et al., 2024). In retrieval-augmented generation (RAG), this limitation is par-ticularly acute: retrieved evidence must be aggres-sively compressed or truncated, creating a tension between efficiency and faithfulness (Lewis et al., 2020; Aushev et al., 2025). Soft compression archi-tectures address this by mapping long contexts into dense vectors that can be directly consumed by the model, dramatically reducing token count while preserving global semantics (Liao et al., 2025). However, the same mechanism that enables ex-treme compression also introduces a critical fail-ure mode. As more information is packed into a fixed-dimensional compressed token , its represen-tation can enter token overflow: it no longer carries sufficient task-relevant signal for the query and effectively behaves like noise, silently degrading downstream performance. Recent work on train-able tokens shows that individual embeddings have substantial theoretical capacity, but also that practi-cal limits depend strongly on architecture, training, and input complexity (Kuratov et al., 2025). Yet, current compression systems are typically evalu-ated only via end-task metrics, offering little insight into when a single compressed token crosses from informative to overflowed states. This paper investigates token overflow in soft compression architectures. We ask: (RQ1) How can we characterize overflow in compressed rep-resentations? (RQ2) Can overflow be detected efficiently, without full LLM inference, using lightweight diagnostics? (RQ3) Is overflow de-tectable from compressed tokens alone, or does it require modeling query-context interactions? To address these questions, we: • formalize token overflow and propose a methodology advancing from query-independent to query-aware detection ap-proaches; • demonstrate that saturation statistics reliably distinguish compressed tokens from standard tokens, providing a practical tool for identi-fying compressed representations, but show limited overflow detection capability; • show that attention patterns during gener-ation provide moderate overflow signal but 
+
+> arXiv:2602.12235v2 [cs.CL] 13 Feb 2026
+
+require LLM forward passes; • develop learned probing classifiers oper-ating on joint query-context representations that achieve strong overflow detection with-out LLM inference (Table 1), showing that incorporating query information improves de-tection performance; Although our experiments focus on the xRAG architecture, the methodology is general and we expect it to yield similar results when applied to other setups. The source code is publicly available online 1.
+
+2 Related Work 
+
+Long-context modeling and compression Ef-ficient long-context processing has been tackled through architectural changes (Beltagy et al., 2020; Zaheer et al., 2020; Dai et al., 2019) and explicit compression. Context compression is systematized into hard , soft , and hybrid paradigms (Liao et al., 2025): hard compression selects token subsets with strict information bottlenecks; soft compression maps contexts into dense vectors accessible via at-tention; hybrid methods combine both approaches. Our work analyzes the failure modes of soft com-pression, asking when compressed vectors fail to carry useful task information. 
+
+Soft compression in RAG Retrieval-augmented generation (RAG) frameworks extend LLMs with external corpora (Lewis et al., 2020), motivating compression of retrieved passages. Several soft compression methods have been proposed: Auto-Compressors (Chevalier et al., 2023) learn sum-mary vectors by training the model to reconstruct compressed context through attention; ICAE (Ge et al., 2024) employs in-context autoencoding to compress sequences into memory slots with com-bined reconstruction and language modeling objec-tives ( ∼4× compression, 1% parameters). We fo-cus our experiments on xRAG (Cheng et al., 2024), utilizing it not merely as a baseline, but as a repre-sentative projector-based compression paradigm. Unlike autoencoder-based methods that compress context via complex recurrence or reconstruction objectives, xRAG treats dense retrieval embeddings as a distinct modality. It employs a lightweight projector to map these embeddings directly into the LLM’s input space. This architectural choice 
+
+> 1https://github.com/s-nlp/overflow-detection
+
+isolates the compression mechanism from the com-plexities of extensive parameter fine-tuning ( <0.1% parameters), allowing us to study the interactions between the projector and the frozen LLM in a controlled setting. By decoupling the retrieval representation from the generative process, xRAG provides clean access to pre- and post-projection states, making it an ideal testbed for analyzing sig-nal degradation and token saturation without the confounders of end-to-end model adaptation. 
+
+Motivation for overflow detection Detecting in-formation overflow – where input complexity ex-ceeds compressed token capacity – is critical for op-timizing RAG pipelines. It enables adaptive chunk-ing , allowing systems to dynamically resize input segments based on semantic density rather than ar-bitrary fixed lengths. Furthermore, early overflow detection facilitates computational pruning: identi-fying and discarding saturated representations im-mediately after projection prevents wasteful LLM inference on degraded context. Despite progress across methods, most evaluations treat compressed vectors as black boxes and focus on downstream metrics (Ge et al., 2024; Cheng et al., 2024). Re-cent work shows single vectors can theoretically encode thousands of tokens, yet practical capacity depends on architecture and complexity (Kuratov et al., 2025). In contrast, we operationalize capac-ity limits through overflow detection in xRAG, ad-vancing from query-independent saturation statis-tics to query-aware learned probing. 
+
+3 Methodology 
+
+Our goal is to characterize and detect token over-flow in soft compression architectures across tasks and context regimes. We focus on xRAG-style compressors attached to frozen LLM backbones, studying how compressed token properties change as context complexity increases and downstream quality degrades. We employ a spectrum of detec-tion approaches with increasing query-awareness: from query-agnostic saturation statistics, through query-conditioned attention patterns, to fully query-aware learned probing classifiers. Our methodology is motivated by the observa-tion that the same compressed representation may be sufficient for one query but overflowed for an-other. This motivates our approach, advancing from query-independent to query-aware detection: 1. Context complexity and saturation statis-tics (query-agnostic): Measure intrinsic prop-erties of compressed representations indepen-dent of any query – useful for identifying and characterizing compressed tokens. 2. Attention features (query-conditioned): An-alyze how the LLM utilizes compressed to-kens during generation for a specific query – captures behavioral signals but requires LLM forward passes. 3. Learned probing (query-aware): Train classi-fiers on joint query-context representations to detect overflow in embedding space – achieves strong detection without LLM infer-ence. This approach allows us to evaluate whether overflow detection improves as query information is incorporated, while identifying the most efficient deployment strategy. 
+
+3.1 Problem Setup 
+
+Let M be a frozen LLM and C a soft compression module (e.g., xRAG’s modality-fusion compres-sor) that maps an input sequence of n tokens with embeddings X ∈ Rn×d to k ≪ n compressed to-kens C = C(X) ∈ Rk×d. The compressed tokens are then injected into M (e.g., as extra prefix to-kens or interleaved context) and used to solve a downstream task such as extractive QA. Given an input instance i with original context 
+
+xi, question qi, and gold output yi, we define task performance under compression, Ti(Ci), as a scalar metric (e.g., F1, EM, or ROUGE), indicat-ing whether the generated answer is judged correct. We compare it to a reference performance T ref  
+
+> i
+
+ob-tained from either (i) an uncompressed baseline (full context within the model’s window), or (ii) a lightly compressed setting where degradation is empirically negligible. We define an overflow state for instance i as: 
+
+Oi = 1 T ref  
+
+> i
+
+= 1 ∧ T i(Ci) = 0  . (1) Our objective is to (a) understand how compressed representations differ between overflow and non-overflow regimes, and (b) learn detectors that can predict overflow from representations alone, with-out recomputing Ti.More generally, this formulation can be extended by defining overflow via a degradation threshold, 
+
+T ref  
+
+> i
+
+− T i(Ci) ≥ ϵ, (2) where ϵ is task-dependent. Exploring such threshold-based criteria with alternative evaluation functions is a promising direction for future work. 
+
+3.2 Context Complexity Measures 
+
+For each input context xi (or aggregated retrieved context), we compute a set of context complexity 
+
+measures intended to approximate how “hard” the context is to compress: • Context length Nctx : the number of tokens in the original, uncompressed context before any truncation. This is the simplest proxy for potential compression pressure and directly correlates with computational cost. • Language-model perplexity PPL i: the aver-age per-token negative log-likelihood under the base LLM (without compression), which captures how predictable the context is given the model’s training distribution. Higher per-plexity indicates linguistically or semantically atypical content. • Statistical compressibility Ri: the compres-sion ratio achieved by a standard lossless com-pressor (e.g., gzip or LZMA) on the raw text. We define Ri = |xi|bytes  
+
+> |zip (xi)|bytes
+
+, where larger val-ues indicate more redundancy and thus higher statistical compressibility. These metrics allow us to analyze how overflow correlates with raw length, lexical predictability, and sequence-level redundancy (compressibility). 
+
+3.3 Token Saturation Statistics 
+
+We quantify saturation at the level of compressed tokens and their propagated hidden states. For each compressed token vector c ∈ Rd and its corre-sponding hidden states h(ℓ) at layer ℓ, we compute the following statistics. 
+
+Hoyer’s sparsity Hoyer’s index (Hoyer, 2004) measures how concentrated a vector’s energy is in a few dimensions: 
+
+H(v) = 
+
+√d − ∥v∥1
+
+> ∥v∥2
+
+√d − 1 . (3) It ranges from 0 (all components equal) to 1 (only one non-zero component). Informative compressed tokens are hypothesized to exhibit higher sparsity (structured, selective activations), while overflowed tokens tend towards low sparsity (flat, noise-like patterns). Spectral entropy We apply a discrete cosine transform (DCT) to v and treat the normalized squared magnitudes as an energy distribution p
+
+over frequency components. The spectral entropy is defined as folowing: 
+
+S(v) = −
+
+> d
+
+X
+
+> i=1
+
+pi log pi, pi = |DCT (v)i|2
+
+∥DCT (v)∥22
+
+.
+
+(4) Low entropy corresponds to concentrated energy (structured signals), whereas near-maximum en-tropy indicates white-noise–like spectra. 
+
+Kurtosis We compute the excess kurtosis of the entries of v:
+
+K(v) = E[( vj − μ)4]
+
+σ4 − 3, (5) where μ and σ are the mean and standard devia-tion across dimensions. Heavy-tailed distributions (positive kurtosis) suggest a few large, informative coordinates, while overflowed tokens are expected to approach Gaussian-like behavior ( K ≈ 0). 
+
+3.4 Attention Features: Query-conditioned Overflow Signals 
+
+While saturation statistics measure intrinsic token properties, they ignore how the LLM actually uses 
+
+compressed tokens during generation. To capture this behavioral dimension, we extract attention-based features that quantify the model’s reliance on xRAG tokens when processing a specific query. For each instance, we perform a forward pass through the LLM with both the query and com-pressed context, extracting attention weights A ∈
+
+RL×H×T ×T across all layers L, heads H, and se-quence positions T . We compute: 
+
+Mean attention to xRAG tokens For each layer 
+
+ℓ and head h, we measure the average attention mass directed to compressed token positions: 
+
+¯a(ℓ,h ) 
+
+> xRAG
+
+= 1
+
+|Tq|
+
+X
+
+> i∈Tq
+
+X
+
+> j∈TxRAG
+
+A(ℓ,h ) 
+
+> i,j
+
+, (6) where Tq denotes query token positions and TxRAG 
+
+denotes xRAG token positions. We aggregate across layers and heads to obtain instance-level statistics: mean, max, min, and standard deviation of attention to xRAG tokens. 
+
+Attention ratios To contextualize xRAG atten-tion, we compute ratios comparing attention to compressed versus uncompressed tokens: 
+
+rxRAG/non-xRAG = ¯axRAG 
+
+¯anon-xRAG 
+
+. (7) This ratio isolates whether the model preferen-tially attends to compressed representations or re-lies more heavily on other context. 
+
+Attention entropy For each query position i, we compute the entropy of its attention distribution over all positions: 
+
+Ent i = −
+
+> T
+
+X
+
+> j=1
+
+Ai,j log Ai,j . (8) High entropy indicates diffuse attention (potentially signaling uncertainty or lack of relevant informa-tion), while low entropy indicates focused attention to specific tokens (Rykov et al., 2025). 
+
+3.5 Overflow Detection Methods 
+
+We evaluate overflow detection through two com-plementary approaches that span a spectrum from interpretable to representational methods. First, we test feature-based classification using explicit, hand-crafted features to determine whether over-flow manifests in interpretable, low-dimensional signals. Second, we develop learned probing clas-sifiers that operate directly on high-dimensional query and context embedding vectors. 
+
+Feature-based classification We aggregate the hand-crafted features described in §3.2–§3.4 (con-text complexity, saturation statistics, attention pat-terns) and train a logistic regression classifier im-plemented in scikit-learn 2. All hyperparameters are detailed in Appendix D. 
+
+Learned probing on vector representations 
+
+While feature-based methods offer interpretabil-ity, they may fail to capture complex interactions between query and context that manifest in the geometry of representation spaces. We therefore develop learned probing classifiers that operate directly on joint query-context representations. Our hypothesis is that overflow detection requires mod-eling alignment patterns in shared representation space. 
+
+> 2https://scikit-learn.org
+
+Representation extraction For each instance i
+
+with query qi and context xi, we extract embed-dings at multiple stages: • Query representations : qpreproj  
+
+> i
+
+∈ Rdret (re-triever embedding), qpostproj  
+
+> i
+
+∈ RdLLM (after projection), qmid  
+
+> i
+
+, q last  
+
+> i
+
+∈ RdLLM (hidden states from intermediate and final LLM layers). • Context representations : xpreproj  
+
+> i
+
+∈ Rdret (re-triever embedding), xpostproj  
+
+> i
+
+∈ RdLLM (com-pressed token after projection), xmid  
+
+> i
+
+, x last  
+
+> i
+
+∈
+
+RdLLM (hidden states from intermediate and final layers). We construct joint feature vectors by con-catenating query and context representations at matched or complementary stages: 
+
+ϕi = [ x(sc) 
+
+> i
+
+; q(sq ) 
+
+> i
+
+], (9) where sc, s q ∈ {preproj , postproj , mid , last } de-note the extraction stage. Our primary experiments use projection-stage representations (preproj, post-proj) which are available immediately after encod-ing without requiring LLM forward passes. Fol-lowing prior work demonstrating that intermediate transformer layers encode complementary informa-tion useful for interpretation tasks (CH-Wang et al., 2024; Belikova et al., 2025), we additionally evalu-ate multi-layer representations (including mid , last )to assess the efficiency-accuracy trade-off. 
+
+Classifier architectures To systematically assess the role of model capacity and training objectives in overflow detection, we evaluate three neural probe architectures: • Linear Probe : A single linear transformation applied to the joint feature vector ϕi. This minimal architecture tests whether overflow is linearly separable in the concatenated rep-resentation space. • MLP Probe : A two-layer feedforward network with one hidden layer, introducing nonlinear feature interactions while maintaining compu-tational efficiency. • MLP Probe with Supervised Contrastive Learning (SCL) : An MLP trained with a hy-brid objective that combines standard binary cross-entropy with a supervised contrastive term (Khosla et al., 2020). This architecture explicitly structures the representation space by encouraging same-class instances to cluster while pushing apart opposite-class instances. For the SCL probe, we minimize the combined objective 
+
+L = LBCE + λ LSCL , (10) where LBCE provides direct classification super-vision, while LSCL imposes metric constraints by maximizing cosine similarity between same-label pairs and minimizing it between different-label pairs in the learned representation space. 
+
+4 Results 
+
+4.1 Experimental Setup 
+
+As a preliminary study, we use the xRAG-7B model 3 as the base LLM and SFR-Embedding-Mistral 4 as the retriever embedding model for all experiments. We focus on three extractive ques-tion answering datasets: SQuADv2 (Rajpurkar et al., 2018), a context-based QA benchmark over Wikipedia passages; TriviaQA (Joshi et al., 2017), a large-scale reading comprehension dataset with independently collected evidence documents; and 
+
+HotpotQA (Yang et al., 2018), a multi-hop reason-ing dataset requiring information synthesis across multiple paragraphs. All three datasets were part of the xRAG compression module’s training data, providing a realistic testbed for studying overflow in deployed systems. We use test set examples that were correctly answered with uncompressed con-text, filtering out instances where the model fails regardless of compression. This ensures overflow detection focuses on compression-induced failures rather than inherent task difficulty. 
+
+Evaluation protocol Answer correctness is eval-uated using GPT-4o-mini for SQuADv2, which assesses semantic equivalence between generated and ground-truth answers. For TriviaQA and Hot-potQA, we apply a substring-based exact-match cri-terion: predictions are marked correct if they con-tain any reference answer as a substring. All clas-sifiers are evaluated using 5-fold stratified cross-validation; training and hyperparameter details are provided in §3.5 and Appendix D. Stage Features TriviaQA SQuADv2 HotpotQA Pre-compression Context 0.589 ± 0.019 0.605 ± 0.025 0.541 ± 0.017 Representation 0.687 ± 0.015 0.662 ± 0.015 0.653 ± 0.023                                                                  
+
+> Pre-inference Representation-joint 0.725 ±0.021 0.703 ±0.019 0.720 ±0.007 Saturation 0.568 ±0.022 0.529 ±0.024 0.533 ±0.010 Attention 0.627 ±0.012 0.608 ±0.020 0.623 ±0.013 Representation 0.684 ±0.016 0.665 ±0.016 0.655 ±0.024
+> Post-inference Representation-joint 0.719 ±0.015 0.713 ±0.016 0.733 ±0.011
+> Saturation 0.583 ±0.019 0.546 ±0.011 0.549 ±0.008 Saturation-joint 0.600 ±0.014 0.585 ±0.016 0.633 ±0.015
+
+Table 1: Overflow prediction performance (ROC-AUC) across different pipeline stages. Pre-compression : a priori context features. Pre-inference : pre-LLM inference combining preprojection and postprojection features. 
+
+Post-inference : post-LLM inference combining features from middle and last layers. Representation-joint combines query and context representations. Bold : best performance per dataset; underlined: second-best. 
+
+4.2 Main Results 
+
+We organize our findings around the three research questions posed in §1, advancing from character-izing overflow ( RQ1 ) through efficient detection methods ( RQ2 ) to understanding the role of query-context interactions ( RQ3 ). Table 1 presents our main results across three datasets, comparing de-tection performance at different pipeline stages. We distinguish between two detection stages: pre-inference (before LLM processing) uses concate-nated preprojection and postprojection representa-tions for probing, while post-inference (requiring full LLM forward pass) uses concatenated middle and last layer hidden states. For saturation statistics, the same stage distinction applies, with features ex-tracted from corresponding layer representations. Table 3 (Appendix B) provides a detailed ablation study examining feature extraction at different ar-chitectural layers. 
+
+4.2.1 RQ1: Characterizing overflow in compressed representations 
+
+To understand the nature of overflow, we first exam-ined whether compressed tokens exhibit distinctive geometric properties that might correlate with in-formation loss. 
+
+Saturation statistics distinguish token types but not overflow We compared the defined satura-tion statistics across xRAG and non-xRAG tokens at multiple LLM layers across all three datasets. To avoid positional bias and control for contextual con-founds, we compare xRAG token statistics against four baselines: (i) mean of all non-xRAG tokens 
+
+> 3https://hf.co/Hannibal046/xrag-7b
+> 4https://hf.co/Salesforce/ SFR-Embedding-Mistral
+
+(when compression is applied), capturing the ag-gregate behavior of standard tokens in compressed sequences; (ii) mean of original context tokens , rep-resenting uncompressed context behavior; (iii) first original context token , isolating position-specific effects; and (iv) first token in no-context scenarios ,establishing a baseline without any context infor-mation. Tables 2, 4, and 5 (Appendix C) present percent-age differences across these baselines. The results reveal consistent patterns across datasets: xRAG tokens show lower sparsity and kurtosis, and dra-matically higher spectral entropy across all layers (all p < 0.001 ). Spectral entropy shows the largest differences (87% across all datasets and baselines), while excess kurtosis shows substantial differences ranging from 29–98% depending on layer and base-line. Hoyer’s sparsity demonstrates more modest but consistent differences of 7–33%. Crucially, these patterns remain remarkably sta-ble across datasets and all four baselines, validating that observed properties reflect genuine character-istics of xRAG tokens rather than measurement artifacts or positional biases. The differences per-sist from middle to final layers, suggesting that compression effects propagate through the network without being normalized away. To verify that these representational differences enable token-type identification, we tested linear separability between xRAG and non-xRAG tokens across all baseline configurations. Linear classifiers achieve near-perfect separation (> 0.95 AUC-ROC for all variants), confirming that saturation statistics reli-ably distinguish compressed from uncompressed representations in the model’s activation space. No-tably, more complex classifier architectures (MLP, MLP-SCL) provide no improvement over linear models for this token-type classification task (see Appendix A), further confirming that compressed and uncompressed tokens occupy distinctly separa-ble regions. However, while these metrics successfully char-acterize compressed tokens, they fail to predict overflow . Despite the substantial magnitude of differences and near-perfect linear separability of token types, saturation statistics achieve only near-random predictive performance for overflow detec-tion across datasets (Table 1). Even when com-bined with query information (Saturation-joint), performance remains limited (0.55–0.63 AUC-ROC). 
+
+Context complexity provides minimal signal 
+
+Context-level features (shown in Table 1) also achieve near-random performance, only marginally exceeding saturation statistics. This indicates that overflow is not strongly predicted by general con-text properties alone (perplexity, length, statistical compressibility) in our experimental setting. While our current datasets involve relatively short pas-sages compressed into single tokens, we suggest that context complexity features may become more informative in settings with substantially longer contexts or more extreme compression ratios. 
+
+Summary for RQ1: Saturation statistics pro-vide a reliable method to separate compressed to-kens from uncompressed tokens, achieving near-perfect linear separability and revealing distinct activation-space statistics with 7–87% relative dif-ferences across multiple metrics, layers, and tokens. However, these query-agnostic properties do not predict task-relevant information loss, indicating that while compressed tokens are distinct in repre-sentation space, overflow detection requires mod-eling query-context interactions beyond intrinsic token characteristics. 
+
+4.2.2 RQ2: Efficient overflow detection without full LLM inference 
+
+While saturation statistics and context complexity features show limited predictive power, we inves-tigated whether learned classifiers can effectively detect overflow, and critically, at which stage in the compression pipeline degradation becomes de-tectable. Tables 1 and 3 compare detection per-formance at two stages: pre-inference (projection stage, before LLM processing) and post-inference 
+
+(LLM hidden states, after forward pass). 
+
+Overflow is detectable immediately after com-pression Learned probing classifiers achieve 0.72 AUC-ROC on average at the post-projection stage (Table 1), substantially outperforming context-only models and query-agnostic baselines. Crucially, compression-induced information loss manifests in the representation space immediately after projection , before any LLM processing. The overflow signal is already present in query-context alignment patterns, revealing that degradation is determined by the compression step itself rather than emerging during generation. 
+
+LLM processing provides no additional signal 
+
+Post-inference detection using middle-layer hid-den states achieves identical performance, con-firming that overflow established at compression time merely propagates through the network with-out amplification or masking (Table 3). Attention patterns (0.62 AUC-ROC on average) and satura-tion statistics (even when query-conditioned) pro-vide no meaningful improvement over projection-stage features. Last-layer features show slightly degraded performance, suggesting earlier layers better preserve overflow-relevant signals. 
+
+Summary for RQ2: Overflow detection with-out LLM inference matches post-inference perfor-mance. This reveals that compression degradation manifests immediately after projection and is de-termined during compression rather than during generation, enabling both efficient detection and deeper understanding of compression capacity lim-its. 
+
+4.2.3 RQ3: The necessity of modeling query-context interactions 
+
+Our final question addresses whether overflow can be detected from compressed tokens alone or whether incorporating query information improves detection performance. 
+
+Joint representations substantially outperform single-source models Tables 1 and 3 compare detection using context-only representations (Rep-resentation), joint query-context representations (Representation-joint), and query-agnostic satura-tion statistics. Given the poor performance of sat-uration statistics alone, we explored whether in-corporating contextual information could improve detection by aggregating statistics (Hoyer’s spar-sity, spectral entropy, and excess kurtosis) from all non-xRAG tokens in the compressed sequence, computing their mean, maximum, minimum, and Stage Statistic Non-xRAG Context (first) Context (mean) No Context                                 
+
+> Excess Kurtosis 92.0 29.1 29.6 -23.1
+> Middle Layer Hoyer’s index 24.4 23.0 19.4 20.1 Spectral Entropy 0.1 87.1 87.1 87.1 Excess Kurtosis 98.5 98.8 94.1 80.4
+> Last Layer Hoyer’s index 31.4 32.1 19.2 7.2 Spectral Entropy 0.1 87.1 87.1 87.0
+> Table 2: Relative differences (%) in saturation statistics between xRAG and baseline tokens on SQuADv2, computed as baseline −xRAG baseline ×100% .Middle Layer : LLM intermediate layer features. Last Layer : LLM final layer features. Positive values indicate xRAG tokens have lower saturation (more structured representations). Large differences (≥50% ) in Excess Kurtosis and Spectral Entropy demonstrate consistent xRAG-specific properties across multiple baselines.
+
+standard deviation (Saturation-joint). The results reveal a clear hierarchy: representation-joint models achieve 0.70–0.73 AUC-ROC across datasets and stages, substantially outperforming context-only models (0.64–0.69 AUC-ROC). Saturation-joint yields only modest improvements over saturation-only features (0.58–0.63 vs. 0.52–0.58 AUC-ROC), remaining substantially below representation-based methods. This confirms that token-level activation statistics alone are insufficient for overflow detection, regardless of aggregation strategy. This reveals that overflow is not an intrinsic prop-erty of compressed representations but emerges from the mismatch between what information the compressed token contains and what the query re-quires. Joint representation models capture this alignment directly in representation space, enabling accurate overflow prediction. Notably, satura-tion statistics maintain consistent low performance across all pipeline stages, confirming their utility for identifying compressed tokens but not for pre-dicting query-specific overflow. Similar to token-type classification (RQ1), linear classifiers prove sufficient for overflow detection, with more com-plex architectures providing minimal improvement (Appendix A), suggesting that overflow manifests as relatively simple (approximately linearly separa-ble) structure in joint representation space. 
+
+Summary for RQ3: Overflow detection fun-damentally requires modeling query-context in-teractions. Joint representation models yield the strongest performance, outperforming context-only models by 5–8 percentage points (Table 1). 
+
+5 Conclusion 
+
+We investigated token overflow in soft compres-sion architectures and proposed a methodology ad-vancing from query-independent to query-aware detection. Our findings show that saturation statis-tics reliably separate compressed from uncom-pressed tokens (7–87% relative differences), while learned probing on joint query-context representa-tions achieves efficient pre-inference overflow de-tection (0.72 AUC-ROC on average) without LLM forward passes. Post-inference detection achieves comparable performance, confirming that overflow can be detected efficiently before expensive LLM processing. These results enable safer deploy-ment of compression modules through low-cost pre-LLM gating and adaptive chunking strategies. 
+
+Limitations 
+
+This work focuses on the xRAG architecture as an initial controlled study. Future work should ex-tend the methodology to longer contexts, diverse tasks (summarization, multi-hop reasoning), and other compression architectures to validate gener-alizability. Exploring richer overflow definitions beyond task performance degradation could cap-ture subtle information loss patterns. Our detection performance establishes a strong baseline, with promising directions including multi-task learning across different compression ratios, incorporating architectural features of the compressor, and de-veloping adaptive systems that dynamically adjust compression based on predicted overflow risk. The methodology’s architecture-agnostic design facil-itates such extensions to emerging compression techniques. 
+
+Ethical Considerations 
+
+Generation of text with LLMs using compressed and overflown tokens can lead to hallucinations and untrustworthy output. This way, the created tech-nology may be considered helpful for minimizing such effects. At the same time, as the absolute ac-curacy numbers of the developed classifier are rela-tively low, and eventual false positive predictions could lead to overconfidence in trustworthiness of generated texts. Therefore, we suggest that more research is needed to raise the absolute values of the developed classifiers to ensure their safe use in various text generation workflows and applications. 
+
+References 
+
+Islam Aushev, Egor Kratkov, Evgenii Nikolaev, An-drei Glinskii, Vasilii Krikunov, Alexander Panchenko, Vasily Konovalov, and Julia Belikova. 2025. RAGula-tor: Effective RAG for regulatory question answering. In Proceedings of the 1st Regulatory NLP Workshop (RegNLP 2025) , pages 114–120, Abu Dhabi, UAE. Association for Computational Linguistics. Julia Belikova, Konstantin Polev, Rauf Parchiev, and Dmitry Simakov. 2025. Data-efficient meta-models for evaluation of context-based questions and an-swers in llms. In Proceedings of the 48th Inter-national ACM SIGIR Conference on Research and Development in Information Retrieval, SIGIR 2025, Padua, Italy, July 13-18, 2025 , pages 4385–4389. ACM. Iz Beltagy, Matthew E. Peters, and Arman Cohan. 2020. Longformer: The long-document transformer. CoRR ,abs/2004.05150. Sky CH-Wang, Benjamin Van Durme, Jason Eisner, and Chris Kedzie. 2024. Do androids know they’re only dreaming of electric sheep? In Findings of the Association for Computational Linguistics, ACL 2024, Bangkok, Thailand and virtual meeting, Au-gust 11-16, 2024 , pages 4401–4420. Association for Computational Linguistics. Xin Cheng, Xun Wang, Xingxing Zhang, Tao Ge, Si-Qing Chen, Furu Wei, Huishuai Zhang, and Dongyan Zhao. 2024. xrag: extreme context compression for retrieval-augmented generation with one token. In 
+
+Proceedings of the 38th International Conference on Neural Information Processing Systems , NIPS ’24, Red Hook, NY, USA. Curran Associates Inc. Alexis Chevalier, Alexander Wettig, Anirudh Ajith, and Danqi Chen. 2023. Adapting language models to compress contexts. In Proceedings of the 2023 Con-ference on Empirical Methods in Natural Language Processing, EMNLP 2023, Singapore, December 6-10, 2023 , pages 3829–3846. Association for Compu-tational Linguistics. Zihang Dai, Zhilin Yang, Yiming Yang, Jaime G. Car-bonell, Quoc V. Le, and Ruslan Salakhutdinov. 2019. Transformer-xl: Attentive language models beyond a fixed-length context. CoRR , abs/1901.02860. Tao Ge, Jing Hu, Lei Wang, Xun Wang, Si-Qing Chen, and Furu Wei. 2024. In-context autoencoder for con-text compression in a large language model. In The Twelfth International Conference on Learning Rep-resentations, ICLR 2024, Vienna, Austria, May 7-11, 2024 . OpenReview.net. Patrik O. Hoyer. 2004. Non-negative matrix factoriza-tion with sparseness constraints. J. Mach. Learn. Res. , 5:1457–1469. Mandar Joshi, Eunsol Choi, Daniel S. Weld, and Luke Zettlemoyer. 2017. Triviaqa: A large scale distantly supervised challenge dataset for reading comprehen-sion. Preprint , arXiv:1705.03551. Prannay Khosla, Piotr Teterwak, Chen Wang, Aaron Sarna, Yonglong Tian, Phillip Isola, Aaron Maschinot, Ce Liu, and Dilip Krishnan. 2020. Su-pervised contrastive learning. In Advances in Neural Information Processing Systems 33: Annual Confer-ence on Neural Information Processing Systems 2020, NeurIPS 2020, December 6-12, 2020, virtual .Yuri Kuratov, Mikhail Arkhipov, Aydar Bulatov, and Mikhail Burtsev. 2025. Cramming 1568 tokens into a single vector and back again: Exploring the lim-its of embedding space capacity. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers), ACL 2025, Vienna, Austria, July 27 - August 1, 2025 ,pages 19323–19339. Association for Computational Linguistics. Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Hein-rich Küttler, Mike Lewis, Wen-tau Yih, Tim Rock-täschel, Sebastian Riedel, and Douwe Kiela. 2020. Retrieval-augmented generation for knowledge-intensive NLP tasks. In Advances in Neural In-formation Processing Systems 33: Annual Confer-ence on Neural Information Processing Systems 2020, NeurIPS 2020, December 6-12, 2020, virtual .Huanxuan Liao, Wen Hu, Yao Xu, Shizhu He, Jun Zhao, and Kang Liu. 2025. Beyond hard and soft: Hybrid context compression for balancing local and global information retention. Preprint , arXiv:2505.15774. Nelson F. Liu, Kevin Lin, John Hewitt, Ashwin Paran-jape, Michele Bevilacqua, Fabio Petroni, and Percy Liang. 2024. Lost in the middle: How language models use long contexts. Trans. Assoc. Comput. Linguistics , 12:157–173. Pranav Rajpurkar, Robin Jia, and Percy Liang. 2018. Know what you don’t know: Unanswerable ques-tions for SQuAD. In Proceedings of the 56th Annual Meeting of the Association for Computational Lin-guistics (Volume 2: Short Papers) , pages 784–789, Melbourne, Australia. Association for Computational Linguistics. Elisei Rykov, Valerii Olisov, Maksim Savkin, Artem Vazhentsev, Kseniia Titova, Alexander Panchenko, Vasily Konovalov, and Julia Belikova. 2025. Smur-fCat at SemEval-2025 task 3: Bridging external knowledge and model uncertainty for enhanced hal-lucination detection. In Proceedings of the 19th International Workshop on Semantic Evaluation (SemEval-2025) , pages 1034–1045, Vienna, Austria. Association for Computational Linguistics. Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. 2017. Attention is all you need. In Advances in Neural Information Pro-cessing Systems 30: Annual Conference on Neural Information Processing Systems 2017, December 4-9, 2017, Long Beach, CA, USA , pages 5998–6008. Zhilin Yang, Peng Qi, Saizheng Zhang, Yoshua Ben-gio, William W. Cohen, Ruslan Salakhutdinov, and Christopher D. Manning. 2018. Hotpotqa: A dataset for diverse, explainable multi-hop question answer-ing. In Proceedings of the 2018 Conference on Em-pirical Methods in Natural Language Processing, Brussels, Belgium, October 31 - November 4, 2018 ,pages 2369–2380. Association for Computational Linguistics. Manzil Zaheer, Guru Guruganesh, Kumar Avinava Dubey, Joshua Ainslie, Chris Alberti, Santiago On-tañón, Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang, and Amr Ahmed. 2020. Big bird: Trans-formers for longer sequences. In Advances in Neural Information Processing Systems 33: Annual Confer-ence on Neural Information Processing Systems 2020, NeurIPS 2020, December 6-12, 2020, virtual .A Classifiers Ablation Study Pre-Projections Post-Projections Pre+Post-Projections 
+
+0.50 
+
+0.55 
+
+0.60 
+
+0.65 
+
+0.70 
+
+0.75 
+
+0.80 
+
+> ROC-AUC
+> LLM-Independent
+
+SQuADv2 
+
+Linear 
+
+MLP 
+
+MLP (SCL) 
+
+Linear (SK) 
+
+Pre-Projections Post-Projections Pre+Post-Projections 
+
+0.50 
+
+0.55 
+
+0.60 
+
+0.65 
+
+0.70 
+
+0.75 
+
+0.80 TriviaQA 
+
+Pre-Projections Post-Projections Pre+Post-Projections 
+
+0.50 
+
+0.55 
+
+0.60 
+
+0.65 
+
+0.70 
+
+0.75 
+
+0.80 HotpotQA 
+
+Middle Hiddens Last Hiddens Mid+Last Hiddens 
+
+Feature Combination 
+
+0.50 
+
+0.55 
+
+0.60 
+
+0.65 
+
+0.70 
+
+0.75 
+
+0.80 
+
+> ROC-AUC
+> LLM-Dependent
+
+Middle Hiddens Last Hiddens Mid+Last Hiddens 
+
+Feature Combination 
+
+0.50 
+
+0.55 
+
+0.60 
+
+0.65 
+
+0.70 
+
+0.75 
+
+0.80 
+
+Middle Hiddens Last Hiddens Mid+Last Hiddens 
+
+Feature Combination 
+
+0.50 
+
+0.55 
+
+0.60 
+
+0.65 
+
+0.70 
+
+0.75 
+
+0.80 
+
+Figure 1: Comparison of classifier architectures (Linear scikit-learn, Linear PyTorch, MLP, MLP with SCL) across datasets and feature combinations. All architectures achieve comparable performance, with differences typically <1percentage point, demonstrating that overflow is largely linearly separable in joint representation space. B Features Ablation Study 
+
+Stage Features TriviaQA SQuADv2 HotpotQA Pre-projection Representation 0.679 ± 0.019 0.641 ± 0.013 0.635 ± 0.017 Representation-joint 0.703 ± 0.018 0.687 ± 0.014 0.701 ± 0.010 Saturation 0.534 ± 0.016 0.526 ± 0.024 0.522 ± 0.009 
+
+Post-projection Representation 0.675 ± 0.016 0.660 ± 0.016 0.652 ± 0.025 Representation-joint 0.718 ± 0.021 0.699 ± 0.021 0.715 ± 0.006 Saturation 0.553 ± 0.017 0.530 ± 0.011 0.518 ± 0.011 
+
+Middle layer Attention 0.620 ± 0.012 0.581 ± 0.008 0.603 ± 0.014 Representation 0.675 ± 0.016 0.660 ± 0.016 0.652 ± 0.025 Representation-joint 0.713 ± 0.015 0.710 ± 0.015 0.727 ± 0.009 
+
+Saturation 0.553 ± 0.017 0.530 ± 0.011 0.518 ± 0.011 Saturation-joint 0.557 ± 0.021 0.560 ± 0.026 0.597 ± 0.017 
+
+Last layer Attention 0.584 ± 0.011 0.584 ± 0.027 0.615 ± 0.014 Representation 0.675 ± 0.016 0.661 ± 0.016 0.653 ± 0.024 Representation-joint 0.698 ± 0.013 0.695 ± 0.018 0.707 ± 0.015 Saturation 0.554 ± 0.020 0.523 ± 0.015 0.530 ± 0.010 Saturation-joint 0.582 ± 0.015 0.541 ± 0.011 0.618 ± 0.011 
+
+Table 3: Ablation study examining feature extraction at different architectural stages (ROC-AUC). Pre-projection :retriever embeddings before projection. Post-projection : representations after projection. Middle layer : interme-diate LLM hidden states. Last layer : final LLM hidden states. Representation-joint combines query and context representations. Bold : best performance per dataset; underlined: second-best. C Saturation Statistics 
+
+Stage Statistic Non-xRAG Context (first) Context (mean) No Context 
+
+Excess Kurtosis 92.4 41.3 40.5 -4.4 
+
+Middle Layer Hoyer’s index 24.4 26.1 20.6 21.1 Spectral Entropy 0.1 87.1 87.1 87.1 Excess Kurtosis 98.3 98.4 93.1 81.4 
+
+Last Layer Hoyer’s index 28.4 28.1 16.0 7.4 Spectral Entropy 0.0 87.1 87.1 87.0 
+
+Table 4: Relative differences (%) in saturation statistics between xRAG and baseline tokens on TriviaQA, computed as baseline −xRAG baseline × 100% . Middle Layer : LLM intermediate layer features. Last Layer : LLM final layer features. Positive values indicate xRAG tokens have lower saturation (more structured representations). Large differences (≥ 50% ) in Excess Kurtosis and Spectral Entropy demonstrate consistent xRAG-specific properties across multiple baselines. 
+
+Stage Statistic Non-xRAG Context (first) Context (mean) No Context 
+
+Excess Kurtosis 91.6 39.7 46.0 -10.6 
+
+Middle Layer Hoyer’s index 24.4 25.1 22.0 20.8 Spectral Entropy 0.1 87.1 87.1 87.1 Excess Kurtosis 98.1 98.9 92.3 80.8 
+
+Last Layer Hoyer’s index 28.3 33.5 14.7 7.0 Spectral Entropy 0.0 87.1 87.1 87.0 
+
+Table 5: Relative differences (%) in saturation statistics between xRAG and baseline tokens on HotpotQA, computed as baseline −xRAG baseline × 100% . Middle Layer : LLM intermediate layer features. Last Layer : LLM final layer features. Positive values indicate xRAG tokens have lower saturation (more structured representations). Large differences (≥ 50% ) in Excess Kurtosis and Spectral Entropy demonstrate consistent xRAG-specific properties across multiple baselines. D Hyperparameters 
+
+Table 6 summarizes all hyperparameters used in our experiments. All hyperparameters were tuned on the SQuADv2 validation set and then fixed across TriviaQA and HotpotQA datasets. 
+
+Method Parameter Value 
+
+Feature-based Classification (Logistic Regression) 
+
+Solver lbfgs Regularization L2, C = 10 −5
+
+Max iterations 1000 Preprocessing StandardScaler 
+
+Common Settings (All Neural Probes) 
+
+Cross-validation 5-fold stratified, 80%/20% train/val Batch size 256 Optimizer Adam, learning rate = 10 −4
+
+Preprocessing StandardScaler Regularization Lreg = λ2 
+
+> 2N
+
+∥θ∥22 + λ1 
+
+> N
+
+∥θ∥1
+
+with (λ2, λ 1) = (500 , 100) 
+
+Early stopping Patience = 20 epochs 
+
+Linear Probe 
+
+Architecture Single linear layer Max epochs 150 
+
+MLP Probe 
+
+Architecture Two-layer feedforward Hidden dimension 1024 Activation ReLU Max epochs 50 
+
+MLP-SCL Probe 
+
+Architecture Two-layer feedforward Hidden dimension 1024 Activation SiLU Dropout 0.1 (before and after hidden layer) Normalization BatchNorm1d after hidden layer Contrastive weight λ = 0 .3
+
+Temperature τ = 0 .07 
+
+Max epochs 50 
+
+Table 6: Hyperparameters for all overflow detection methods. The regularization term for neural probes combines L2 and L1 penalties scaled by the number of model parameters N (excluding biases).
