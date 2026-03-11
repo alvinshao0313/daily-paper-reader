@@ -1,0 +1,167 @@
+Title: Accelerating OpenPangu Inference on NPU via Speculative Decoding
+
+URL Source: https://arxiv.org/pdf/2603.03383v1
+
+Published Time: Thu, 05 Mar 2026 01:03:59 GMT
+
+Number of Pages: 8
+
+Markdown Content:
+# Accelerating OpenPangu Inference on NPU via Speculative Decoding 
+
+Yuntao Dai, Jing Wu, Hang Gu,Teng Wang 
+
+School of Software Engineering University of Science and Technology of China 
+
+## Abstract 
+
+To mitigate the Memory Wall bottleneck encountered by Large Language Mod-els (LLMs) during inference on NPU hardware, and addressing the scarcity of native support for mainstream speculative decoding algorithms on domestic in-frastructure, this study presents an end-to-end speculative inference acceleration scheme for OpenPangu-7B. We adapt and enhance the Medusa algorithm through the design of a lightweight Multi-Head prediction architecture and a static Tree Attention verification mechanism. Empirical evaluations substantiate that our method achieves a 1.35x end-to-end speedup on NPU for short-sequence genera-tion tasks. Furthermore, we provide an in-depth analysis of the memory bandwidth constraints affecting acceleration gains when processing long sequences, offering critical insights for future hardware-aware optimizations. The code is available at: 
+
+https://github.com/wujing215/OpenPangu7B-with-Medusa .
+
+Keywords: Large Language Models, Speculative Decoding, NPU 
+
+## 1 Introduction 
+
+The advent of Transformer-based Large Language Models (LLMs) Vaswani et al. [2017], Radford et al. [2019], Brown et al. [2020] has revolutionized the landscape of artificial intelligence, facilitating unprecedented capabilities in natural language understanding and generation. However, the deploy-ment of these models, which often possess billions of parameters Touvron et al. [2023], Chowdhery et al. [2023], encounters a fundamental hardware bottleneck: the discrepancy between computing power and memory bandwidth Mutlu et al. [2015]. Standard autoregressive decoding generates tokens sequentially; for each token generated, the entire model weights must be transferred from High Bandwidth Memory (HBM) to on-chip computing units. This memory-bound characteristic results in extremely low arithmetic intensity Williams et al. [2009], leaving powerful matrix computation units—such as the Tensor Cores in NPUs —idle for the vast majority of the inference cycle. To mitigate this "Memory Wall," Speculative Inference has emerged as a promising paradigm. By leveraging lighter proxy computations to draft multiple candidate tokens which are then verified in parallel by the target model, speculative decoding effectively converts memory-bound sequential operations into compute-bound parallel operations Leviathan et al. [2023], Chen et al. [2023], Kim et al. [2023]. Among these approaches, Medusa Cai et al. [2024] represents the state-of-the-art by ap-pending lightweight Multi-Layer Perceptron (MLP) heads to the frozen backbone, thereby achieving block-wise generation without the complexity of maintaining a separate draft model. Despite the efficacy of Medusa on NVIDIA GPU platforms, transplanting this paradigm to the emerging domestic 
+
+NPU hardware ecosystem presents non-trivial challenges. First, there is a distinct software-hardware misalignment. Current implementations heavily rely on dynamic control flow and CUDA-specific optimizations Pope et al. [2023] which are incompatible with the NPU software stack. Second, and more critically, there exists a conflict between the algorithmic nature of speculative decoding and the execution model of the NPU. The Medusa algorithm inherently requires dynamic tree construction 
+
+> arXiv:2603.03383v1 [cs.DC] 3 Mar 2026
+
+and verification based on real-time prediction probabilities Miao et al. [2024]. In contrast, the NPU 
+
+architecture is optimized for Static Graph execution Liao et al. [2021], where memory addresses and computation graphs are fixed prior to runtime to maximize throughput. Implementing dynamic tree attention logic directly typically triggers frequent graph recompilation and severe synchronization overheads Aminabadi et al. [2022], often negating any potential speedup. In response to these chal-lenges, this paper presents an end-to-end acceleration scheme for OpenPangu-7B Chen et al. [2025] that bridges the gap between advanced speculative algorithms and domestic hardware characteristics. Our primary contributions are summarized as follows: • We establish the first comprehensive implementation of the Medusa speculative decoding framework within the NPU PyTorch ecosystem, systematically resolving operator-level incompatibilities in the software stack. • We propose a hardware-friendly static tree construction mechanism paired with a zero-copy retrieval strategy, reconciling the conflict between dynamic speculative verification and the NPU’s static execution model. • We conduct extensive empirical benchmarks on the NPU platform, demonstrating a 1.35 ×
+
+end-to-end speedup while providing a critical analysis of memory bandwidth constraints Dao et al. [2022], Dao [2023]. 
+
+## 2 Background 
+
+2.1 The Memory Wall in Autoregressive Generation 
+
+The performance of LLM inference is governed by the operational intensity of the workload relative to the hardware’s operational intensity capacity Williams et al. [2009]. In the standard autoregressive decoding phase, the generation of a single token xt conditioned on the context x<t requires a full forward pass of the model parameters θ. The arithmetic intensity (OPS/Byte) of this operation is bounded by the batch size. For latency-sensitive applications where the batch size is small, the arithmetic intensity drops significantly below the machine balance point Pope et al. [2023], Kwon et al. [2023]. NPU processors are designed with massive parallel compute units (Cube Cores) optimized for dense matrix multiplications. However, the latency is dominated by the memory access time required to fetch weights from HBM. This phenomenon implies that simply increasing compute capability (FLOPS) yields diminishing returns for inference latency unless the algorithmic paradigm is fundamentally altered Shazeer [2019]. 
+
+2.2 Evolution of Speculative Decoding Paradigms 
+
+Speculative decoding aims to decouple memory access frequency from the token generation rate. Early works Leviathan et al. [2023], Chen et al. [2023] introduced the "Draft Model" concept—a smaller auxiliary model used to generate candidate sequences. While theoretically sound, the Draft Model approach faces practical deployment hurdles: managing two distinct models in memory Spector and Re [2023], complicates serving infrastructure, and necessitates tokenizer alignment. To address these, "Model-Free" approaches like Lookahead Decoding Fu et al. [2024] were proposed, utilizing n-gram matching. Furthermore, "Self-Speculation" paradigms, exemplified by Medusa Cai et al. [2024] and Eagle Li et al. [2024], integrate drafting into the main model. By adding auxiliary heads, Medusa achieves high acceptance rates with negligible overhead. However, its tree-based verification remains a bottleneck on static-graph-oriented architectures Miao et al. [2024]. 
+
+2.3 Architectural Constraints of NPU 
+
+Unlike GPUs which offer flexible thread scheduling, the NPU Processor emphasizes high throughput via a static execution model Liao et al. [2021]. As illustrated in Figure 1, the underlying architecture relies on a specialized hierarchy of computing units (Cube and Vector cores) and explicit memory management (L0/L1 Buffers). The NPU software stack performs optimal operator fusion and memory allocation during an offline compilation phase. This Static Shape mechanism assumes invariant input tensor shapes and computation graph topology. Speculative decoding algorithms involve conditional branches: the number of tokens accepted and the shape of the attention mask change at every step. On NPUs , such dynamism triggers expensive Just-In-Time (JIT) recompilation or 2CPU fallback, introducing prohibitive latency. The NPU software stack performs optimal operator  
+
+> (a) The Core Architecture (b) Data Flow and Compute Units
+
+Figure 1: Micro-architecture of the NPU Processor. (a) The Core separates Matrix (Cube) and Vector operations, necessitating distinct buffer management (L0A/L0B/L0C). (b) The detailed data flow shows that instruction dispatch and memory movement are highly pipelined. This hardware design heavily favors Static Shape execution, where data movement paths are determined at compile-time, contrasting with the dynamic scheduling flexibility of GPUs. fusion and memory allocation during an offline compilation phase based on this architecture. This mechanism, known as Static Shape , assumes that the input tensor shapes and the computation graph topology remain invariant during execution. Speculative decoding algorithms, by definition, involve conditional branches: the number of tokens accepted and the shape of the attention mask effectively change at every step based on verification results. On an NVIDIA GPU, this is handled via dynamic kernel launches. On an NPU , however, such dynamism forces the runtime to either fall back to scalar execution on the CPU or trigger expensive Just-In-Time (JIT) recompilation, both of which introduce prohibitive latency penalties. Therefore, enabling efficient speculative decoding on NPU requires a paradigm shift from dynamic logic to static, tensor-based formulations, which constitutes the core technical contribution of this work. 
+
+## 3 Methodology 
+
+3.1 Multi-Head Prediction Architecture 
+
+To empower the OpenPangu-7B backbone with future prediction capabilities while maintaining architectural consistency, we employ a non-invasive adaptation strategy. Specifically, we append K
+
+parallel decoding heads, designated as Medusa Heads, immediately following the final Transformer layer of the backbone model. Architecturally, each head is instantiated as a Multi-Layer Perceptron (MLP) equipped with residual connections, designed to project the hidden states from the current timestamp t directly into the probability distributions of future tokens. The training of these auxiliary heads is decoupled from the frozen backbone to preserve the original model’s generation quality. The optimization objective is formulated as the weighted sum of cross-entropy losses across all heads. Let 
+
+ht denote the last hidden state at step t, and pk(ht) represent the probability distribution predicted by the k-th head for the token at t + k + 1 . The total loss function L is defined as: 
+
+L =
+
+> K
+
+X
+
+> k=1
+
+λk · CE (pk(ht), x t+k+1 ) (1) where λk serves as a decay coefficient. This weighting scheme reflects the increasing uncertainty associated with predicting more distant tokens, thereby stabilizing the convergence of the multi-head training process. 
+
+3.2 Static Implementation for NPU 
+
+The primary obstacle to deploying speculative decoding on NPUs lies in the hardware’s preference for Static Shape execution. Dynamic variations in tree topology typically trigger frequent graph recom-pilation, neutralizing potential speedups. To address this, we propose a fully static implementation paradigm that eliminates dynamic control flows. 3Figure 2: Overview of the OpenPangu-with-Medusa architecture adapted for NPU. The sys-tem features (a) a frozen OpenPangu backbone with lightweight MLP heads for block-wise token prediction, and (b) a Static Tree Verification module. The latter utilizes pre-computed topological buffers ( medusa_attn_mask ) to enable zero-copy path retrieval, ensuring compatibility with the NPU’s static graph execution model. 
+
+Tensorization of Tree Topology. Instead of dynamically constructing the verification tree at runtime, we pre-calculate the topological structure offline and map it to static tensors. We define a static visibility matrix, medusa_attn_mask , with dimensions [1 , 1, T, T ], which encodes the parent-child dependencies of all candidate paths within the tree. Simultaneously, we construct a 
+
+tree_indices tensor that creates a deterministic mapping between the flattened tree nodes and their corresponding positions in the KV-cache. By loading these invariant tensors into the NPU memory during the initialization phase, we ensure that the computational graph remains constant regardless of the speculative verification outcome, allowing the compiler to perform aggressive operator fusion. 
+
+Zero-Copy Retrieval Strategy. Traditional implementations often rely on CPU-side pointer manip-ulation to reconstruct the accepted token sequence, a process that incurs significant synchronization overhead and interrupts the NPU execution pipeline. We introduce a Zero-Copy Retrieval mechanism to circumvent this bottleneck. We construct a static lookup table, retrieve_indices , of size 
+
+[Npaths , K + 1] , which stores the exact memory offsets for every possible candidate path. During the verification phase, once the optimal path index is identified via the acceptance criteria, the model utilizes the on-chip Gather operator to extract the final token sequence directly from the candidate buffer using the lookup table. This design retains all data movements within the high-bandwidth NPU memory, achieving zero-copy path reconstruction and maximizing the utilization of the static execution graph. 
+
+## 4 Experiments & Analysis 
+
+4.1 Experimental Setup Hardware Environment. The experimental evaluation was conducted on a high-performance computing cluster equipped with NPU processors (running firmware and hosted on Kunpeng 920 CPUs). To provide a cross-architecture baseline, we also performed comparative benchmarks on an NVIDIA RTX A6000 GPU (Ampere Architecture) utilizing CUDA 11.8. Subject Model: OpenPangu-7B. The subject model for all experiments is openPangu-Embedded-7B-V1.1 , a high-efficiency LLM trained from scratch on the NPU ecosystem Chen et al. [2025]. This model is pre-trained on 25 trillion tokens and possesses a unique capability for "fast and slow thinking" adaptation. Unlike generic Llama-based architectures, OpenPangu-7B is specifically optimized for 4domestic hardware characteristics. The detailed architectural parameters of the model are summarized in Table 1. Implementation Details. For the training of the auxiliary Medusa Heads, we employed Table 1: Architectural Specifications of openPangu-Embedded-7B-V1.1. (Non-embedding param-eters account for approximately 7B).           
+
+> Attribute Configuration
+> Architecture Dense Parameters (Non-Embedding) 7B Number of Layers 34 Hidden Dimension 12,800 Attention Mechanism Grouped Query Attention (GQA) Number of Attention Heads 32 for Q, 8 for KV Vocabulary Size 153k Context Length (Natively) 32k Pretraining Tokens 25T
+
+the AdamW optimizer with a learning rate of 1e − 3 and a global batch size of 64. All inference tests utilize Float16 precision. Evaluation Metrics. To quantitatively assess the efficiency of the proposed scheme, we define three primary metrics. First, the End-to-End Speedup represents the wall-clock time improvement of our method compared to standard autoregressive decoding. Second, the Accept Rate (AC) measures the average number of tokens verified and accepted per decoding step. Finally, the Overhead Ratio quantifies the additional computational cost introduced by the speculative sampling and tree verification processes. The relationship between these metrics is formalized as follows: Speedup = AC Overhead (2) Overhead = Time speculative 
+
+Time autoregressive 
+
+(3) Where Time speculative denotes the latency of a single Medusa decoding step, and Time autoregressive 
+
+denotes the latency of a standard single-token generation step. 
+
+4.2 Impact of Self-Distillation Data Scale 
+
+The alignment between the prediction heads and the backbone model is critical for high acceptance rates. To investigate the data dependency of Medusa Heads, we trained multiple configurations using both a public dataset (ShareGPT) and a custom Self-Distillation dataset. The self-distillation dataset was constructed by prompting the OpenPangu-7B backbone with queries from ShareGPT and collecting its output logits as soft labels. This process ensures that the heads learn the specific probability distribution of the host model. We scaled the training data from 2k to 50k samples and evaluated the Top-1 accuracy of the predicted tokens. Table 2 summarizes the performance across different training configurations. Initial experiments relying solely on the public ShareGPT dataset (2k samples) yielded a suboptimal Top-1 accuracy of 62.40% for the first head, indicating a distribution shift between the generic chat data and the model’s specific behavior. Introducing self-distillation Table 2: Performance Comparison of Medusa Heads with Different Training Datasets                               
+
+> Dataset Size Number of Train with Reserve Top-1 Acc Top-1 Acc Training Time (Samples) Heads Self-Distillation? Special Tokens? (Head 1) (Head 2) (Hours)
+> 2k 3No No 62.40% 42.00% 7.45 10k 5Yes No 67.80% 49.30% 63.00
+> 50k 5Yes Yes 74.60% 54.10% 65.70
+
+(10k samples) improved the accuracy to 67.80%, yet the alignment remained imperfect. A deeper analysis revealed that the initial distillation process inadvertently filtered out OpenPangu’s special control tokens (e.g., tokens marking internal "thinking" states or start/end boundaries). Consequently, the heads failed to learn the structural formatting norms of the backbone. In the final configuration (50k samples), we explicitly preserved these special tokens during the data generation and training phases. This optimization proved decisive, boosting the Top-1 accuracy of Head 1 to 74.60% and Head 2 to 54.10% . This result underscores that for specialized LLMs like OpenPangu, the prediction 5128 256 384 512 1024 
+
+Decode Step (Sequence Length)    
+
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> 1.2
+> 1.4
+> End-to-End Speedup
+> 1.35
+> 1.26
+> 1.12 1.10
+> 0.95 0.97
+> 0.90 0.89 0.85
+> 0.79
+> Speedup Comparison: Ascend NPU vs NVIDIA GPU
+> Ascend 910B (Ours)
+> NVIDIA A6000
+
+Figure 3: End-to-End Speedup Comparison (NPU vs. NVIDIA A6000). The proposed method achieves a peak speedup of 1.35 × on NPU for short sequences ( L = 128 ), significantly outperforming the unoptimized GPU baseline. However, the speedup on NPU exhibits a downward trend as sequence length increases, eventually crossing the break-even point at L = 1024 .heads must be trained to mimic not only the semantic content but also the exact token-level formatting quirks of the host model. 128 256 384 512 1024 
+
+Decode Step (Sequence Length) 
+
+> 1.3
+> 1.4
+> 1.5
+> 1.6
+> 1.7
+> 1.8
+> 1.9
+> Overhead Ratio
+> Steeper Slope (Memory Sensitive)
+> Computational Overhead Analysis
+> Ascend 910B (Static Graph)
+> NVIDIA A6000 (Baseline)
+
+Figure 4: Computational Overhead Analysis. The graph illustrates the ratio of speculative decoding time to standard autoregressive time. The NPU (blue line) shows a steeper slope compared to the GPU (red dashed line), indicating higher sensitivity to memory access patterns. This non-linear growth in overhead is the primary factor limiting speedup in long-context scenarios on the NPU. 
+
+4.3 In-depth Performance Analysis on NPU 
+
+We further analyzed the dynamic performance characteristics of the system across varying sequence lengths. On the NPU platform, our method demonstrates a robust speedup of 1.35 × for short 6sequences (Decode Step 128). This performance advantage is attributed to the efficient parallelization of the matrix operations within the static graph, where the overhead ratio is kept low (1.32). However, a distinct trend emerges as the sequence length extends. While the Accept Rate remains relatively stable (dropping only slightly from 1.78 to 1.65), the computational Overhead rises non-linearly. As illustrated in Figure 4, the overhead on NPU reaches 1.77 at a sequence length of 1024. This phenomenon highlights the Memory Wall constraint inherent in the hardware. As the KV-cache grows linearly, the attention mechanism’s memory access pattern becomes increasingly sparse and bandwidth-intensive. The NPU , while powerful in computation, exhibits higher sensitivity to these memory-bound operations compared to the GPU baseline. Consequently, the speedup gain diminishes in long-context scenarios, suggesting that future optimizations must prioritize memory access patterns, such as KV-cache compression or tiling strategies, over pure compute optimization. 
+
+## 5 Conclusion 
+
+This paper presented an end-to-end acceleration scheme for OpenPangu-7B on NPU hardware. By introducing Static Tree Construction and Zero-Copy Retrieval , we overcame the incompatibility between dynamic speculative decoding and NPU static graph execution. Results show a 1.35x speedup on NPU . Future work will focus on operator fusion and memory optimization for long-context scenarios. 
+
+## References 
+
+Reza Yazdani Aminabadi, Samyam Rajbhandari, Ammar Ahmad Awan, Cheng Li, Du Li, Elton Zheng, Olatunji Ruwase, Shaden Smith, Minjia Zhang, Jeff Rasley, et al. Deepspeed-inference: enabling efficient inference of transformer models at unprecedented scale. pages 1–15, 2022. Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, et al. Language models are few-shot learners, 2020. Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng, Jason D Lee, Deming Chen, and Tri Dao. Medusa: Simple llm inference acceleration framework with multiple decoding heads. arXiv preprint arXiv:2401.10774 , 2024. Charlie Chen, Sebastian Borgeaud, Geoffrey Irving, Jean-Baptiste Lespiau, Laurent Sifre, and John Jumper. Accelerating large language model decoding with speculative sampling. arXiv preprint arXiv:2302.01318 , 2023. Hanting Chen, Yasheng Wang, Kai Han, Dong Li, Lin Li, Zhenni Bi, Jinpeng Li, Haoyu Wang, Fei Mi, Mingjian Zhu, et al. Pangu embedded: An efficient dual-system llm reasoner with metacognition. 
+
+arXiv preprint arXiv:2505.22375 , 2025. Aakanksha Chowdhery, Sharan Narang, Jacob Devlin, Maarten Bosma, Gaurav Mishra, Adam Roberts, Paul Barham, Hyung Won Chung, Charles Sutton, Sebastian Gehrmann, et al. Palm: Scaling language modeling with pathways. Journal of Machine Learning Research , 24(240):1–113, 2023. Tri Dao. Flashattention-2: Faster attention with better parallelism and work partitioning. arXiv preprint arXiv:2307.08691 , 2023. Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: Fast and memory-efficient exact attention with io-awareness. Advances in neural information processing systems , 35: 16344–16359, 2022. Yichao Fu, Peter Bailis, Ion Stoica, and Hao Zhang. Break the sequential dependency of llm inference using lookahead decoding. arXiv preprint arXiv:2402.02057 , 2024. Sehoon Kim, Karttikeya Mangalam, Suhong Moon, Jitendra Malik, Michael W Mahoney, Amir Gholami, and Kurt Keutzer. Speculative decoding with big little decoder. Advances in Neural Information Processing Systems , 36:39236–39256, 2023. 7Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with pagedattention. In Proceedings of the 29th symposium on operating systems principles ,pages 611–626, 2023. Yaniv Leviathan, Matan Kalman, and Yossi Matias. Fast inference from transformers via speculative decoding. In International Conference on Machine Learning , pages 19274–19286. PMLR, 2023. Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. Eagle: Speculative sampling requires rethinking feature uncertainty. arXiv preprint arXiv:2401.15077 , 2024. Heng Liao, Jiajin Tu, Jing Xia, Hu Liu, Xiping Zhou, Honghui Yuan, and Yuxing Hu. Ascend: a scalable and unified architecture for ubiquitous deep neural network computing: Industry track paper. In 2021 IEEE International Symposium on High-Performance Computer Architecture (HPCA) , pages 789–801. IEEE, 2021. Xupeng Miao, Gabriele Oliaro, Zhihao Zhang, Xinhao Cheng, Zeyu Wang, Zhengxin Zhang, Rae Ying Yee Wong, Alan Zhu, Lijie Yang, Xiaoxiang Shi, et al. Specinfer: Accelerating large language model serving with tree-based speculative inference and verification. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 , pages 932–949, 2024. Onur Mutlu, Justin Meza, and Lavanya Subramanian. The main memory system: Challenges and opportunities. 2015. Reiner Pope, Sholto Douglas, Aakanksha Chowdhery, Jacob Devlin, James Bradbury, Jonathan Heek, Kefan Xiao, Shivani Agrawal, and Jeff Dean. Efficiently scaling transformer inference. 
+
+Proceedings of machine learning and systems , 5:606–624, 2023. Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario Amodei, Ilya Sutskever, et al. Language models are unsupervised multitask learners. OpenAI blog , 1(8):9, 2019. Noam Shazeer. Fast transformer decoding: One write-head is all you need. arXiv preprint arXiv:1911.02150 , 2019. Benjamin Spector and Chris Re. Accelerating llm inference with staged speculative decoding. arXiv preprint arXiv:2308.04623 , 2023. Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Almahairi, Yasmine Babaei, Nikolay Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhosale, et al. Llama 2: Open foundation and fine-tuned chat models. arXiv preprint arXiv:2307.09288 , 2023. Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. Advances in neural information processing systems , 30, 2017. Samuel Williams, Andrew Waterman, and David Patterson. Roofline: an insightful visual performance model for multicore architectures. Communications of the ACM , 52(4):65–76, 2009. 8
