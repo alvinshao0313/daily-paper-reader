@@ -1,0 +1,529 @@
+Title: SemanticDialect: Semantic-Aware Mixed-Format Quantization for Video Diffusion Transformers
+
+URL Source: https://arxiv.org/pdf/2603.02883v1
+
+Published Time: Wed, 04 Mar 2026 01:57:34 GMT
+
+Number of Pages: 23
+
+Markdown Content:
+# SemanticDialect: Semantic-Aware Mixed-Format Quantization for Video Diffusion Transformers 
+
+Wonsuk Jang 
+
+Stanford University 
+
+wsjang@stanford.edu 
+
+Thierry Tambe 
+
+Stanford University 
+
+ttambe@stanford.edu 
+
+## Abstract 
+
+Diffusion Transformers (DiT) achieve strong video generation quality, but their memory and compute costs hinder edge deployment. Quantization can reduce these costs, yet existing methods often degrade video quality under high activation varia-tion and the need to preserve semantic/temporal coherence. We propose Semantic-Dialect , which advances recent block-wise mixed-format quantization—selecting a per-block optimal format (a dialect ) from multiple candidates (a formatbook )—by scaling the formatbook with lookup tables for quantization error and quantized values, enabling efficient per-block format selection and quantization at low online cost. We also introduce activation decomposition that reduces quantization error by re-quantizing and adding back residual errors, with attention-guided salient token selection. We further propose semantic-aware dialect assignment (SeDA) to improve quantized value consistency by sharing a sub-formatbook among se-mantically correlated tokens. Experiments on video DiT (VDiT) models show that SemanticDialect outperforms prior VDiT quantization methods and fine-grained block-wise format baselines, while approaching FP16 quality on Open-Sora 2.0. FP16 
+
+> NVFP4
+> Semantic
+> Dialect
+
+Figure 1: SemanticDialect is a post-training quantization method for video diffusion transformers. It quantizes Open-Sora 2.0 to 4-bit weights and activations while maintaining near-FP16 visual quality. 
+
+## 1 Introduction 
+
+Diffusion Transformers (DiT) [Peebles and Xie, 2023] have gained prominence in video genera-tion [Ma et al., 2024, Yang et al., 2024, Peng et al., 2025], as they scale well with model size while capturing long-range spatial/temporal context. However, their growing parameter counts and the need for multiple denoising iterations (often tens of steps) substantially increase both compute and memory demands. These costs are further amplified in video settings, where multi-frame processing expands the sequence length, making deployment on edge devices challenging. 
+
+Preprint. 
+
+> arXiv:2603.02883v1 [cs.CV] 3 Mar 2026
+
+Quantization mitigates these costs by reducing memory/data movement and enabling efficient low-bit arithmetic for higher throughput and better energy efficiency [Kim et al., 2023, Xiao et al., 2023, Rouhani et al., 2023a, Cao et al., 2024]. However, when applied to video diffusion transformers (VDiTs), prior DiT quantization methods often fail to preserve generation quality [Wu et al., 2024, Chen et al., 2025a, Zhao et al., 2024]. Two key challenges are (i) large activation variation, where a small number of large-magnitude outliers can dominate the scaling factor and reduce the effective resolution for most elements [Liu et al., 2023], and (ii) strong spatiotemporal correlations that are not well captured by simple MSE-based objectives. In response to the first challenge, fine-grained block-wise quantization has become widely used [Dai et al., 2021, Rouhani et al., 2023a, Hu et al., 2026, Lo et al., 2024] by assigning a separate scale to each small block to localize the impact of outliers. This trend is reflected in industry efforts such as the OCP Microscaling (MX) specification, which standardizes block-wise formats with power-of-two scaling [Open Compute Project, 2023]. Recent accelerators from NVIDIA and AMD have also adopted MX formats [NVIDIA, 2025, AMD, 2025]. To further improve accuracy, higher-precision block-scale variants (e.g., NVFP4) have also been introduced, albeit with higher metadata overhead and runtime scale handling (e.g., normalization/rescaling). Despite these advances in scaling, a single low-precision format still struggles to match the diverse per-block value distributions. Motivated by this, prior work proposes a mixed-format quantization that selects an per-block optimal format from a predefined set (the formatbook ) to better match block value distributions [Jang and Tambe, 2025] . However, extending this strategy to VDiTs is non-trivial for three reasons: (i) VDiT activations exhibit much higher variability, calling for a larger and more adaptive formatbook; (ii) on-the-fly format selection/quantization does not scale, as the per-representable-value combinational decision logic grows with the number of candidate dialects; and (iii) it ignores the semantic and temporal correlations that are central to video generation. To tackle these challenges, we propose SemanticDialect , a post-training quantization (PTQ) method for VDiTs based on fine-grained block-wise mixed-format 4-bit representation ( SD4 ). To handle highly variable activations, we employ a larger formatbook (32 dialects) and use lookup tables 
+
+(LUTs) to enable scalable online per-block format selection and quantization. To mitigate quality loss in quantization-sensitive layers, we introduce activation decomposition , which re-quantizes the quantization error and adds it back to the primary output, improving reconstruction without mixed-precision overhead. We further reduce its overhead via conditional-branch-aware salient token selection guided by ReLU/ABS-transformed attention scores. Finally, to avoid block-wise over-specialization—where identical values can quantize differently across blocks and undermine spatiotemporal consistency among semantically related tokens—we propose semantic-aware dialect assignment (SeDA) , encouraging aligned tokens to share the same sub-formatbook. Our contributions can be summarized as follows: • We introduce SD4, a 4-bit format for calibration-free fine-grained block-wise mixed-format quantization that assigns each block an optimal format from a 32-format formatbook, efficiently enabled by lookup table-based format selection and quantization. • We improve quantization-sensitive layers via activation decomposition, re-quantizing residu-als and adding them back without mixed-precision overhead. We also cut re-quantization cost via conditional-branch-aware, attention-guided selection of salient tokens. • We propose semantic-aware dialect assignment (SeDA), to improve spatiotemporal consis-tency by assigning semantically aligned tokens to the same 8-format sub-formatbook. • We demonstrate that SemanticDialect outperforms existing VDiT quantization methods and fine-grained block-wise format baselines across multiple models. 
+
+## 2 Related Work 
+
+2.1 Video Diffusion Transformers (VDiT) 
+
+DiTs [Peebles and Xie, 2023] replace convolutional U-Net backbones with Transformer blocks for diffusion modeling and have become a common foundation for video generation. Like prior diffusion models, they iteratively denoise latents over multiple steps, but Transformer can better capture global context over large token sequences. VDiTs commonly exhibit two architectural patterns: (i) they 2Q( A)           
+
+> Q( Δ)
+> W
+> A
+> (=Q(A)+ Δ)
+> +
+> ≈
+> WX
+> X
+> Same precision
+> Quant. Error
+> Lookup table
+> Act. Weight
+> X
+> …
+> …
+> …
+> …
+> Block
+> ΣQuant . error
+> …
+> Group -wise max
+> Accum .
+> Idx Format ΣErr
+> 8-entry
+> UINT4
+> … 19.1
+> 12.7
+> 7.2
+> Min
+> Quant. Value
+> Lookup table
+> 0
+> 1
+> 31
+> Quantized block
+> …
+> …
+> LUT -based format
+> selection &quantization
+> Formatbook Video frame
+> Anchor tokens
+> Correlated tokens
+> Formatbook
+> 8-dialect
+> Sub -formatbook
+> Enforce a shared
+> sub -formatbook
+> Semantic -aware
+> dialect assignment
+> Activation
+> decomposition
+> (a) (b) (c)
+> Attention -guided
+> per -spatial -tile selection
+> 32 -dialect
+
+Figure 2: Overview of SemanticDialect. (a) LUT-based efficient online format selection and quanti-zation. (b) Activation decomposition to compensate for quantization-sensitive layers. (c) Semantic-aware dialect assignment (SeDA) to improve quantized-value consistency across blocks. inject external conditions (e.g., text and timestep) via cross-attention and/or modulation layers such as adaptive LayerNorm-style conditioning. (ii) They model spatiotemporal inputs either with factorized attention that separates spatial and temporal interactions [Ma et al., 2024, Zheng et al., 2024] or with full spatiotemporal (3D) attention [Peng et al., 2025, Yang et al., 2024, Kong et al., 2024] that jointly attends across space–time tokens paired with 3D rotary positional embeddings (3D RoPE). Many VDiT models use classifier-free guidance (CFG), running both a conditional branch (e.g., with text conditioning) and an unconditional branch, then combining them as ˆϵ = ϵu + s(ϵc − ϵu) with guidance scale s, typically using s > 1 for stronger conditioning. 
+
+2.2 VDiT Quantization 
+
+A growing line of work studies post-training quantization for DiTs. Q-DiT and PTQ4DiT [Chen et al., 2025a, Wu et al., 2024] aim to stabilize activation quantization across channels and timesteps, while SVDQuant [Li et al., 2024] reduces error by adding a lightweight SVD-based low-rank compensation branch. However, these designs do not fully address the stronger spatiotemporal variation in VDiTs, nor do they explicitly account for video-specific quality metrics. Recent VDiT-focused approaches improve quality through video-aware heuristics, including metric-aware mixed precision (ViDiT-Q [Zhao et al., 2024]), inter-frame distribution distillation to better preserve temporal behavior (Q-VDiT [Feng et al., 2025b]), and highlighting the importance of calibration-data selection (S 2Q-VDiT [Feng et al., 2025a]). In contrast, our method targets the root cause—diverse block-level distributions across multiple axes—through online per-block format selection to better match block statistics. We also introduce uniform-precision activation decomposition for quantization-sensitive layers and semantic-aware dialect assignment (SeDA) to preserve spatiotemporal consistency of quantized values, without resorting to higher-precision activations or calibration-heavy recipes. 
+
+2.3 Fine-Grained Block-Wise Mixed-Format Quantization 
+
+Fine-grained block-wise quantization has become widely used [Dai et al., 2021, Rouhani et al., 2023a, Hu et al., 2026, Lo et al., 2024, Rouhani et al., 2023b] because it effectively localizes the impact of outliers by assigning a separate scale to each small block. However, mapping normalized values into a single low-precision format (e.g., FP4) can still incur large error due to limited representational capacity. Mixed-format methods improve representation by selecting among multiple candidates: RaZeR [Chen et al., 2025b] repurposes redundant ±0 encodings in NVFP4 into predefined special values, and BlockDialect [Jang and Tambe, 2025] selects a per-block format from a predefined set (a 
+
+formatbook ) while retaining power-of-two scaling. Yet, expressiveness is often limited by predefined special values or modest-size formatbooks, and scaling to many candidates is challenging because they require costly multiple quantizations or per-representable-value combinational logic to find the best format. We address these limitations by scaling to a larger, more expressive formatbook with low online overhead via LUT–based per-block format selection and quantization. Throughout the paper, we use the term dialect to refer to each same-precision candidate with slightly different representable values in the formatbook. 3[0,2)                      
+
+> Activation
+> Weight
+> 0%
+> 10%
+> 20%
+> 30%
+> 40%
+> 50%
+> 0%
+> 10%
+> 20%
+> 30%
+> 40%
+> Share of total (%)
+> [2,4)
+> [4,6)
+> [6,8)
+> [8,10)
+> [10,12)
+> [12,14)
+> [14,16)
+> 7.13 elements
+> (blocksize =32)
+> 8.62 elements
+> (blocksize =32)
+> (a) (b)
+> Fine -grained block
+> G0 G1 G7 G6 …
+> Group -wise max
+> IDX
+> …
+> 10
+> …
+> Value [5,5.5)
+> Qvalue 6
+> Qerror 3
+> Dialect5 10 8643210
+> Closest to [5,5.5)
+> Qerror (0.25 granularity)
+> 6-(5+5.5)/2 = 0.75 à3
+> (c)
+> 5.27 10.54 <<1
+> Dialect5 LUT Floor
+
+Figure 3: Proposed formatbook and lookup table. (a) Four formatbook construction rules. (b) Block-wise normalized value distributions. (c) LUT details and data-to-index conversion. 
+
+## 3 SemanticDialect: Semantic-Aware Mixed-Format Quantization for Video Diffusion Transformers 
+
+Figure 2 summarizes our approach. We enable quality-preserving, fine-grained block-wise mixed-format quantization for VDiTs by addressing four challenges: (1) an expressive formatbook; (2) efficient online per-block dialect selection and quantization; (3) mitigating errors in quantization-sensitive layers; and (4) semantic awareness across spatial and temporal axes. 
+
+3.1 Constructing a Highly Expressive Formatbook Block Normalization and 4-bit Representation. For each block, we first compute a shared power-of-two scale by taking the block maximum and applying ⌊log 2(·)⌋. We then normalize each block so that its values lie in [0 , 2) , with the maximum in [1 , 2) . Each normalized element is represented by a 1-bit sign and a 3-bit index (i.e., 4-bit quantization) that selects one of eight representable magnitudes in the chosen dialect. These magnitudes are 4-bit unsigned integers (0-15), enabling hardware-efficient low-precision multiply–accumulate (MAC). For efficient implementation, we offset the shared exponent by 3 (equivalently, scale the normalized values by 23), mapping [0 , 2) to 
+
+[0 , 16) (with the maximum in [8 , 16) ) so magnitudes can be easily encoded as 4-bit unsigned integers. 
+
+Formatbook Design. Since the 16-dialect formatbook in prior work [Jang and Tambe, 2025] cannot capture the higher variation in VDiT weights and activations (see Table 1), we build a larger 32-dialect 
+
+formatbook (Fig. 3a). We follow four design rules. (1) Cover all dynamic ranges: since power-of-two scaling discretizes range, insufficient coverage can create underestimated or wasted regions [Jang and Tambe, 2025, Lo et al., 2024]; thus we include dialects spanning all possible ranges. (2) Densify small magnitudes: profiling (Fig. 3b) shows most values cluster near zero, so we allocate more points to small magnitudes. (3) Preserve large magnitudes: large-magnitude values often dominate MAC results because their products contribute far more to the sum, and they suffer high quantization error under small-magnitude–biased dialects due to sparse high-range coverage [Cook et al., 2025]; thus each dynamic range includes dialects that better represent large magnitudes. (4) Use fewer dialects for narrower ranges: narrower ranges require fewer dialects, which reduces dialect ID (DID) metadata and simplifies per-block dialect selection. Since we use a 32-dialect formatbook, the total per-block metadata overhead is 10 bits (5-bit DID and 5-bit shared exponent). It is worth noting that, although this rule-based formatbook may not be globally optimal, our goal is to demonstrate scalable large-formatbook mixed-format quantization, not to exhaustively optimize the formatbook. 
+
+3.2 LUT-Based Per-Block Dialect Selection and Quantization Group-wise Maximum Extraction. A straightforward dialect selection method computes the MSE for each of the 32 dialects over all elements in a block (e.g., 32) and picks the minimum. However, 4Vector     
+
+> Matrix
+> Q(Act) Q( Δ)Act
+> =+
+> Low additional quantization cost
+> =
+> Quantize only salient tokens
+> +
+> …
+> Frame 0
+> Per -tile token with the highest
+> avg. ABS/ ReLU (attention) to
+> local spatiotemporal neighbors
+> Frame
+> 1Frame
+> 2
+> : Tile
+
+Figure 4: Activation decomposition for vector and matrix activations. across many blocks, this full comparison can be costly. Profiling (Fig. 3b) on Open-Sora 2.0 shows that only a small fraction of elements have large magnitude, yet they disproportionately contribute to MAC results. To balance accuracy and compute overhead, we therefore add an option to restrict MSE evaluation to the top-k largest-magnitude values (e.g., k = 8 ). However, exact top-k requires sorting overhead, so we approximate it by partitioning each block into k groups (with configurable 
+
+num_groups ) and taking the maximum from each group (Fig. 3c). This is efficient because top-1 selection avoids sorting and can be computed in parallel across groups. 
+
+LUT-Based MSE Approximation. Even with group-wise maximum extraction, evaluating MSE remains compute-intensive. Our dialects span diverse block-value distributions, so quantization is not a simple shift-and-round operation as in standard 4-bit formats (e.g., INT4, FP4). Instead, for each dialect we must (i) find the nearest representable value and (ii) accumulate its deviation from the input. To make this efficient at large formatbook sizes, we introduce two lookup tables per dialect, 
+
+Qvalue and Qerror (Fig. 3c): Qvalue returns the quantized value for a given input, while Qerror 
+
+returns an approximate quantization error. Because the input is non-integer (e.g., FP16) and cannot directly index a lookup table, we apply a simple shift-and-truncate to map it to an integer bin index. Since representable values are integers (with decision boundaries at half-integers), we build Qvalue at 0.5 granularity to obtain the exact quantized value. In contrast, each 0.5-wide bin corresponds to a range of possible errors, so we approximate Qerror using the midpoint error in that bin. Format selection then reduces to summing 
+
+Qerror over the group-wise maxima to estimate MSE and choosing the dialect with minimum approximate MSE. After selecting the dialect, quantizing all block elements is likewise efficient by directly querying Qvalue .
+
+Two-stage Format Selection. A remaining challenge is the cost of comparing all 32 dialects to select the best per-block dialect. Since matching the block’s dynamic range is critical to avoid underestimating or wasting range, we adopt a two-stage approach similar to [Jang and Tambe, 2025]. In the first stage, we select a sub-formatbook based on the block maximum. In the second stage, we compute the approximate MSE and compare only the dialects within the selected sub-formatbook. We refer to our 4-bit quantization format, which uses the formatbook and the techniques described above, as SD4 (SemanticDialect 4-bit format) for the remainder of the paper. 
+
+3.3 Compensating Quantization-Sensitive Layers Layer-wise Profiling Results. SemanticDialect primarily targets linear layers ( nn.Linear ), which dominate latency due to activation–weight MACs [Zhao et al., 2024]. For each layer, we profile (i) sensitivity by quantizing only that layer in an otherwise FP16 model, and (ii) recovery potential 
+
+by keeping only that layer in FP16 in an otherwise SD4-quantized model. Appendix A shows that 
+
+modulation layers are the most quantization-sensitive in Open-Sora 2.0 (Flux-based [Labs et al., 2025]), likely because its input is a single vector encoding text and timestep information and is already highly compressed. In Open-Sora 1.0 (STDiT-based [Zheng et al., 2024]), this layer is relatively small and is typically kept in FP16 [Zhao et al., 2024, Feng et al., 2025b]. Beyond modulation, we find the final MLP linear layer —often sensitive since it directly precedes the layer output [Yan et al., 2026, Ashkboos et al., 2024]—and the temporal attention QKV projection to be the most sensitive. 
+
+Activation Decomposition. In diffusion transformers, activations are often harder to quantize than weights due to timestep-dependent, channel-wise outliers [Ding et al., 2025, Chen et al., 2025a]. In contrast, weights are timestep-invariant and can be quantized offline, allowing exhaustive dialect selection without runtime approximations. We therefore focus on improving activation quantization in sensitive layers. Mixed precision (i.e., using higher precision for sensitive layers) is a straightforward 5❶ Tilewise                             
+
+> Top -1 by mean
+> intra -tile attn
+> 0
+> 1
+> 2
+> 3…
+> …
+> Frame
+> ❸Select tokens
+> attn_score < TH Share 8-entry
+> formatbook
+> Anchor tokens
+> Correlated tokens
+> Target activation
+> Hidden_dim
+> Frame
+> Quant.
+> Blk0 BlkN …Blk1
+> Max
+> value Frequency (%)
+> 8F0 12 F1 88
+> 9F2 60 F3 40
+> 10 F4 20 F5 50 F6 30
+> …
+> 8-dialect formatbook
+> (i.e., 1 dialect/range)
+> Bin -count profiling
+> ❷Top -1
+> mean
+> temp. attn
+> temporal
+> ✅
+> ❌
+> ❌
+> (a) (b)
+> Top -1 token by mean
+> attn in frame -aligned
+> spatial tile Frame t Frame t+n
+> …
+> Full 3D attn
+> Separate spatial/temporal attn
+> …
+> Local window
+> Latent -grid units Latent -grid units
+> Timestep
+> Timestep
+> (c)
+> Open -Sora 1.0
+> Open -Sora 2.0
+> Initial
+> instability
+> Initial
+> instability
+> Final -step
+> uptick
+> Final -step
+> uptick
+
+Figure 5: Details of Semantic-Aware Dialect Assignment (SeDA). (a) Anchor/correlated token selection for different attention architectures. (b) Sub-formatbook construction via bin-count profiling. (c) Average anchor-token movement across consecutive denoising timesteps. option, but it is undesirable: it complicates GPU kernels (multiple data types and conversions, fewer fusion opportunities), increases memory-management complexity, and may require extra datapaths or format-specific kernels—especially for non-standard formats such as SD4 or on dedicated hardware. Instead, we propose activation decomposition . As shown in Figure 4, we quantize the activation and form a residual, Act = Q(Act ) + ∆ , then re-quantize ∆ and add it back, yielding Q(Act ) + Q(∆) 
+
+as a closer approximation to Act using a single low-precision format. Since decomposition applies only to activations, the parameter count is unchanged and a linear layer becomes Act · W + b ≈ Q(Act ) + Q(∆) W + b. The modulation layer in Open-Sora 2.0 is particularly suitable because its activation is a single vector , making the extra re-quantization cheap. For matrix activations, decomposing all tokens increases the effective bitwidth (two 4-bit values per token, ≈ 8 bits plus overhead). We therefore apply decomposition only to one salient token per tile (e.g., 1 × 4 tokens). Concretely, we score candidates by their mean attention score ( Q · KT) to a local spatiotemporal neighborhood and select the highest-scoring token in each tile. Since raw scores can cancel due to negative values, we treat temporal and spatial / 3D attention differently: we use ReLU for temporal attention to focus on positively aligned aggregation links across frames, while using ABS( | · | ) for spatial / 3D attention since both positive and negative responses can be informative (similarity vs. contrast). Moreover, in some layers, allocating the salient token budget to the conditional CFG branch can be more effective than splitting it evenly across conditional and unconditional branches. Detailed evaluation is provided in Appendix 4.4. 
+
+3.4 Incorporating Semantic Awareness Across Spatial and Temporal Axes Temporal and Spatial Inconsistency from Block-Wise Dialect Selection. Although block-wise mixed-format quantization better matches local value distributions, a large formatbook can introduce 
+
+inconsistent quantization across blocks. For example, the same activation at a given spatial token may be quantized differently across frames if small shifts in block statistics change the selected dialect. Likewise, spatially adjacent tokens that belong to the same semantic region can still be represented differently due to mismatched dialect assignments, even though they often exhibit similar appearance cues (e.g., texture or color). In short, fine-grained dialect matching with a large formatbook can “overfit” local blocks—optimizing the “trees” while harming the “forest.” 
+
+Semantic-Aware Dialect Assignment (SeDA). To mitigate this over-specialization, we smooth dialect assignments by encouraging semantically related tokens to use consistent dialects. However, forcing them to share a single dialect can degrade video quality because their blocks may have different dynamic ranges. Instead, we enforce consistency at the sub-formatbook level: related tokens share the same 8-dialect sub-formatbook spanning the full dynamic-range set (8–15), while still allowing one dialect to be selected per dynamic range. 6Attention-Guided Semantic Relatedness Extraction. Prior works use attention scores as a criterion for token similarity [Lu et al., 2025] and show that VDiT attention map exhibits strong spatiotemporal locality and encodes prompt-conditioned structure [Cai et al., 2025, Wen et al., 2025]. Following this line, we treat attention scores ( Q · KT as a proxy for semantic relatedness and enforce consistent 
+
+sub-formatbook assignments across highly attended tokens. Concretely, we first identify a set of anchor tokens and then collect their correlated tokens , which receive strong attention from each anchor token (Figure 5). A naive approach is to select the top-k
+
+tokens by average attention score, but this requires sorting over a large token set and is impractical for on-the-fly execution. Moreover, global top-k selection can produce spatially clustered anchors from large homogeneous regions (e.g., background), resulting in poor coverage of the full frame. To address these issues in factorized attention, 1 we partition each frame into spatial tiles and identify per-frame anchor candidates using the highest mean attention score within each tile (with the number of candidates set to the number of frames, N ). 2 We then select the main anchor from these N
+
+candidates using the highest temporal mean attention score, and discard frames whose candidates are weakly correlated with the main anchor. 3 Finally, within a local square window centered at the remaining anchors, we mark tokens with attention scores above a threshold as correlated tokens. For 3D attention, which jointly covers spatial and temporal tokens, we directly identify the main anchor token by selecting the token with the highest mean attention score over a spatial tile (with side length k) across frames (a k × k × N region). We then search for correlated tokens within a local cuboid window centered at the main anchor token and mark tokens whose attention score from the main anchor exceeds a threshold. During quantization, each anchor token and its correlated tokens are constrained to share the same sub-formatbook. In both anchor token and correlated token selection, we use raw attention scores so that weakly or negatively related tokens are not favored. 
+
+Constructing an 8-Dialect Sub-Formatbook. We apply SeDA to post-attention linear layers (e.g., the MLP), as they lie immediately before the residual output and therefore strongly affect the layer output; empirically, this placement is the most effective. After quantizing the target layer, we perform bin-count profiling on anchor tokens to measure how often each dialect is selected in each dynamic range. We then construct an 8-dialect sub-formatbook by selecting, for each dynamic-range bucket, the most frequently selected dialect (Figure 5b). 
+
+Mitigating Profiling Overhead. Although SeDA is applied to only a small number of layers, bin-count profiling and anchor/correlated token extraction can still be expensive. Figure 5c provides a key insight for reducing this overhead: the anchor-token set changes across consecutive timesteps in a U-shaped pattern over the denoising process. In the first few timesteps, attention is not yet stable, leading to high variance; we therefore skip SeDA in this region because it is guided by attention maps. In the final few timesteps, which refine video details, applying SeDA at every timestep is beneficial for accurate tracking. In the intermediate, more stable region, we find that periodically updating the anchor/correlated tokens (e.g., once every 10 timesteps) causes little quality degradation. Leveraging these observations, we reduce SeDA overhead by skipping the initial unstable timesteps and using infrequent token updates in the stable region. 
+
+## 4 Experiments 
+
+4.1 Experimental Setup Models and Evaluation Settings. We evaluate SemanticDialect on Open-Sora 1.0 [Zheng et al., 2024] and Open-Sora 2.0 [Peng et al., 2025], which use two different representative architectures, factorized spatial/temporal attention and full 3D attention, respectively. In Open-Sora 1.0, videos are generated with 100 DDIM sampling steps and a CFG scale of 4.0, whereas Open-Sora 2.0 uses 50 denoising steps under the default configuration. We use VBench [Huang et al., 2024] for comprehensive comparisons and follow prior works [Ren et al., 2024, Feng et al., 2025b] by reporting eight key dimensions covering frame-wise quality, temporal quality, and semantics. For brevity, we abbreviate Background Consistency as BG Consist. and Semantic & Style Consistency as SS Consist. 
+
+in the tables. In addition, following EvalCrafter [Liu et al., 2024b], we report CLIPSIM for text–video alignment and CLIP-Temp for temporal consistency, DOVER [Wu et al., 2023] for aesthetic and technical video quality, and Flow-score for general motion information. Detailed settings and metric descriptions are provided in the Appendix C and D. 7Table 1: Performance of text-to-video generation on the VBench benchmark suite for Open-Sora 1.0 and 2.0. Bold : better result between NVFP4 and SemanticDialect at similar effective bit-widths.                                                                                                                                                                                                                 
+
+> Model Method Block Size Eff. bit (A/W) Aesthetic Quality Imaging Quality Motion Smooth. Dynamic Degree Subject Consist. BG. Consist. Scene Consist. SS. Consist. Open-Sora 1.0
+> factorized attn FP16 -16 / 16 58.56 66.10 97.22 48.61 93.26 96.18 24.48 25.25 MXFP4 16 4.31 / 4.31 32.76 30.08 99.04 81.94 86.79 94.33 4.84 13.22 32 4.16 / 4.16 34.85 38.27 98.86 88.89 87.72 94.46 5.51 13.30 NVFP4 16 4.5 / 4.5 51.00 55.21 97.63 47.22 89.18 95.44 19.79 23.15
+> 32 4.25 / 4.25 46.68 48.30 98.32 40.28 90.24 95.75 11.16 20.04 Block Dialect 16 4.56 / 4.56 48.26 50.27 98.46 65.28 89.04 94.77 13.84 21.54 32 4.28 / 4.28 42.43 47.99 98.65 77.78 87.63 94.78 8.26 18.58 ViDiT-Q A: Token W: Ch 4.81 / 4.73 28.66 64.34 82.64 38.89 91.77 95.25 0.00 6.50 Q-VDiT 29.37 54.97 85.27 80.56 97.02 97.38 0.00 0.96 Semantic 16 5.10 / 4.63 54.68 63.93 97.75 37.50 93.30 95.72 22.10 23.17 Dialect 32 4.76 / 4.31 51.54 61.03 97.73 51.39 90.88 95.02 18.08 22.55
+> Open-Sora 2.0
+> 3D attn FP16 -16 / 16 58.05 64.52 98.84 54.17 94.41 97.73 41.74 27.34 MXFP4 16 4.31 / 4.31 52.99 42.47 99.03 45.83 87.61 94.73 37.13 25.88 32 4.16 / 4.16 52.90 42.31 99.01 44.44 87.74 94.69 34.60 25.90 NVFP4 16 4.5 / 4.5 57.09 65.39 98.63 54.17 91.96 96.35 40.10 27.85 32 4.25 / 4.25 57.07 64.40 98.55 50.00 91.04 96.05 44.05 27.81
+> Block Dialect 16 4.56 / 4.56 57.26 62.02 98.76 58.33 92.62 97.45 38.39 27.63 32 4.28 / 4.28 56.83 60.93 98.79 58.33 91.81 97.13 42.19 27.58 ViDiT-Q A: Token W: Ch 4.82 / 4.40 55.50 59.19 98.72 47.22 90.18 95.12 34.75 27.19 Semantic 16 4.63 / 4.63 57.39 65.36 98.62 51.39 93.04 96.81 45.09 27.83 Dialect 32 4.31 / 4.31 57.78 65.18 98.51 55.56 91.81 96.13 44.57 27.78
+
+Baseline. We compare SemanticDialect against representative fine-grained block-wise formats, MXFP4 and NVFP4 [NVIDIA, 2025]. MXFP4 uses power-of-two block scaling, whereas NVFP4 uses FP8 block scaling with additional per-tensor scaling. For a fair comparison, we use block sizes of 16 and 32 for all methods. We also compare against two recent VDiT quantization schemes, ViDiT-Q [Zhao et al., 2024] and Q-VDiT [Feng et al., 2025b]. ViDiT-Q combines fine-grained grouping, channel balancing via outlier migration and a Hadamard transform, and mixed precision. Q-VDiT applies low-rank approximation of quantization error and inter-frame distribution distillation. We compare against Q-VDiT only on Open-Sora 1.0, since its implementation requires learning parameters for isolated temporal attention. For a fair comparison, we use the mixed-precision setting supported by each method to achieve a similar effective bitwidth across methods. Finally, we compare against BlockDialect [Jang and Tambe, 2025], a mixed-format quantization method that also performs per-block dialect selection but uses a 16-dialect formatbook and a different dialect-selection method, which limits its formatbook scalability. SemanticDialect uses a default num_groups of 8 to balance quantization performance and efficiency. 
+
+4.2 Main Results 
+
+As shown in Table 1, SemanticDialect achieves the best performance across methods, block sizes, and models with different architectures. For the small Open-Sora 1.0 model (<1B), other methods fail to generate readable videos in the 4–5-bit activation regime (as indicated by a significantly high dynamic degree caused by noise and low scene consistency), whereas SemanticDialect successfully generates videos with high aesthetic/imaging quality and scene consistency even at a block size of 32. At a block size of 16, its quality and consistency metrics become close to FP16, within ∼2.3 points. For the larger Open-Sora 2.0 model, SemanticDialect still shows broadly improved performance over prior methods and, at a block size of 16, achieves near-FP16 performance. As highlighted in bold, SemanticDialect generally outperforms NVFP4 at similar effective bitwidth. Note that SemanticDialect has a higher effective bitwidth on Open-Sora 1.0 than on Open-Sora 2.0 due to matrix activation decomposition. We also show that SemanticDialect achieves better performance on additional metrics than NVFP4. Details are provided in Appendix G. 
+
+4.3 Comparison with MSE-based Dialect Selection 
+
+Table 2 compares dialect-selection strategies. We make two observations. First, SD4 also outperforms exact MSE-based selection, which may be driven by a few extreme errors, does not always improve 8Table 2: MSE vs. group-wise max selection on Open-Sora 1.0 and 2.0. SD4 uses only the proposed format, without additional techniques (e.g., activation decomposition). We denote num_group by g.
+
+Model Method Eff. bit (A/W) Aesthetic Quality Imaging Quality Motion Smooth. Dynamic Degree Subject Consist. BG. Consist. Scene Consist. SS. Consist. Open-Sora 1.0 
+
+FP16 16/16 58.56 66.10 97.22 48.61 93.26 96.18 24.48 25.25 Exact MSE 45.85 51.50 98.53 43.06 90.67 95.76 10.79 19.96 SD4 (g=32) 4.31/4.31 46.40 51.92 98.49 47.22 90.21 95.81 12.72 20.09 SD4 (g=8) 45.97 50.99 98.48 43.06 90.26 95.64 11.31 20.39 
+
+Open-Sora 2.0 
+
+FP16 16/16 58.05 64.52 98.84 54.17 94.41 97.73 41.74 27.34 Exact MSE 57.63 63.77 98.72 56.94 92.50 96.90 42.04 27.51 SD4 (g=32) 4.31/4.31 57.80 63.91 98.69 56.94 92.34 96.98 44.57 27.59 SD4 (g=8) 57.67 63.48 98.66 55.56 92.34 96.92 40.40 27.55 
+
+Table 3: Ablation of salient token selection and attention scoring configurations for activation decomposition (w/o SeDA) on Open-Sora 1.0. “cond” denotes allocating the full salient token budget to the conditional branch only (rather than splitting it across conditional and unconditional branches).                                                                                                                              
+
+> Method Aesthetic Quality Imaging Quality Motion Smooth. Dynamic Degree Subject Consist. BG. Consist. Scene Consist. SS. Consist. Target selection Timestep range
+> Full tensor Steps 0–24 47.61 54.85 98.05 47.22 90.10 95.42 13.10 20.27 Full tensor Steps 75–99 46.79 50.50 98.64 44.44 90.36 95.61 11.46 20.98 Random (25%) All steps 46.61 52.66 98.21 43.06 89.91 95.49 12.65 20.82 Top-25% magnitude All steps 45.97 50.99 98.48 43.06 90.26 95.64 11.31 20.39 Top-1 mean attn / 1×4tile All steps 50.98 60.42 97.79 54.17 90.49 95.06 18.90 21.98
+> Spatial scoring Attn agg. tile Temporal scoring
+> Raw 4×4Raw 47.77 55.47 98.08 47.22 90.11 95.02 15.48 21.08 ReLU 4×4ReLU 47.74 55.40 98.07 51.39 89.82 95.06 16.00 21.08 ABS 4×4ABS 47.86 55.67 98.05 48.61 89.98 95.12 17.19 21.03 ABS 4×4ABS (cond) 50.95 60.16 97.77 51.39 90.55 95.04 17.19 22.32 ABS 4×4ReLU (cond) 50.98 60.42 97.79 54.17 90.49 95.06 18.90 21.98 ABS (cond) 4×4ReLU (cond) 46.04 48.56 97.20 36.11 92.92 96.36 5.73 17.41 ABS 32 ×32 ReLU (cond) 51.10 60.29 97.81 48.61 90.39 95.02 16.59 22.28
+
+end-to-end video quality. Second, even coarse group-wise maximum extraction (num_groups=8) remains comparable to exact MSE selection, indicating that preserving influential large-magnitude values matters more than over-optimizing a few outliers. 
+
+4.4 Activation Decomposition Salient Token Selection Criteria 
+
+Table 3 compares salient token selection strategies for activation decomposition. Overall, our attention-guided salient token decomposition consistently outperforms full-tensor decomposition (under partial-timestep decomposition), and it also surpasses random- and magnitude-based selection. 
+
+Token scoring. Aggregating ABS/ReLU-transformed attention scores is more effective than aggre-gating raw scores, suggesting that these transformations capture token similarity (correlation) more reliably. By contrast, raw-score aggregation can be misleading because negative attention values may cancel positive correlations, thereby underestimating truly salient interactions. 
+
+Conditional branch awareness. With a fixed salient-token budget, we compare splitting the budget across conditional/unconditional branches versus allocating the full budget to the conditional branch. For attn_temp.qkv , conditional-only selection performs substantially better; however, applying the same strategy to mlp.fc2 severely degrades quality (e.g., scene consistency drops to 5.73). We attribute this to classifier-free guidance, where the update depends on the conditional–unconditional activation delta: improving only the conditional branch can strengthen the conditioning signal, but a noisier unconditional branch can corrupt the delta. This effect is stronger for mlp.fc2 , which directly produces output activations, whereas attn_temp.qkv is followed by attention/normalization/linear layers that can partially absorb unconditional-branch noise. Empirically, ReLU-based scoring is the best choice for the temporal-attention conditional branch. 9Table 4: Progressive improvement of our method on Open-Sora 1.0 (OpenSora prompt set).                                                
+
+> Method Block size FVD-FP16
+> (↓)CLIP-Temp CLIPSIM VQA-Aesthetic VQA-Technical
+> ∆Flow Score ( ↓)
+> FP16 ––0.9987 0.1788 51.53 48.26 –SD4 16 5.64 0.9979 0.1778 50.73 47.82 0.37 +Decomp. 4.75 0.9985 0.1742 50.93 48.10 0.20 +SeDA 4.41 0.9984 0.1750 51.07 48.09 0.22 SD4 32 9.35 0.9984 0.1776 50.08 47.70 0.47 +Decomp. 6.54 0.9981 0.1761 50.80 48.03 0.37 +SeDA 6.06 0.9984 0.1744 50.88 48.03 0.49
+
+Attention score aggregation tile size. Finally, selecting salient tokens within each 4 × 4 tile encourages uniform spatial coverage across the frame. By contrast, global frame-level selection often concentrates tokens in a few regions—typically large background areas that contain many tokens—leading to poor coverage elsewhere and degraded performance. 
+
+4.5 Stepwise Evaluation with Additional Metrics 
+
+To analyze the contribution of each proposed technique, we report stepwise video-quality improve-ments on Open-Sora 1.0 using the OpenSora prompt set, averaged over multiple random seeds. Table 3 shows that FVD-FP16, which measures feature-distribution similarity to the FP16 model which highly correlated with human perception, consistently decreases as more techniques are added. VQA aesthetic and technical scores also generally improve progressively, demonstrating that each technique contributes to both perceptual quality and low-level visual quality (e.g., reduced noise and blur) of the generated videos. Additional results on a UCF-101 dataset [Soomro et al., 2012]is provided in Appendix H. 
+
+4.6 Additional Exploratory Studies 
+
+In Appendix B, we show that all dialects are meaningfully leveraged. To further study the impact of SemanticDialect configurations, we present SeDA ablations on tile/correlation window size, temporal axis integration, and timestep-wise overhead mitigation in Appendix F. 
+
+4.7 Future Works 
+
+Hardware cost evaluation with CUDA kernel implementation and RTL synthesis results will be included in the next revision, along with additional model experiments. 
+
+## 5 Conclusion 
+
+In this work, we presented SemanticDialect , a PTQ method for video diffusion transformers that improves generation quality under 4-bit quantization. Building on fine-grained block-wise mixed-format quantization that assigns a per-block optimal format from multiple candidate formats (a formatbook), SemanticDialect scales dialect selection with calibration-free lookup-table-based format selection and quantization. We also introduce activation decomposition with attention-guided salient token selection to recover quantization-sensitive layers. We further propose semantic-aware dialect assignment (SeDA) to improve spatiotemporal quantized value consistency in large-formatbook settings. Across multiple VDiT models, SemanticDialect consistently outperforms prior VDiT quantization methods and fine-grained block-wise format baselines, demonstrating that accurate and efficient video generation on edge is achievable with scalable mixed-format quantization. 10 References 
+
+AMD. AMD CDNA™ 4 Architecture Whitepaper. https://www.amd.com/ content/dam/amd/en/documents/instinct-tech-docs/white-papers/ amd-cdna-4-architecture-whitepaper.pdf , June 2025. Accessed 2026-02-06. Saleh Ashkboos, Ilia Markov, Elias Frantar, Tingxuan Zhong, Xincheng Wang, Jie Ren, Torsten Hoefler, and Dan Alistarh. Quik: Towards End-to-End 4-Bit Inference on Generative Large Language Models. In Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing , pages 3355–3371, 2024. Andreas Blattmann, Robin Rombach, Huan Ling, Tim Dockhorn, Seung Wook Kim, Sanja Fidler, and Karsten Kreis. Align Your Latents: High-Resolution Video Synthesis with Latent Diffusion Models. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition ,pages 22563–22575, 2023. Minghong Cai, Xiaodong Cun, Xiaoyu Li, Wenze Liu, Zhaoyang Zhang, Yong Zhang, Ying Shan, and Xiangyu Yue. DiTCtrl: Exploring Attention Control in Multi-Modal Diffusion Transformer for Tuning-Free Multi-Prompt Longer Video Generation. In Proceedings of the Computer Vision and Pattern Recognition Conference , pages 7763–7772, 2025. Yasong Cao, Mei Wen, Zhongdi Luo, Xin Ju, Haolan Huang, Junzhong Shen, and Haiyan Chen. ABS: Accumulation Bit-Width Scaling Method for Designing Low-Precision Tensor Core. IEEE Transactions on Very Large Scale Integration (VLSI) Systems , 2024. Mathilde Caron, Hugo Touvron, Ishan Misra, Hervé Jégou, Julien Mairal, Piotr Bojanowski, and Armand Joulin. Emerging Properties in Self-Supervised Vision Transformers. In Proceedings of the IEEE/CVF international conference on computer vision , pages 9650–9660, 2021. Lei Chen, Yuan Meng, Chen Tang, Xinzhu Ma, Jingyan Jiang, Xin Wang, Zhi Wang, and Wenwu Zhu. Q-DiT: Accurate Post-Training Quantization for Diffusion Transformers. In Proceedings of the Computer Vision and Pattern Recognition Conference , pages 28306–28315, 2025a. Yuzong Chen, Xilai Dai, Jake Hyun, Chi-Chih Chang, Wonsuk Jang, Yuheng Wu, Thierry Tambe, Jae-sun Seo, and Mohamed S Abdelfattah. RaZeR: Pushing the Limits of NVFP4 Quantization with Redundant Zero Remapping. arXiv preprint arXiv:2501.04052 , 2025b. Jack Cook, Junxian Guo, Guangxuan Xiao, Yujun Lin, and Song Han. Four Over Six: More Accurate NVFP4 Quantization with Adaptive Block Scaling. arXiv preprint arXiv:2512.02010 , 2025. Steve Dai, Rangha Venkatesan, Mark Ren, Brian Zimmer, William Dally, and Brucek Khailany. VS-Quant: Per-Vector Scaled Quantization for Accurate Low-Precision Neural Network Inference. 
+
+Proceedings of Machine Learning and Systems , 3:873–884, 2021. Ning Ding, Jing Han, Yuchuan Tian, Chao Xu, Kai Han, and Yehui Tang. Post-Training Quantization for Diffusion Transformer via Hierarchical Timestep Grouping. arXiv preprint arXiv:2503.06930 ,2025. Weilun Feng, Haotong Qin, Chuanguang Yang, Xiangqi Li, Han Yang, Yuqi Li, Zhulin An, Libo Huang, Michele Magno, et al. S 2 Q-VDiT: Accurate Quantized Video Diffusion Transformer with Salient Data and Sparse Token Distillation. arXiv preprint arXiv:2508.04016 , 2025a. Weilun Feng, Chuanguang Yang, Haotong Qin, Xiangqi Li, Yu Wang, Zhulin An, Libo Huang, Boyu Diao, Zixiang Zhao, Yongjun Xu, et al. Q-VDiT: Towards Accurate Quantization and Distillation of Video-Generation Diffusion Transformers. arXiv preprint arXiv:2505.22167 , 2025b. Weiming Hu, Zihan Zhang, Haoyan Zhang, Chen Zhang, Cong Guo, Yu Feng, Tianchi Hu, Guanglin Li, Guipeng Hu, Junsong Wang, et al. M2XFP: A Metadata-Augmented Microscaling Data Format for Efficient Low-bit Quantization. arXiv preprint arXiv:2601.19213 , 2026. Xinyu Huang, Youcai Zhang, Jinyu Ma, Weiwei Tian, Rui Feng, Yuejie Zhang, Yaqian Li, Yandong Guo, and Lei Zhang. Tag2Text: Guiding Vision-Language Model via Image Tagging. arXiv preprint arXiv:2303.05657 , 2023. 11 Ziqi Huang, Yinan He, Jiashuo Yu, Fan Zhang, Chenyang Si, Yuming Jiang, Yuanhan Zhang, Tianxing Wu, Qingyang Jin, Nattapol Chanpaisit, et al. VBench: Comprehensive Benchmark Suite for Video Generative Models. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , pages 21807–21818, 2024. Wonsuk Jang and Thierry Tambe. BlockDialect: Block-wise Fine-grained Mixed Format Quantization for Energy-Efficient LLM Inference. In Forty-second International Conference on Machine Learning , 2025. Junjie Ke, Qifei Wang, Yilin Wang, Peyman Milanfar, and Feng Yang. MUSIQ: Multi-Scale Image Quality Transformer. In Proceedings of the IEEE/CVF international conference on computer vision , pages 5148–5157, 2021. Sehoon Kim, Coleman Hooper, Amir Gholami, Zhen Dong, Xiuyu Li, Sheng Shen, Michael W Mahoney, and Kurt Keutzer. SqueezeLLM: Dense-and-Sparse Quantization. arXiv preprint arXiv:2306.07629 , 2023. Weijie Kong, Qi Tian, Zijian Zhang, Rox Min, Zuozhuo Dai, Jin Zhou, Jiangfeng Xiong, Xin Li, Bo Wu, Jianwei Zhang, et al. HunyuanVideo: A Systematic Framework for Large Video Generative Models. arXiv preprint arXiv:2412.03603 , 2024. Black Forest Labs, Stephen Batifol, Andreas Blattmann, Frederic Boesel, Saksham Consul, Cyril Diagne, Tim Dockhorn, Jack English, Zion English, Patrick Esser, et al. FLUX. 1 Kontext: Flow Matching for In-Context Image Generation and Editing in Latent Space. arXiv preprint arXiv:2506.15742 , 2025. LAION-AI. Aesthetic predictor. https://github.com/LAION-AI/aesthetic-predictor ,2022. Accessed: 2026-02-17. Muyang Li, Yujun Lin, Zhekai Zhang, Tianle Cai, Xiuyu Li, Junxian Guo, Enze Xie, Chenlin Meng, Jun-Yan Zhu, and Song Han. SVDQuant: Absorbing Outliers by Low-Rank Components for 4-Bit Diffusion Models. arXiv preprint arXiv:2411.05007 , 2024. Zhen Li, Zuo-Liang Zhu, Ling-Hao Han, Qibin Hou, Chun-Le Guo, and Ming-Ming Cheng. AMT: All-Pairs Multi-Field Transforms for Efficient Frame Interpolation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , pages 9801–9810, 2023. Bingyan Liu, Chengyu Wang, Tingfeng Cao, Kui Jia, and Jun Huang. Towards Understanding Cross and Self-Attention in Stable Diffusion for Text-Guided Image Editing. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition , pages 7817–7826, 2024a. Shih-yang Liu, Zechun Liu, Xijie Huang, Pingcheng Dong, and Kwang-Ting Cheng. LLM-FP4: 4-bit Floating-Point Quantized Transformers. arXiv preprint arXiv:2310.16836 , 2023. Yaofang Liu, Xiaodong Cun, Xuebo Liu, Xintao Wang, Yong Zhang, Haoxin Chen, Yang Liu, Tieyong Zeng, Raymond Chan, and Ying Shan. EvalCrafter: Benchmarking and Evaluating Large Video Generation Models. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , pages 22139–22149, 2024b. Yun-Chen Lo, Gu-Yeon Wei, and David Brooks. Nanoscaling Floating-Point (NxFP): NanoMantissa, Adaptive Microexponents, and Code Recycling for Direct-Cast Compression of Large Language Models. arXiv preprint arXiv:2412.19821 , 2024. Wenbo Lu, Shaoyi Zheng, Yuxuan Xia, and Shengjie Wang. ToMA: Token Merge with Attention for Diffusion Models. arXiv preprint arXiv:2509.10918 , 2025. Xin Ma, Yaohui Wang, Xinyuan Chen, Gengyun Jia, Ziwei Liu, Yuan-Fang Li, Cunjian Chen, and Yu Qiao. Latte: Latent Diffusion Transformer for Video Generation. arXiv preprint arXiv:2401.03048 , 2024. NVIDIA. Introducing NVFP4 for Efficient and Accurate Low-Precision Inference. https://developer.nvidia.com/blog/ introducing-nvfp4-for-efficient-and-accurate-low-precision-inference/ ,June 2025. Accessed 2026-02-06. 12 Open Compute Project. OCP Microscaling Formats (MX) Specifi-cation Version 1.0. https://www.opencompute.org/documents/ ocp-microscaling-formats-mx-v1-0-spec-final-pdf , September 2023. Version 1.0, accessed 2026-02-06. William Peebles and Saining Xie. Scalable Diffusion Models with Transformer. In Proceedings of the IEEE/CVF international conference on computer vision , pages 4195–4205, 2023. Xiangyu Peng, Zangwei Zheng, Chenhui Shen, Tom Young, Xinying Guo, Binluo Wang, Hang Xu, Hongxin Liu, Mingyan Jiang, Wenjun Li, et al. Open-Sora 2.0: Training a Commercial-Level Video Generation Model in $200K. arXiv preprint arXiv:2503.09642 , 2025. Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark, et al. Learning Transferable Visual Models from Natural Language Supervision. In International conference on machine learning ,pages 8748–8763. PmLR, 2021. Weiming Ren, Huan Yang, Ge Zhang, Cong Wei, Xinrun Du, Wenhao Huang, and Wenhu Chen. ConsistI2V: Enhancing Visual Consistency for Image-to-Video Generation. arXiv preprint arXiv:2402.04324 , 2024. Bita Darvish Rouhani, Ritchie Zhao, Venmugil Elango, Rasoul Shafipour, Mathew Hall, Maral Mesmakhosroshahi, Ankit More, Levi Melnick, Maximilian Golub, Girish Varatkar, et al. With Shared Microexponents, A Little Shifting Goes a Long Way. In Proceedings of the 50th Annual International Symposium on Computer Architecture , pages 1–13, 2023a. Bita Darvish Rouhani, Ritchie Zhao, Ankit More, Mathew Hall, Alireza Khodamoradi, Summer Deng, Dhruv Choudhary, Marius Cornea, Eric Dellinger, Kristof Denolf, et al. Microscaling Data Formats for Deep Learning. arXiv preprint arXiv:2310.10537 , 2023b. Khurram Soomro, Amir Roshan Zamir, and Mubarak Shah. UCF101: A Dataset of 101 Human Actions Classes from Videos in the Wild. arXiv preprint arXiv:1212.0402 , 2012. Zachary Teed and Jia Deng. RAFT: Recurrent All-Pairs Field Transforms for Optical Flow. In 
+
+European conference on computer vision , pages 402–419. Springer, 2020. Yi Wang, Yinan He, Yizhuo Li, Kunchang Li, Jiashuo Yu, Xin Ma, Xinhao Li, Guo Chen, Xinyuan Chen, Yaohui Wang, et al. InternVid: A Large-Scale Video-Text Dataset for Multimodal Under-standing and Generation. arXiv preprint arXiv:2307.06942 , 2023. Yuxin Wen, Jim Wu, Ajay Jain, Tom Goldstein, and Ashwinee Panda. Analysis of Attention in Video Diffusion Transformers. arXiv preprint arXiv:2504.10317 , 2025. Haoning Wu, Erli Zhang, Liang Liao, Chaofeng Chen, Jingwen Hou, Annan Wang, Wenxiu Sun, Qiong Yan, and Weisi Lin. Exploring Video Quality Assessment on User-Generated Contents from Aesthetic and Technical Perspectives. In Proceedings of the IEEE/CVF International Conference on Computer Vision , pages 20144–20154, 2023. Junyi Wu, Haoxuan Wang, Yuzhang Shang, Mubarak Shah, and Yan Yan. PTQ4DiT: Post-Training Quantization for Diffusion Transformers. Advances in neural information processing systems , 37: 62732–62755, 2024. Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models. In International Conference on Machine Learning , pages 38087–38099. PMLR, 2023. Xianglong Yan, ChengZhu Bao, Zhiteng Li, Tianao Zhang, Shaoqiu Zhang, Ruobing Xie, Samm Sun, and Yulun Zhang. D 2 Quant: Accurate Low-bit Post-Training Weight Quantization for LLMs. 
+
+arXiv preprint arXiv:2602.02546 , 2026. Zhuoyi Yang, Jiayan Teng, Wendi Zheng, Ming Ding, Shiyu Huang, Jiazheng Xu, Yuanming Yang, Wenyi Hong, Xiaohan Zhang, Guanyu Feng, et al. CogVideoX: Text-to-Video Diffusion Models with an Expert Transformer. arXiv preprint arXiv:2408.06072 , 2024. 13 Tianchen Zhao, Tongcheng Fang, Haofeng Huang, Enshu Liu, Rui Wan, Widyadewi Soedarmadji, Shiyao Li, Zinan Lin, Guohao Dai, Shengen Yan, et al. Vidit-Q: Efficient and Accurate Quantization of Diffusion Transformers for Image and Video Generation. arXiv preprint arXiv:2406.02540 ,2024. Zangwei Zheng, Xiangyu Peng, Tianji Yang, Chenhui Shen, Shenggui Li, Hongxin Liu, Yukun Zhou, Tianyi Li, and Yang You. Open-Sora: Democratizing Efficient Video Production for All. arXiv preprint arXiv:2412.20404 , 2024. 14 A Layer-wise Quantization Sensitivity Test 
+
+Table 5: Open-Sora 1.0: per-layer sensitivity. Top: FP16 baseline with only one layer quantized. Bottom: SD4 baseline with only one layer set to FP16. Bold : notable degradation or improvement. 
+
+Subject consist. BG. consist. Motion smooth. Dynamic degree Aesthetic quality Imaging quality Scene consist. SS. consist. FP16 93.26 96.18 97.22 48.61 58.56 66.10 24.48 25.25 attn_temp.qkv 93.29 96.25 97.87 40.28 57.10 60.58 25.67 25.12 attn_temp.proj 93.12 96.03 97.26 47.22 58.29 66.44 25.37 25.13 attn.qkv 92.40 95.70 97.23 50.00 57.62 65.52 30.43 25.30 attn.proj 93.07 96.17 97.17 45.83 57.67 66.02 24.18 25.45 x_attn.q_linear 92.42 95.82 97.03 50.00 58.49 65.76 30.43 25.23 x_attn.kv_linear 93.21 96.11 97.21 48.61 58.27 67.14 26.71 25.11 x_attn.proj 93.50 96.29 97.31 45.83 58.93 66.40 25.22 25.55 mlp.fc1 91.88 95.86 97.27 48.61 57.95 66.08 26.71 25.34 mlp.fc2 93.46 96.82 98.69 26.39 55.59 61.44 20.01 24.16 
+
+SD4 90.26 95.64 98.48 43.06 45.97 50.99 11.31 20.39 attn_temp.qkv 90.93 95.45 98.18 41.67 50.02 58.08 15.33 21.66 
+
+attn_temp.proj 90.87 95.78 98.55 40.28 46.56 50.98 11.31 20.51 attn.qkv 91.10 96.20 98.55 44.44 47.37 50.90 13.47 21.41 attn.proj 90.13 95.71 98.57 36.11 46.02 49.94 11.38 20.36 x_attn.q_linear 90.71 95.82 98.58 45.83 46.47 50.88 13.39 20.34 x_attn.kv_linear 89.68 95.82 98.51 44.44 46.01 51.77 11.16 20.65 x_attn.proj 90.33 95.50 98.56 48.61 45.23 51.01 10.34 19.81 mlp.fc1 90.47 96.27 98.57 45.83 47.06 50.99 13.24 21.14 mlp.fc2 89.76 95.24 97.70 47.22 51.89 55.08 19.05 22.29 
+
+Table 6: Open-Sora 2.0: per-layer sensitivity. Top: FP16 baseline with only one layer quantized. Bottom: sd4 baseline with only one layer set to FP16. Bold : notable degradation or improvement. 
+
+Subject consist. BG. consist. Motion smooth. Dynamic degree Aesthetic quality Imaging quality Scene consist. SS. consist. FP16 94.41 97.73 98.84 54.17 58.05 64.52 41.74 27.34 img_attn_qkv 94.13 97.87 98.83 56.94 57.77 64.39 40.25 27.44 img_attn_proj 93.98 97.48 98.82 56.94 57.87 64.59 41.00 27.51 img_mlp_0 93.67 97.29 98.74 56.94 57.37 64.87 40.25 27.58 img_mlp_2 94.24 97.56 98.79 55.56 57.53 64.66 40.92 27.49 img_mod_lin 93.66 97.55 98.71 55.56 57.88 65.35 40.40 27.47 txt_attn_qkv 94.32 97.73 98.81 62.50 57.88 64.50 41.44 27.26 
+
+txt_attn_proj 94.32 97.77 98.83 54.17 57.99 64.74 39.96 27.36 txt_mlp_0 94.13 97.74 98.83 56.94 58.20 64.48 42.11 27.43 txt_mlp_2 94.13 97.69 98.80 56.94 58.02 64.43 41.22 27.41 txt_mod_lin 94.16 97.72 98.81 54.17 58.03 64.47 41.82 27.26 
+
+linear1 93.97 97.81 98.71 55.56 57.96 64.59 39.06 27.34 linear2 93.94 97.70 98.71 58.33 58.11 64.66 42.49 27.46 modulation_lin 94.03 97.97 98.89 56.94 58.48 61.83 40.33 27.31 SD4 92.34 96.92 98.66 55.56 57.67 63.48 40.40 27.55 img_attn_qkv 92.36 97.01 98.68 52.78 57.75 63.52 41.07 27.55 img_attn_proj 92.21 96.84 98.66 59.72 57.91 64.17 41.15 27.47 img_mlp_0 93.12 97.35 98.75 54.17 57.82 63.59 39.66 27.51 img_mlp_2 92.65 97.10 98.70 54.17 57.67 63.44 40.55 27.41 img_mod_lin 92.19 97.08 98.68 55.56 57.63 62.55 43.53 27.60 txt_attn_qkv 92.08 96.86 98.67 58.33 57.38 63.69 38.47 27.56 txt_attn_proj 92.27 96.79 98.67 56.94 57.48 63.92 43.30 27.56 txt_mlp_0 92.12 96.81 98.67 61.11 57.67 63.70 39.88 27.60 txt_mlp_2 91.99 96.73 98.61 61.11 57.59 63.95 41.52 27.61 txt_mod_lin 92.05 96.70 98.56 56.94 57.20 63.74 42.93 27.70 linear1 92.33 96.91 98.66 51.39 57.64 63.46 39.88 27.52 linear2 92.72 97.01 98.75 55.56 57.51 63.71 43.97 27.41 modulation_lin 91.76 96.18 98.54 48.61 57.81 65.28 40.40 27.69 
+
+Tables 5 and 6 summarize the layer-wise quantization sensitivity of Open-Sora 1.0 and 2.0. 15 Format index                       
+
+> Timestep
+> Open -Sora 1.0
+> Usage ratio (log scale)
+> Usage ratio (log scale)
+> 10 1
+> 10 1
+> 10 0
+> 10 0
+> 10 -1
+> Open -Sora 2.0
+> Layer attn.proj attn_temp.qkv mlp.fc2 img_attn.proj img_mlp.2 mlp2
+> 10 50 90 10 50 90 10 50 90 525 45 525 45 525 45
+
+Figure 6: Block-wise format usage. In Open-Sora 1.0, attn_temp.qkv and mlp.fc2 are clearly the most sensitive layers. In Open-Sora 2.0, the larger model is generally more robust and exhibits smaller layer-wise vari-ation, but modulation_lin (the modulation layer in SingleProcessBlock ) remains the most sensitive. We also observe meaningful changes in txt_mod_lin (the text modulation layer in DoubleProcessBlock ), particularly in semantic & style and scene consistency. Although 
+
+txt_attn_proj shows a similar trend, we prioritize modulation layers because their activations are vector-shaped, making activation decomposition inexpensive. Accordingly, we apply activation decomposition to those modulation layers. 
+
+## B Block-wise Format Usage 
+
+Figure 11 reports the average format usage across layers and denoising timesteps, aggregated over 10 prompts. We observe clear layer-specific preferences, but no format collapse (i.e., every format is selected at least occasionally). The least-used formats (Formats 16, 21, and 27) appear in the projection layer immediately after (spatial) attention (around 0.1%), yet they are meaningfully used in other layers, indicating that the model leverages the full format set when beneficial. Overall, lower-index formats, which provide a narrower dynamic range (smaller block maxima), are selected more often, consistent with the predominance of small-magnitude normalized values. Importantly, usage patterns depend primarily on layer type rather than denoising timestep. For example, in Open-Sora 1.0, temporal attention QKV projection ( attn_temp.qkv ) shows relatively uniform usage, whereas the final MLP layer ( mlp.fc2 ) consistently concentrates on a few formats (e.g., Formats 28, 22, and 17) even within the same dynamic range group. These results suggest that block-wise mixed formats systematically adapt to each layer without any explicit calibration. 
+
+## C Evaluation Metrics Description 
+
+C.1 VBench Benchmark. 
+
+Following VBench [Huang et al., 2024] and prior VDiT quantization work [Zhao et al., 2024, Feng et al., 2025b], we evaluate on 8 VBench dimensions spanning three aspects of video generation: (i) Frame-wise Quality , (ii) Temporal Quality , and (iii) Semantics . We use the three official VBench prompt sets and generate three videos per prompt using different random seeds to improve stability. For this revision, we subsample one-third of the prompts within each category from the full prompt lists below. We will report results on the full prompt sets in the next revision. • overall_consistency.txt (93 prompts) for semantic & style consistency, aesthetic quality and imaging quality • subject_consistency.txt (72 prompts) for subject consistency, dynamic degree and motion smoothness • scene.txt (86 prompts) for background consistency and scene consistency 16 C.2 VBench dimensions Frame-wise Quality measures per-frame visual quality without considering temporal effects: • Imaging Quality captures distortions such as blur, noise, and over-/under-exposure using the MUSIQ [Ke et al., 2021] image quality predictor. • Aesthetic Quality reflects human-perceived aesthetic appeal using the LAION [LAION-AI, 2022] aesthetic predictor. 
+
+Temporal Quality measures cross-frame consistency and motion: • Motion Smoothness measures whether motion is smooth by comparing interpolated frames from even-numbered frames using AMT [Li et al., 2023] with the original odd-numbered frames. • Dynamic Degree quantifies motion magnitude via optical-flow statistics using RAFT [Teed and Deng, 2020]. • Subject Consistency assesses whether subject appearance remains consistent over time using DINO [Caron et al., 2021] features. • Background Consistency evaluates temporal consistency of background scenes using CLIP [Radford et al., 2021] image features. 
+
+Semantics measures text adherence: • Scene Consistency evaluates whether captions generated from the video [Huang et al., 2023] match the intended scene described by the prompt. • Semantic&Style Consistency measures overall text–video alignment (including style consis-tency) computed by ViCLIP [Wang et al., 2023]. VBench refers to this metric as Overall Consistency ; we rename it to avoid the misleading implication that it is a representative aggregate over other metrics. 
+
+C.3 Additional Metrics 
+
+In addition to reporting the VBench dimension scores, we include the following widely used metrics. We use the 10-prompt set provided by Open-Sora and the UCF-101 prompt set for these evaluations: • CLIPSIM and CLIP-Temp are computed using the EvalCrafter implementation [Liu et al., 2024b]: CLIPSIM averages frame-wise image–text similarity, while CLIP-Temp averages similarity between consecutive frames to reflect semantic temporal consistency. • DOVER VQA [Wu et al., 2023] reports VQA-T (technical quality; distortions such as noise/blur/exposure) and VQA-A (aesthetic quality; composition, color harmony, natural-ness). • Flow Score uses RAFT [Teed and Deng, 2020] to estimate dense optical flow between con-secutive frames and averages the flow magnitude as a proxy for motion strength; following prior practice [Feng et al., 2025b], we report ∆Flow (difference to the FP16 baseline) for robustness against pathological failures. • FVD-FP16 computes feature distribution distance between generated videos from FP16 model and quantized model from UCF-101 prompt set using I3D features [Blattmann et al., 2023]; lower is better. It quantifies semantic/quality regression due to quantization. The FVD-FP16 has a high correlation with human perception [Zhao et al., 2024]. 
+
+## D Evaluation Setting Details 
+
+Following prior work [Zhao et al., 2024, Feng et al., 2025b], for Open-Sora 1.0 we keep embedder ,
+
+t_block , and final_layer in FP16. These modules lie at the beginning or end of the network and account for a negligible fraction of the total computation. For Open-Sora 2.0, we similarly target only the linear layers in single_blocks and double_blocks . We use FP16 and BF16 as the full-precision settings for Open-Sora 1.0 and 2.0, respectively, because they yield better video 17 Table 7: Ablation of attention-score choices on Open-Sora 1.0.                                        
+
+> Method Aesthetic Quality Imaging Quality Motion Smooth. Dynamic Degree Subject Consist. BG. Consist. Scene Consist. SS. Consist.
+> (a) Act. decomposition scoring
+> Incoming (avg. over queries) 50.72 55.63 98.31 51.39 91.46 95.97 12.65 21.52 Outgoing (avg. over keys) 50.98 60.42 97.79 54.17 90.49 95.06 19.49 21.98 (b) SeDA anchor/corr. scoring
+> Post-softmax 51.21 60.16 97.76 51.39 90.48 94.98 17.11 22.21 Pre-softmax 51.54 61.03 97.73 51.39 90.88 95.02 18.08 22.55
+
+quality. In our experiments, Open-Sora 1.0 generates 16 frames (8 fps) at 512 × 512 resolution, while Open-Sora 2.0 generates 33 frames (24 fps) at 256 px resolution with a 16:9 aspect ratio. Weight dialect selection and quantization are always MSE-based, which generally works well because weights exhibit lower variation than activations. We apply activation decomposition to attn_temp.qkv and mlp.fc2 in Open-Sora 1.0, which increases the effective bitwidth. For Open-Sora 2.0, which is larger (11B parameters) and more robust to quantization, we apply activation decomposition only to modulation_lin and txt_mod_lin to minimize requantization overhead and the resulting increase in effective bitwidth. We apply SeDA to MLP layers: mlp.fc1 and mlp.fc2 in Open-Sora 1.0, and q_proj , linear1 , and linear2 
+
+in SingleStreamBlock for Open-Sora 2.0. This selective placement enables efficient control of activations immediately before the layer output. To mitigate SeDA overhead, we skip the first 20% (40%) of timesteps in Open-Sora 1.0 (2.0), respectively, and update anchor/correlated tokens every 10 (5) timesteps for block sizes 32 (16), with per-timestep updates in the last 10% of timesteps. In Open-Sora 1.0, mlp.fc2 uses both activation decomposition and SeDA; in this setting, we force both the original-value quantization and the residual quantization to use the SeDA-triggered sub-formatbook. For SeDA, we use default attention thresholds of 8 (spatial attention) and 3 (temporal attention) for Open-Sora 1.0, with a 4 × 4 spatial tile and a 5 × 5 local correlation window. For Open-Sora 2.0, we use the same tile and window sizes and set the threshold to 5. For overlapping window regions, we assign them to the later anchor token. Finally, for stability, we exclude edge tokens from anchor-token candidates, since abnormally highly attended tokens can appear at boundaries in seemingly random layers and timesteps. 
+
+## E Attention Scoring Design Choices 
+
+E.1 Incoming vs. outgoing attention 
+
+As shown in Table 7a, we find that ranking tokens by the mean outgoing attention (i.e., selecting query tokens that strongly attend to other tokens on average) performs better than ranking by mean incoming attention (i.e., how much a token is attended by others). A plausible explanation is that highly attended tokens are often generic or globally shared tokens (e.g., background/context tokens), whereas tokens with strong outgoing attention are more likely to capture distinctive, semantically informative content. Also, we found the attention sinks which show high degree of being attended to most of the tokens, often at the corner of the frame, and edge of the frames which make it unfavorable to use incoming attention. 
+
+E.2 Self-attention vs. cross attention 
+
+Cross-attention in Open-Sora 1.0 injects text conditions into visual tokens, and in Open-Sora 2.0’s multimodal attention (with concatenated text and image tokens), cross-modal interactions likewise appear between the two modalities. Prior work on diffusion models suggests that cross-attention maps often provide useful correspondences between text tokens and visual regions, while self-attention frequently exhibits strong spatial structural patterns that are less directly tied to explicit semantic categories [Wen et al., 2025, Liu et al., 2024a, Cai et al., 2025]. However, our goal is not exact text-to-region grounding; rather, we need a reliable measure of token-level semantic relatedness (i.e., whether tokens are similar or correspond to the same semantics). For this purpose, directly using cross-attention is not ideal because text prompts contain many tokens 18 Table 8: SeDA configuration ablations on Open-Sora 1.0. In the timestep update schedule, the update period denotes the token-update interval in timesteps (1 = every timestep); “ x (20–89)” means period 
+
+x on timesteps 20–89 and period 1 otherwise.                                                                                                                                                  
+
+> Method Aesthetic Quality Imaging Quality Motion Smooth. Dynamic Degree Subject Consist. BG. Consist. Scene Consist. SS. Consist.
+> (a) Temporal-axis integration
+> Per-frame anchors (2D SeDA) 51.07 61.19 97.62 54.17 90.58 94.84 17.63 22.07 Cross-frame main anchor (3D SeDA) 51.54 61.03 97.73 51.39 90.88 95.02 18.08 22.55 (b) Anchor tile Correlation window
+> 4×47×750.98 61.14 97.68 50.00 90.47 94.85 18.15 22.30
+> 4×43×350.86 60.37 97.76 52.78 90.87 95.10 16.44 22.07
+> 4×45×551.54 61.03 97.73 51.39 90.88 95.02 18.08 22.55
+> 8×87×751.08 60.23 97.76 51.39 90.75 94.95 14.06 22.23
+> 2×23×351.21 60.48 97.71 51.39 90.36 94.93 15.55 22.41 (c) Timesteps Update period
+> 0–99 151.76 60.65 97.73 50.00 90.93 94.87 16.59 22.57 20–99 151.52 60.62 97.72 52.78 90.55 94.79 16.44 22.18 20–99 10 50.62 61.12 97.72 51.39 90.68 94.92 16.37 22.37 20–99 10 (20–89) 51.54 61.03 97.73 51.39 90.88 95.02 18.08 22.55 20–99 5 (20–89) 50.74 60.78 97.71 47.22 90.48 95.20 18.30 22.21 20–99 20 (20–89) 51.13 60.84 97.73 51.39 90.64 95.09 15.63 22.31
+
+that are not object-defining (e.g., a, the, beautiful). Without an additional online stage to identify semantically informative text tokens, cross-attention may overemphasize weakly informative function or stylistic words. Therefore, in this work, we use self-attention scores to estimate semantic relatedness for SeDA and for salient-token selection in activation decomposition. We leave the extension of leveraging cross-attention for more precise semantic extraction to future work. 
+
+E.3 Pre-softmax vs. post-softmax scores 
+
+We apply attention-score thresholding to filter out weakly correlated tokens. Empirically, pre-softmax thresholding performs better (Table 7b) and is simpler to use for two reasons. First, post-softmax scores are inherently concentrated on a few large values, which can suppress moderately but meaningfully correlated tokens and make them harder to retain with thresholding. Second, this concentration makes threshold selection less robust, since the effective score range depends strongly on the input score distribution, especially when many scores are similar. 
+
+## F SeDA Ablation Studies 
+
+Temporal axis integration. Because Open-Sora 1.0 uses factorized attention, we first identify anchor tokens for each frame and then reduce them to a single anchor token by selecting the one with the highest temporal correlation across frames. In Table 8a, we compare a per-frame SeDA strategy (i.e., applying SeDA independently to each frame-level anchor token and its correlated tokens) with our 
+
+temporal-axis integration strategy (i.e., selecting a single anchor token for the same spatial tile across frames and excluding frames with low attention scores to that anchor). Despite using SeDA on fewer tokens, temporal-axis integration improves most metrics, highlighting the importance of explicitly accounting for temporal structure for video quality. 
+
+Anchor tile and local correlation window size. Table 8 compares different anchor tile and local correlation window sizes in Open-Sora 1.0. A smaller local correlation window weakens the effect of SeDA because it reduces the number of correlated tokens. A larger window can improve some metrics, but overall performance degrades because it forces the same formatbook on too many tokens and increases overlap between neighboring windows, which makes accurate anchor–correlated token pairing more difficult. Similarly, overly small or large anchor tile sizes also degrade performance, indicating the need for a balanced tile size and correlation window. 19 Table 9: Comparison between NVFP4 and SD4 (w/o activation decomposition, SeDA) on additional metrics on Open-Sora 1.0.                                                                
+
+> Prompt Method Block size FVD-FP16
+> (↓)CLIP-Temp CLIPSIM VQA-Aesthetic VQA-Technical
+> ∆Flow Score ( ↓)
+> OpenSora NVFP4 16 6.10 0.9975 0.1748 50.70 47.87 0.13
+> SD4 16 5.64 0.9979 0.1778 50.73 47.82 0.37 NVFP4 32 12.64 0.9979 0.1773 49.76 47.30 0.01
+> SD4 32 9.13 0.9984 0.1776 50.08 47.70 0.47 UCF-101 NVFP4 16 68.53 0.9976 0.2031 49.43 47.11 2.56 SD4 16 59.35 0.9974 0.2078 49.80 47.50 1.84
+> NVFP4 32 74.52 0.9975 0.2063 48.64 46.79 4.79
+> SD4 32 78.71 0.9977 0.2063 48.65 46.93 5.50
+
+Table 10: Stepwise quality improvement (block size 16) on the UCF-101 prompt set.                              
+
+> Method Block size FVD-FP16
+> (↓)CLIP-Temp CLIPSIM VQA-Aesthetic VQA-Technical
+> ∆Flow Score ( ↓)
+> FP16 16 -0.9972 0.2048 50.97 47.99 -SD4 59.35 0.9974 0.2078 49.80 47.50 1.84 +Decomp. 53.95 0.9973 0.2066 50.46 47.80 1.33 +SeDA 51.72 0.9973 0.2069 50.41 47.78 1.40
+
+Timesteps for applying SeDA under overhead constraints. Table 8c compares when (and how often) SeDA is applied over denoising timesteps. We first observe that skipping SeDA during the initial ∼20% of denoising causes only minimal degradation. This is likely because early-stage attention maps are unstable and activations are dominated by noise, which makes anchor/correlated token selection unreliable. Interestingly, updating anchor/correlated tokens once every 10 timesteps— while still updating every timestep during the final 10 timesteps—performs better than full-timestep updates. This suggests that overly frequent updates can hurt consistency, as token selection becomes sensitive to residual noise or small attention fluctuations. In contrast, making updates infrequent during the final 10 timesteps degrades performance, consistent with the non-negligible final-step anchor-token variation observed in the profiling results (Figure 5c). Finally, the results for 5- and 20-timestep update intervals further indicate that a balanced update frequency is important to preserve both trackability and consistency. 
+
+## G Comparison to NVFP4 
+
+We compare additional metrics against NVFP4 on the OpenSora and UCF-101 prompt sets in Table 9. Both are evaluated with the same block size and without any additional techniques (i.e., activation decomposition or SeDA) to ensure comparable effective bit-width. SD4 generally shows a feature distribution closer to FP16 while also outperforming NVFP4 on the other metrics overall. 
+
+## H Additional Cumulative Impact Analysis 
+
+Table 10 shows the cumulative impact of the three techniques on the UCF-101 dataset. Most importantly, FVD-FP16 consistently decreases as additional techniques are applied, while the other metrics remain largely similar, except for a notable improvement in the VQA metrics when activation decomposition is introduced. 20 I More Qualitative Results ViDiT -Q
+
+## Q-VDiT 
+
+## Ours 
+
+## FP16 
+
+## NVFP4 
+
+Figure 7: Qualitative results on Open-Sora 1.0 for the prompt: “A serene underwater scene featuring a sea turtle swimming through a coral reef . . . ”. Effective bit-width (A/W): NVFP4 = 4.5/4.5, Ours = 4.76/4.31. FP16 produces the most faithful video overall with the richest background detail, although it still exhibits a head-location switch error during the sequence due to small model size. NVFP4 fails to preserve the main turtle structure and produces a blurred background. In contrast, SemanticDialect better preserves the turtle and recovers some coral reef details (especially near the bottom), yielding a qualitatively more accurate result than NVFP4. 21 ViDiT -Q
+
+## Q-VDiT 
+
+## Ours 
+
+## FP16 
+
+## NVFP4 Figure 8: Qualitative results on Open-Sora 1.0 for the prompt: “The vibrant beauty of a sunflower field . . . ”. Effective bit-width (A/W): NVFP4 = 4.5/4.5, Ours = 4.76/4.31. NVFP4 shows noisy leaves whose shapes are difficult to recognize throughout the video and exhibits poor structural consistency. In contrast, SemanticDialect preserves the sunflower and leaf structures more clearly and maintains better visual consistency over time. FP16 
+
+> NVFP4
+> Ours
+
+Figure 9: Qualitative results on Open-Sora 1.0 for the prompt: “A mountain landscape . . . ”. Effective bit-width (A/W): NVFP4 = 4.5/4.5, Ours = 4.76/4.31. NVFP4 shows a blurred background due to lower imaging quality. In contrast, SemanticDialect preserves clearer background details and more detailed hot-air balloons, resulting in a more visually faithful scene. 22 FP16 NVFP4 Ours Figure 10: Qualitative results on Open-Sora 1.0 for the prompts “A snowy forest landscape with a dirt road . . . ” and “A soaring drone footage captures the majestic beauty of a coastal cliff . . . ”. Effective bit-width (A/W): NVFP4 = 4.5/4.5, Ours = 4.76/4.31. SemanticDialect more closely matches the FP16 videos than NVFP4. 
+
+Figure 11: Qualitative results on Open-Sora 2.0 for the prompt: “an airplane soaring through a clear blue sky” and "ski slope". Effective bit-width (A/W): NVFP4 = 4.25/4.25, Ours = 4.31/4.31. SemanticDialect shows better subject quality over NVFP4. 23

@@ -1,0 +1,2291 @@
+Title: Hardware-Software Co-design for 3D-DRAM-based LLM Serving Accelerator
+
+URL Source: https://arxiv.org/pdf/2603.04797v1
+
+Published Time: Fri, 06 Mar 2026 01:29:16 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# Hardware-Software Co-design for 3D-DRAM-based LLM Serving Accelerator 
+
+Cong Li 1 Yihan Yin 1 Chenhao Xue 1 Zhao Wang 1 Fujun Bai 2 Yixin Guo 2
+
+Xiping Jiang 2 Qiang Wu 3 Yuan Xie 4 Guangyu Sun 11Peking University 2Xi’an UniIC Semiconductors 3Houmo AI 4HKUST 
+
+Abstract —Large language models (LLMs) have been widely deployed for online generative services, where numerous LLM instances jointly handle workloads with fluctuating request ar-rival rates and variable request lengths. To efficiently execute coexisting compute-intensive and memory-intensive operators, near-memory processing (NMP) based computing paradigm has been extensively proposed. However, existing NMP designs adopt coarse-grained KV cache management and inflexible attention execution flow. Such limitations hinder these proposals from efficiently handling highly dynamic LLM serving workloads, limiting their ability to accelerate LLM serving. To tackle these problems, we propose HeLioS, a Hybrid-bonding-based LLM Serving accelerator. Helios aims to bridge the fundamental gap between the dynamic nature of KV cache management in LLM serving and the distributed, non-uniform memory abstraction among NMP processing engines (PEs). To this end, we design both the intra-PE execution flow and the inter-PE communication primitives for distributed tiled attention execution. We further propose spatially-aware KV cache alloca-tion mechanism to balance the attention workload distribution while minimizing the inter-PE data transfer overhead. Compared with existing GPU/NMP designs, Helios achieves 3.25× (geomean) speedup and 3.36× (geomean) better energy efficiency, along with up to 72%/76% P50/P99 time-between-tokens degradation. 
+
+I. I NTRODUCTION 
+
+Large Language Models (LLMs) have enabled many gen-erative tasks, such as code completion [7], [51], chatbot [17], [54], and reasoning [74], [75]. Such capability drives cloud companies to host LLMs as online services [1], [3], [17], [54]. In LLM serving, multiple LLM instances jointly handle highly dynamic request workloads, characterized by widely varying sequence lengths (as high as 10K tokens) and rapidly fluctuating arrival rates (as high as an order of magnitude) [79]. Therefore, each instance conducts inference under both small (e.g., 4-8) and large (e.g., 32-64) batches [91], each comprising requests with non-uniform context lengths [42]. LLM inference contains two stages: prefill and decoding. During the prefill stage, the LLM instance processes the input token sequence (i.e., prompt) in one shot and produces the first output token. Then, during the decoding stage, the instance takes the last token as input and generates one new token in each step, incrementally building the full output. Since LLM’s self-attention [70] requires each token to interact with all historical tokens, the intermediate vectors associated with each token are persistently stored throughout inference to avoid re-computation, which is known as KV cache [60]. Given the highly dynamic LLM serving workloads, LLM instances need to process both compute- and memory-intensive operators. For example, operators in the prefill stage are typi-cally compute-intensive, while the small-batch fully-connected (FC) layers and multi-head attention operators (MHA) dur-ing the decoding stage are memory-bound [58]. Although centralized processors (e.g., GPU/TPU) offer high compute power to compute-intensive operators, their limited bandwidth (e.g., two orders of magnitude lower [36]) leads to poor performance for memory-bound operators. To mitigate this issue, Near-Memory Processing (NMP) accelerators has been extensively proposed [32], [58], [86], [30], [37], [43], [44], which integrates processing engines (PEs) into memory mod-ules (e.g., HBM cubes) to enhance bandwidth provision. By collaborating with centralized processors, NMP accelerators have achieved superior performance for LLM inference. However, existing NMP designs lack flexibility in both sys-tem and architecture, hindering them from efficiently handling dynamic LLM serving workloads: At the system level , attention heads are statically assigned to fixed NMP modules (e.g., NMP-enabled HBM cubes). This coarse-grained scheme not only causes compute load imbalance, but also incurs severe memory fragmentation, reducing accelerator’s effective serv-ing capacity. At the architecture level , existing NMP compute logic also requires each attention head’s full KV cache to reside within identical NMP modules during attention com-putation, hindering the intra-sequence KV cache partitioning needed for fine-grained dynamic KV cache management. To tackle these problems, we propose Helios, a hybrid-bonding-based LLM serving accelerator. We aim to develop 
+
+NMP-Native fine-grained attention computation and dynamic KV cache management mechanisms, addressing the funda-mental mismatch between LLM serving’s dynamic nature and NMP’s non-uniform memory abstraction . To this end, we customize PE architecture, intra-PE operator execution, and inter-PE communication primitives to enable distributed tiled attention via hybrid bonding, an emerging technology that effectively boosts NMP compute power [45], [56], [84], [89]. For system scheduling, we propose spatially-aware KV cache allocation to balance the attention workload distribution while minimizing the inter-PE data transfer overhead. To summarize, we have made the following contributions: 
+
+• We conduct an in-depth analysis of existing NMP designs’ limitations under highly dynamic serving workloads. 
+
+• We propose Helios’s architecture, enabling NMP-Native 
+
+distributed tiled attention in end-to-end LLM inference.                   
+
+> arXiv:2603.04797v1 [cs.AR] 5 Mar 2026 Activation
+> Token Embedding
+> LM head
+> Decoder Layer 0
+> …
+> Decoder Layer N
+> Transformer Attention Block
+> FFN Block
+> Normalization
+> Normalization Q
+> K
+> V
+> O
+> 𝐻𝐻
+> MHA
+> QK
+> SV
+> Softmax
+> Bottom FC
+> (F1)
+> Top FC
+> (F2)
+> (a) LLM Architecture Built on Standard Transformer Decoder Layers
+> MQA KV Head
+> Q Head
+> 𝐾𝐾𝐾𝐾 0
+> 𝑄𝑄 0𝑄𝑄 1𝑄𝑄 2𝑄𝑄 3
+> GQA KV Head
+> Q Head
+> 𝐾𝐾𝐾𝐾 0
+> 𝑄𝑄 0𝑄𝑄 1𝑄𝑄 2𝑄𝑄 3
+> 𝐾𝐾𝐾𝐾 1
+> (b) Attention Variants
+> MLA
+> KV Head
+> Q Head
+> 𝐾𝐾𝐾𝐾 0
+> 𝑄𝑄 0𝑄𝑄 1𝑄𝑄 2𝑄𝑄 3
+> 𝐾𝐾𝐾𝐾 1
+> Latent KV 𝐿𝐿𝐿𝐿𝐿𝐿𝐿𝐿𝐿𝐿𝐿𝐿 𝐾𝐾𝐾𝐾
+> 𝐾𝐾𝐾𝐾 2𝐾𝐾𝐾𝐾 3
+> Low-Rank
+> Compress
+> (c) FFN Variants
+> Bottom FC (F1) Bottom FC ’(F3)
+> Activation
+> Top FC (F2)
+> *
+> MoE Router
+> Expert 1 Expert 2 Expert 3 Expert N
+
+…
+
+> Top-K
+> Routing
+> +
+> 𝐻𝐻
+> GLU
+
+Fig. 1. Standard LLM Architecture and its Variants. 
+
+• We propose Helios’s system design, enabling NMP-Native 
+
+dynamic KV cache management with full consideration of NMP architecture’s non-uniform memory abstraction. Extensive experiments demonstrate that Helios achieves 3.25× (geomean) speedup and 3.36× (geomean) better energy effi-ciency compared with existing GPU/NMP designs. For serving performance, Helios achieves up to 72%/76% P50/P99 time-between-tokens (TBT) degradation. II. B ACKGROUND AND MOTIVATION 
+
+A. Transformer-based LLM Architecture 
+
+As shown in Fig. 1-(a), mainstream LLMs are built upon the transformer decoder layers [70], which contains an attention block and a feed forward network (FFN) block, along with normalization and residual operators. In the attention block, the input is first transformed by three FC layers (Q/K/V) into query/key/value vectors, which are partitioned into H heads (4 in the example) and processed through multi-head attention (MHA). The result is projected by another FC (O) to produce the block output. The FFN block contains two FCs. The output of bottom FC (F1) is processed by the activation function before being processed by the top FC (F2). Apart from the standard architecture, many variants have been derived. As shown in Fig. 1-(b), Multi-query attention (MQA) [65] shares one key-value head pair (KV head) across all query heads. Group-query attention (GQA) [2] generalizes it by grouping every q query heads with one KV head (e.g., 
+
+q=2 in Fig. 1-(b)). Beyond directly reducing KV head number, multi-latent attention (MLA) [12]–[14] adds additional FCs to compress all KV heads into one latent head. For FFN variants, as shown in Fig. 1-(c), gated linear units (GLUs) [66] adds one more bottom FC and applies element-wise multiplication between two bottom FCs’ outputs. Mixture of Expert (MoE) block contains a router and multiple expert FFNs. For each token, the router adopts FC and softmax to select top-K experts, whose outputs are combined via weighted summation. 
+
+B. LLM Serving 
+
+LLM has been widely deployed in online services [1], [17], [54]. As shown in Fig. 2-(a), LLM service receives requests from multiple users, dispatches them to a cluster hosting Requests  Outputs   
+
+> Disaggregated Cluster
+> LLM
+> Instance 0 LLM
+> Instance 1
+
+… LLM 
+
+> Instance N
+> Global Entry
+
+…Users  
+
+> (a) Cluster Architecture Overview
+> LLM Service
+> (b) LLM Cluster/Instance Categories
+> Mixed-Batching Cluster
+> Prefill Batch
+> Decoding Batch …
+> Outputs
+> Move
+> In Place
+> …
+> Prompts 
+> Cache Transfer
+> Prefill Batch
+> Decoding Batch
+> P. Instance
+> D. Instance
+> Mixed
+> Instance
+> …
+> Prompts
+> …
+> Outputs
+
+Fig. 2. LLM Serving Cluster Overview. …𝐾𝐾 0 𝐾𝐾 1 𝐾𝐾 𝑁𝑁 𝐾𝐾 2        
+
+> Query
+> S-VBlock
+> GEMM
+> SV
+> GEMM
+> Key Matrix
+> Value Matrix 𝑑𝑑
+> Score
+> 𝑑𝑑
+> 𝑑𝑑
+> 𝐿𝐿 (Full Sequence Length)
+> Query
+> Output 
+> 
+> (a) Non-Tiled Attention
+> QK GEMM Full Softmax
+> 𝑑𝑑
+> Output
+> (b) Tiled Attention
+> 𝑏𝑏
+> (𝑚𝑚 𝑖𝑖 ,𝑙𝑙 𝑖𝑖 )
+> Online Softmax
+> 
+> Traverse all Blocks 
+> 𝑑𝑑
+> Q-KBlock
+> GEMM
+> 
+
+…𝑉𝑉 0 𝑉𝑉 1 𝑉𝑉 𝑁𝑁 𝑉𝑉 2 
+
+Fig. 3. Illustration of Non-Tiled & Tiled Attention. 
+
+numerous LLM instances, and returns decoding outputs to users. Since LLM inference contains prefill and decoding stages, there are two instance deployment modes, each aligned with one cluster architecture in Fig. 2-(b): (1) Mixed-batching Cluster : Each instance maintains both prefill and decoding batches, which are jointly processed in each iteration. Each request is first added to the prefill batch ( ❶). After prompt pro-cessing, it is moved to the decoding batch in place ( ❷), reusing local KV cache for decoding ( ❸). (2) Disaggregated Cluster :Instances are specialized for either prefill or decoding. Each request is assigned to a prefill-decoding instance pair and is first processed by the prefill instance ( ❶). Then, the decoding instance receives KV cache ( ❷) and continue decoding ( ❸). The cache copy overhead can be overlapped by layer-wise KV cache transfer [59], [61]. By avoiding prefill-decoding interference [59], [91], disaggregated cluster achieves supe-rior performance to mixed-batching cluster, which has been validated in large-scale production deployments [61]. LLM serving workloads exhibit high dynamicity , which is manifested in two key aspects: (1) Request Arrival : LLM ser-vices have significant traffic fluctuations. Based on production trace analyses [73], [79], peak-hour loads can exceed off-peak periods by 1-2 orders of magnitude. Therefore, it is crucial for LLM instances to efficiently handle both small batches at low load and large batches at high load [91]. (2) Request Length :As LLMs’ context windows continue to expand, token counts vary widely across requests. Production service analysis [79] shows that the max length can be an order of magnitude greater than the average length (e.g., ˜10K vs. ˜1K). Such dynamicity causes the KV cache maintained in each LLM instance to continuously evolve as serving progresses due to the following reasons: (1) The residency of the KV cache is tied to the lifetime of each request. As requests dy-namically enter (e.g., new request arrives) or exit (e.g., request finishes decoding) an LLM instance under varying request rates, the allocated KV cache correspondingly expands or shrinks. (2) KV cache memory footprint and attention compu-tation cost both scale proportionally with request length [42], [91]. Therefore, variable request lengths directly affect per-instance KV cache memory usage and attention overhead. To align with this behavior, dynamic KV cache management [42] and fine-grained attention computation algorithms [9]–[11], [64] have been proposed, which are widely employed in state-of-the-art serving systems such as vLLM [42] and Algorithm 1: Iterative Tiled Attention (MHA Example)  
+
+> 1
+
+Input: Query Q ∈ R1×d, KV blocks 
+
+{(K0, V 0), ..., (KN , V N )}, Ki, V i ∈ Rb×d (d: head dim, b:token number per block).  
+
+> 2
+
+Output: Attention output O ∈ R1×d. 
+
+> 3
+
+O ←⃗ 0, m−1 = −∞ , l−1 = 0  
+
+> 4
+
+for i = 0 to i = N do  
+
+> 5
+
+xi ← Q × K⊤ 
+
+> i
+
+// GEMM between query and key block  
+
+> 6
+
+mi ← max (mi−1, max (xi)) // Online softmax begins  
+
+> 7
+
+ei ← exi−mi 
+
+> 8
+
+li ← li−1 · emi−1−mi + sum (ei) 
+
+> 9
+
+α ← li−1·emi−1−mi 
+
+> li
+
+, pi ← ei 
+
+> li
+
+// Online softmax ends  
+
+> 10
+
+Oi ← pi × V i // GEMM between score block and value block  
+
+> 11
+
+O ← α · O + Oi // Ouptut accumulation  
+
+> 12
+
+return O
+
+SGLang [90]: (1) Blockwise KV Cache Management : As shown in Fig. 3-(b), it partitions each request’s full KV cache into blocks of b tokens. By dynamically allocating free block slots in accelerator memory, it significantly improves the mem-ory utilization. (2) Tiled Attention : To align with blockwise management mechanism, online softmax [50] is introduced to enable block partition during attention computation. Tiled attention has two versions: iterative and reduction. Fig. 3-(b) shows iterative tiled attention’s execution flow, and Algo-rithm 1 summarizes its formulae. Without loss of generality, these formulae are exemplified using one MHA head, which are applicable to any attention variant. For each KV block, it-erative tiled attention performs GEMM between query and key block ( ❶), computes online softmax and updates intermediate results ( ❷), conducts GEMM between score block and value block, and accumulate partial sums ( ❸). After traversing all blocks ( ❹), the complete output is obtained. Alternatively, pre-computed partial results from different blocks can be combined via tiled attention’s reduction version: Assume two blocks’ intermediate results are ( O1, m 1, l 1) and ( O2, m 2, l 2), using the notation in Algorithm 1. The attention output is given by: 
+
+m = max (m1, m 2), e 1 = l1 · em1−m, e 2 = l2 · em2−m (1) 
+
+l = e1 + e2, O = e1 
+
+> l
+
+· O1 + e2 
+
+> l
+
+· O2 (2) 
+
+C. NMP-empowered LLM Accelerators 
+
+To efficiently handle coexisting compute-intensive and memory-intensive operators, NMP-based LLM accelerators have been widely proposed [18], [31], [32], [38], [39], [45], [46], [56], [58], [86]. Apart from equipping central-ized processors (e.g., GPU/TPU) for compute-intensive oper-ators, they also place processing engines (PEs) into DRAM modules to boost bandwidth for memory-bound operators. For example, in edge scenarios, Samsung/SK-Hynix propose LPDDR-PIM products for on-device LLM inference [38], [39]. H2-LLM adopts hybrid bonding to enhance NMP compute power for low-batch inference [45]. As to LLM serving, AttAcc/NeuPIMs target MHA by placing PEs into HBM’s DRAM dies [32], [58]. PAPI extends this approach to low-batch FC operators [31]. Duplex adds extra Through Silicon Vias (TSVs) and places PEs on HBM cube’s buffer die for GQA and MoE’s FC operators [86]. Stratum adopts monolithic 
+
+TABLE I COMPARISON OF EXISTING NMP-BASED LLM S ERVING ACCELERATORS                             
+
+> Name KV Cache Management Attention Computation Flexibility Allocation Scope (per KV Head) Execution Flow Execution Scope (per KV Head) AttAcc [58] Full-length Static One HBM Cube Localized Non-tiled One HBM Cube NeuPIMs [32] One HBM Channel One HBM Channel Duplex [86] One HBM Cube One HBM Cube PAPI [31] One HBM Cube One HBM Cube CENT [18] GDDR Channels (Equal to TP size) GDDR Channels (Equal to TP size) Stratum [56] Four NMP PEs Four NMP PEs
+> Helios (ours) Blockwise Dynamic All NMP PEs Distributed Tiled All NMP PEs 0.25L
+> Req. 0
+> L
+> Req. 1
+> 0.5L
+> L
+> Req. 2
+> 0.75L
+> L
+> NMP Device
+> Module 0 Module 1
+> PE 0
+> 1.25L
+> H
+> L
+> Req. 0
+> PE 1
+> 1.25L
+> H
+> L
+> Req. 0
+> PE 2
+> 1.25L
+> H
+> L
+> Req. 1
+> PE 3
+> 1.25L
+> H
+> L
+> Req. 1
+> Non-Allocatable
+> (a) Existing NMP Designs
+> PE 2
+> Softmax
+> QH
+> 0.5L
+> H
+> 0.5L  Q
+> PE 3
+> QH
+> 0.5L
+> H
+> 0.5L  Q
+> QL
+> 0.5L
+> L
+> 0.5L  Q
+> QL
+> 0.5L
+> L
+> 0.5L  Q
+> 2 Blocks
+> Req. 0
+> L
+> Req. 1
+> 4 Blocks
+> L
+> Req. 2
+> 6 Blocks
+> L
+> NMP Device
+> (b) Helios
+> PE 2 PE 0
+> 2H
+> 5 Blocks
+> PE 1
+> 2H
+> 5 Blocks
+> PE 2
+> 2H
+> 5 Blocks
+> PE 3
+> 2H
+> 5 Blocks
+> Req. 1
+> QH
+> PSum
+> Reduce
+> HB
+> HB
+> Output
+> Req. 2
+> QH
+> PSum
+> Reduce
+> Output HB
+> HB
+> Fixed Partial PEs Fragmentation Flexible Allocation across all PEs
+
+Fig. 4. KV Cache Management and Attention Execution Comparison. 
+
+3D DRAM to further enhance the inference performance of MoE model’s operators [56]. 
+
+D. Limitations of Serving-Oriented NMP Designs 
+
+Although existing LLM-serving-oriented NMP designshave reported better performance than centralized processors, they lack support for dynamic KV cache management and fine-grained attention computation mechanisms, limiting their effi-ciency for highly dynamic serving workloads: 
+
+Limitation #1: Coarse-grained KV cache management. As summarized in Table I, existing NMP designs group PEs into NMP modules corresponding to memory module organization (e.g., HBM cubes/channels), and statically allocate the full-length KV cache of each attention head to a fixed NMP module throughout the request’s lifetime. For example, in Fig. 4-(a), each request is placed on two PEs within the same NMP module during the entire execution. This coarse-grained scheme leads to resource inefficiency from two aspects: 
+
+(1) Compute Load Imbalance . To fully utilize all NMP modules, the above strategy requires all ongoing requests’ KV head number to be no less than NMP module count. However, as attention variants notably reduce LLM’s KV head number, it is difficult to fully utilize all modules under highly dynamic arrival rates. For example, consider serving LLaMA3 70B [15] (8 KV heads) on 8 A100 GPUs under tensor parallelism (TP) of 8. If all five HBM cubes per GPU are NMP cubes, full resource utilization demands at least five requests. However, such concurrency cannot be satisfied at low loads [79], result-ing in idle NMP resources. Additionally, decoding attention’s compute cost scales linearly with request length [91]. Given that request length varies by tens of thousands of tokens [79], assigning each KV head’s all tokens as a whole makes it difficult to ensure load balance across NMP modules. 
+
+(2) Memory Fragmentation . On one hand, due to NMP module’s capacity limitation, it is possible that no single module can accommodate an entire request, even when the total remaining capacity is sufficient. This inter-module frag-mentation degrades the effective serving capacity [67]. On the other hand, as request length grows during decoding, pinning KV heads to fixed NMP modules can lead to capacity overflow. This issue can be mitigated by preserving token slots based on LLM’s max context window. However, since requests rarely fill the full window [79], this approach incurs severe memory capacity waste, hurting the serving capability. In Fig. 4-(a)’s example, assume a max context length of L,key/value vector length H, and per-PE KV cache capacity of (1.25 L, H ). Although requests 0 and 1 have actual lengths of 
+
+0.25 L and 0.5L, existing NMP designs still reserve KV cache for length L, leading to 0.75 L+0 .5LL+L =62.5% wasted space. Moreover, while the total remaining capacity across the four PEs could accommodate another KV cache of length L, no individual PE group has sufficient space. Therefore, request 2 cannot be executed immediately and must wait until request 0 or 1 finishes decoding and releases its allocated space. 
+
+Limitation #2: Inflexible attention execution flow. Exist-ing NMP architectures execute attention as two standalone GEMMs [18], [31], [32], [38], [39], [56], [58], [86]. Specifi-cally, for each KV head, its complete key and value matrices are statically partitioned across the PEs within a fixed NMP module. These PEs perform attention computation following the execution flow shown in Fig. 3-(a): They first collectively compute GEMM between query and the full key matrix ( ❶). Then, the intermediate results undergo the softmax operation to yield the attention scores of the full sequence ( ❷). The scores are then distributed across these PEs according to value matrix’s partition. Finally, these PEs perform GEMM between attention scores and the value matrix to produce the final results ( ❸). In Fig. 4-(a)’s example, key and value matrices are partitioned across the two PEs in each group along the context-length L and vector-length H, respectively. With Q query heads, each PE executes two GEMMs: (Q, H )×( H, 0.5L)and ( Q, L )×( L, 0.5L). Such a static partitioning enforces a fixed context length, fundamentally constraining KV cache dynamism and placement flexibility at the architectural level. Although this strategy aligns with coarse-grained KV cache management, they jointly limit existing NMP architectures from supporting dynamic KV cache management, degrading their efficiency in LLM serving. 
+
+Limitation Analysis: The root cause of the above limitations lies in the fundamental gap between the non-uniform memory abstraction inherent in NMP architecture and existing GPU-based dynamic KV cache management algorithm designs. 
+
+For NMP architecture , to fully exploit DRAM bandwidth, it distributes PEs among discrete memory modules (e.g., HBM cubes). Accordingly, each PE can only directly access its local memory, rather than the accelerator’s arbitrary memory mod-ules. Therefore, to align with such architectural discreteness, existing NMP designs statically assign KV heads to fixed NMP modules. On the other hand, for KV-cache management , ex-isting GPU-based algorithms [9]–[11], [42], [64] are designed under the assumption that the compute logic has unrestricted access to the accelerator’s all memory modules. However, in NMP architectures, dynamic KV cache management inevitably involves partitioning KV cache blocks across PE arrays that Logic 
+
+## ...… Auxiliary 
+
+## ...… DRAM 0 
+
+> DRAM N
+> Routing Wires
+
+## ...…   
+
+> DRAM
+> Logic
+> Cu-Cu Pillar
+> Pitch (3μm)
+> (a) Basic Two-Layer Bonding
+> Substrate Bump
+> DRAM 0
+> (c) Auxiliary Layer Bonding (b) Multi -DRAM-Die Bonding
+> Logic
+
+## ...… DRAM 1  
+
+> DRAM N
+> Mini-TSV
+> Distributed I/O
+> Fig. 5. Basic and Advanced Hybrid Bonding Integration.
+
+cannot directly access each other’s memory modules. Design-ing KV cache management and attention computation strate-gies that effectively account for such architectural discreteness remains an unresolved challenge for NMP architectures. 
+
+Design Goal: To address these limitations, we propose He-lios to enable NMP-native dynamic KV cache management. By dividing KV cache into fine-grained blocks (e.g., block size of L 
+
+> 8
+
+in Fig. 4-(b)) and distributing them across all PEs, we can balance computation across PEs, eliminate redundant allocation in each request, and fully utilize all PEs’ idle capacity. In addition, by optimizing attention execution around blockwise KV cache management, we can better exploit NMP device’s compute capability. In the following sections, we will elaborate on Helios’s full-stack design — from architecture, to operator execution, and spatially-aware KV cache allocation. III. H ELIOS ARCHITECTURE 
+
+A. The Basis and Advancement of Hybrid Bonding 
+
+Basis: Before delving into the design details of Helios, we first provide an overview of Hybrid Bonding (HB), an integration technology emerging in recent years [16], [45], [52], [71], [72], [78], [84]. As shown in Fig. 5-(a), it 3D-stacks the DRAM die onto the logic die via Cu-Cu direct fusion bond. By offering high I/O density (110,000/mm 2) with 3um pitch [16], [72], HB delivers abundant bandwidth for memory-intensive workloads. Besides, the reduced parasitic capacitance and the low resistance ( <0.5 Ω) enable HB to achieve better memory access energy efficiency than HBM and GDDR memory, reaching as low as 0.66pJ/bit [72]. Moreover, the holistic logic die can be customized to boost the compute capacity [45], [84], overcoming the compute bottleneck introduced by integrating PEs into DRAM devices (i.e., in-die NMP designs [45]). 
+
+Advancement: In recent years, more versatile multi-layer bonding have become feasible [71], [72]. As shown in Fig. 5-(b), beyond stacking a single DRAM die, HB supports multi-layer DRAM bonding by employing mini-TSVs to connect adjacent DRAM dies. This approach boosts both memory capacity and bandwidth in proportion to DRAM die number. According to our industry collaborators, current mature pro-cess supports four-layer DRAM stacking, providing a capacity comparable to that of mainstream GPUs ( ≥80GB). Apart from expanding DRAM capacity, multi-layer bonding can also be used to optimize placement and routing. To provide sufficient bandwidth, HB partitions the DRAM die into numerous banks with independent I/Os (e.g., 128-256 banks [45], [84]). Directly connecting DRAM I/Os to the logic die as in Fig. 5-(a) would fragment the logic die into many small regions, increasing placement and routing complexity for compute logic. To mitigate this issue, an auxiliary logic die can be inserted between the bottom DRAM die and the main logic HB 
+
+> Device
+
+PCIe Switches 
+
+> MC
+> MC
+
+CPU 
+
+Sockets  
+
+> HB
+> Device HB
+> Device
+
+# …  
+
+> Interconnect
+> TP/PP/EP
+> NIC NIC
+> Cache Recv.
+> (NIC to DRAM) Cache Copy
+> (DRAM to Device)
+
+…
+
+…  
+
+> Comp. Logic Comp. Logic
+> Comp. Logic Comp. Logic
+
+Global Scheduler 
+
+> Requests
+
+… Dispatch 
+
+(a) Serving Cluster Overview  (b) HB-Node Architecture  (c) HB-Device’s Overall Architecture 
+
+Prefill Pool  Decoding Pool  
+
+> Cache
+> Trans.
+> Prefill Instance Decoding Instance
+> Model Shards
+> HB
+> Dev.
+> HB
+> Dev.
+> HB
+> Dev.
+> HB
+> Dev.
+
+…
+
+…
+
+> Model Shards
+> GPU
+> GPU
+> GPU
+> GPU
+
+…
+
+…
+
+…
+
+…
+
+……
+
+……        
+
+> Bank Bank
+> Bank Bank
+> Bank Bank
+> Bank Bank
+> Bank Bank
+> Bank Bank
+> Bank Bank
+> Bank Bank
+
+……
+
+……
+
+> Router NoC
+
+
+
+
+
+Fig. 6. Architecture Overview of Helios. -
+
+-    
+
+> ×
+> +
+> ÷
+> 𝒆𝒆 𝒙𝒙  𝒆𝒆 𝒙𝒙  ×÷
+> 𝑙𝑙 2
+> 𝑙𝑙 1
+> 𝑚𝑚 2
+> 𝑚𝑚 1𝑚𝑚 𝑙𝑙
+> 𝑒𝑒 1𝑙𝑙
+> 𝑒𝑒 2𝑙𝑙
+
+-
+
+> max
+> ×
+> +
+> ÷
+> 𝒆𝒆 𝒙𝒙
+
+-              
+
+> 𝒆𝒆 𝒙𝒙  ÷
+> 𝑚𝑚 𝑖𝑖−1
+> 𝑙𝑙 𝑖𝑖−1
+> (a) HB-Device’s PE Architecture
+> (b) Online Softmax Unit Architecture
+> (c) Reduction Unit Architecture
+> 𝒙𝒙 𝒊𝒊 𝒑𝒑 𝒊𝒊
+> 𝑒𝑒 𝑚𝑚 𝑖𝑖−1 −𝑚𝑚 𝑖𝑖
+> 𝒆𝒆 𝒊𝒊 𝑙𝑙 𝑖𝑖
+> 𝑚𝑚 𝑖𝑖
+> 𝛼𝛼
+> 𝑙𝑙 𝑖𝑖
+> 𝑙𝑙 1,𝑚𝑚 1
+> 𝐴𝐴𝐴𝐴𝐴𝐴𝐴𝐴 .
+> 𝒗𝒗 𝟏𝟏
+> 𝒗𝒗 𝟐𝟐
+> 𝑒𝑒 1/𝑙𝑙
+> FGU
+> 𝒐𝒐𝒐𝒐𝒐𝒐 HB Ctrl. HB Ctrl. HB Ctrl.
+
+## …
+
+> Transfer
+> Buffer
+> Compute
+> Buffer
+> Router NoC
+> Inter-PE NoC
+> PE Controller
+> Reduction Unit
+> Online Softmax Unit
+> Vector Unit
+> Matrix Unit
+> …
+> …
+> …
+> …
+> …
+> …
+> …
+> …
+> …
+
+…  
+
+> 𝑚𝑚 𝑖𝑖
+> 𝑒𝑒 2/𝑙𝑙
+> 𝑙𝑙 2,𝑚𝑚 2
+> max
+> …
+> …
+> …
+> Select
+
+Fig. 7. HB-Device’s PE Architecture Design. 
+
+die to aggregate I/Os from different banks, as shown in Fig. 5-(c). According to our industry collaborators, this approach has negligible impact on bandwidth provision. 
+
+B. Architecture Overview 
+
+Cluster Architecture: Helios employs inter-device heteroge-neous architecture, which is fully compatible with state-of-the-art prefill-decoding disaggregation cluster architecture [59], [61], [91]. As shown in Fig. 6-(a), compute-intensive prefill in-stances are deployed on GPUs, while decoding instances with memory-bound operators are assigned to server nodes with hybrid bonding devices (HB-Devices). Decoding instances receive KV cache from prefill ones, which is coordinated by global scheduler’s instance pair allocation. Note that prefill instances could also be replaced with compute-optimized HB-Devices by adopting more advanced technology nodes to the logic die. Since GPUs can provide sufficient prefill acceleration, we focus on applying HB to the decoding stage to fully leverage its bandwidth advantages. Prefill HB-Device design is left as our future work. 
+
+Server Node Architecture: As shown in Fig. 6-(b), HB-Devices can be integrated into mainstream server architec-ture [61]. Each device connects to CPU sockets via PCIe switches. When HB-Node receives new prompt KV cache, it is first delivered to CPU memory through NICs for persistent storage ( ❶) and then copied to HB-Devices via PCIe ( ❷). This process is compatible with high-performance KV cache transfer engines (e.g., MoonCake Transfer Engine [40]). In this way, prefill instances can stream KV cache layerwise, consistent with industrial best practice [59], [61]. Besides, all devices are connected through high-speed links (NVLink, CXL, etc.) [8], [53], [69] for inter-device tensor/pipeline /expert parallelism (TP/PP/EP) data transfer ( ❸). 
+
+Device Architecture: As shown in Fig. 6-(c), each HB-Device stacks four memory dies and one auxiliary die on top of the logic die. Each memory die contains 256 banks arranged in a 
+
+16 × 16 grid, which are further grouped into bank partitions with the shape of n × n (e.g., n = 2 in Fig. 6-(c)). Bank partitions at each DRAM die’s same position correspond to the aligned processing engine (PE) on the logic die. Their I/Os are connected to the auxiliary die using the scheme in Fig. 5-(b). These I/Os are then aggregated using the scheme in Fig. 5-(c). In this way, HB controllers are consolidated at the bottom of each PE, simplifying logic die’s placement and routing compared with distributed I/Os. The logic die integrates a device router connected to external interconnects, a global controller managing the entire device, and an m × m PE array ( m = 16  
+
+> n
+
+). Each PE can directly access local memory through its HB controllers, and contains two NoC routers for inter-PE communication. The router NoC links each PE to the device router, handling the transfer of prompt KV cache and TP/PP/EP data. The inter-PE NoC manages partial sum exchanges during operator execution. Both NoCs use mesh topologies for PE interconnection and operate on independent data paths to avoid interference. 
+
+PE Architecture: As shown in Fig. 7-(a), each PE contains a matrix unit, an online softmax unit, a vector unit, and a reduction unit for operator execution. The matrix unit, built from MAC arrays, performs GEMMs in FC and tiled attention operators. Given the workload and hardware configuration, we can adopt existing performance models [41], [48], [57] to determine GEMM’s optimal tiling strategies. Fig. 7-(b) depicts the online softmax unit’s architecture. Given xi, m i−1, l i−1,it conducts online softmax operation (i.e., Line 6-9 in Algo-rithm 1) and produces mi, pi, α, l i for subsequent attention computation. The vector unit performs element-wise opera-tions such as residual, normalization, and activation functions. The reduction unit performs partial sum accumulation. As Fig. 7-(c) shows, apart from a vector scaling & accumulation unit, it includes a factor generation unit (FGU) that produces scaling factors in the reduction version of tiled attention ( e1 
+
+> l
+
+, e2 
+
+> l
+
+in Eq. (1)-(2)). For standard reduction, FGU’s outputs will be filtered by the factor selection unit. Each PE’s SRAM buffer is divided into a compute buffer and a transfer buffer. The compute buffer stores tensor tiles and partial sums during computation, while the transfer buffer is used for streaming prefill KV cache into HB-Devices (details discussed later). 
+
+C. Design Considerations and Challenges 
+
+Integration Overhead: Driving the large number of I/O pins provided by hybrid bonding requires numerous memory Higher NoC Latency  Higher DRAM Latency          
+
+> 0
+> 1
+> 2
+> 3
+> 4
+> 5
+> (b) LLM Decoding Latency Comparison
+> 0
+> 1
+> 2
+> 3
+> 4
+> PE Array Size
+> Norm. Speedup
+> 16 ×16 8×84×42×21×1Average
+> OPT
+> LLaMA3
+> Mixtral
+> Qwen3
+> DeepSeek
+> (a) Trade-off Analysis
+> Avg. Latency
+> PE Array Size
+> 16 ×16 8×84×42×21×1
+
+Fig. 8. PE Granularity Exploration Analysis. 
+
+controllers, which encroaches logic die’s area. A recent study reports that HB controllers can occupy up to 40% of the logic die area under 40nm for edge scenarios [45]. This overhead decreases with the advancement of technology node. According to our industry collaborators, HB controllers only incur about 10% area under 12nm when each bank exposes 256 I/O pins (i.e., 1024 pins aggregated from vertically aligned banks across four stacked memory dies). This not only ensures sufficient bandwidth provision, but also preserves ample area for compute logic customization. 
+
+PE Granularity Exploration: As shown in Fig. 8-(a), varying PE array size (or bank partition size) introduces a trade-off between the latency overhead of NoC and DRAM: Increasing PE number enlarges NoC’s mesh size, resulting in higher NoC transfer overhead. However, reducing PE number increases bank number in each PE, which hurts the effective DRAM bandwidth. This is because, due to operator size and SRAM capacity constraints, each PE accesses nearly the same data volume across all local banks for each tensor-tile fetching. As a result, more banks per PE reduce the data volume accessed in each bank, leading to lower bandwidth utilization. To determine the optimal PE granularity that balances this trade-off, we evaluate five representative LLMs. Detailed settings are summarized in Sec. VI-A. For fair comparison, we fix total compute capacity across different array sizes. As shown in Fig. 8-(b), extreme array sizes — either too large (16×16) or too small (1×1) — result in notable performance degradation. We adopt the 4×4 array size with the optimal performance as the final design choice. 
+
+Challenges in Runtime Execution: HB-Device features spa-tially distributed PEs , which must be fully considered across the full-stack design of Helios: (1) For Operator Execution , we need not only to customize intra-PE execution strategies , but also to design inter-PE communication flows for diverse inter-operator transfer patterns. (2) For System Scheduling , we need to incorporate spatial awareness into fine-grained KV cache management to balance both computation and communication across PEs. The subsequent sections will elaborate on how Helios addresses these remaining issues. IV. HB-D EVICE OPERATOR EXECUTION 
+
+A. Intra-PE Execution 
+
+Operator Execution: As shown in Fig. 9, for FC operators ,after computing each tile’s GEMM results, the reduction unit performs partial-sum accumulation. By pre-loading the next tile while computing the current tile, the partial-sum accumulation can be hidden by subsequent GEMM operation, maximizing compute resource utilization. For tiled attention ,to fully utilize the compute buffer, multiple blocks are merged Macro Block 1 
+
+> Tile N-1
+> Accum.
+
+…
+
+… 
+
+> Matrix Unit
+> Matrix Unit
+
+… 
+
+> Reduction Unit
+
+…Tile 0    
+
+> Accum.
+> Time
+> Tile 0 GEMM
+> (a) FC Operator’s Execution Flow
+> Online Softmax Unit Block 0-3
+> Softmax
+> Time
+> (b) Tiled Attention Operator’s Execution Flow
+> Tile 1 GEMM
+> Tile 1
+> Accum.
+> Tile 2 GEMM Tile N GEMM
+> Tile N
+> Accum.
+> Reduction Unit Block 0-3
+> Accum.
+> Block 0-3
+> QK GEMM
+> Block 4-7
+> QK GEMM
+> Block 0-3
+> SV GEMM
+> Block 4-7
+> SV GEMM
+> Block 4-7
+> Softmax
+> Block 4-7
+> Accum.
+
+… 
+
+> Macro Block 0
+> …
+> Group 0 Group 1
+
+Fig. 9. Operator Execution Flow on Each PE. (a) Fine-grained Cache Store  
+
+> Memory Access
+
+… 
+
+> Memory Access
+
+… 
+
+> Computation
+
+…Tile 0    
+
+> Computation
+> Time
+> Load Tile 0
+> Store
+> Cache
+> Ld. Tile1
+> St. Out0
+> Tile N
+> Computation
+> Store
+> Cache Store
+> Cache
+> Computation Tile 0
+> Computation
+> Time
+> Load Tile 0 Load Tile 1
+> Store Output 0
+
+…
+
+> (b) Coarse-grained Cache Store
+> Accumulate on Transfer Buffer
+> Tile 1
+> Computation
+> Load Tile 2
+> Store Output 1
+> Ld. Tile2
+> St. Out1
+> Store
+> Cache
+> Tile 1
+> Computation
+
+Fig. 10. Timeline of Prefill KV Cache Storing on Each PE. 
+
+into a larger macro block in each iteration (e.g., 8 blocks are merged in Fig. 9-(b)). Since each tiled attention iteration contains two GEMMs ( Q × K⊤ 
+
+> i
+
+and pi × V i) and two vector operations (online softmax and output accumulation), each macro block is further divided into two groups (e.g., block 0-3 and 4-7 in Fig. 9-(b)). By alternating the execution of matrix and vector operations across the two groups, vector operations’ latency can be efficiently hidden. Furthermore, by combining this intra–macro-block overlap with inter–macro-block double buffering, the explicit overhead of vector operations is negli-gible. For elementwise operators , once the data are ready in the compute buffer, the corresponding vector processing unit can be invoked to complete the computation. 
+
+Prefill KV Cache Transfer: Since HB controllers are em-bedded within distributed PEs, streaming prompt KV cache to DRAM may interfere with the ongoing computation. To mitigate this issue, we introduce a transfer buffer to temporar-ily hold incoming prompt KV cache. Fig. 10 shows the KV cache storing timeline. When PE’s DRAM access latency is shorter than computation latency, we exploit this time slack to perform fine-grained storing, minimizing latency overhead. On the other hand, When the PE is memory-bound or the KV cache arrival rate is high, we adopt the coarse-grained strategy to improve bandwidth utilization through bulk data transfers: Incoming KV cache is first accumulated on the transfer buffer, then collectively written to the DRAM. The accumulation threshold is dynamically adjusted based on the KV cache arrival rate and the memory bandwidth utilization. When a request arrives, the device router transfers KV cache to PEs designated by the policy in Sec. V-A. Each PE dynamically selects the most suitable storing strategy according to the current execution status. Once the transfer completes, the request is added to the decoding batch via iteration-level scheduling and computed using continuous batching [83]. 
+
+B. Inter-PE Operator Partition & Communication 
+
+This sub-section elaborates on Helios’s design using 4×4 mesh as an example. Note that, as all inter-PE communication PE(0,0)  PE(0,1)  PE(0,2)  PE(0,3)                      
+
+> PE(1,0) PE(1,1) PE(1,2) PE(1,3)
+> PE(2,0) PE(2,1) PE(2,2) PE(2,3)
+> PE(3,0) PE(3,1) PE(3,2) PE(3,3)
+> PE(0,0) PE(0,1) PE(0,2) PE(0,3)
+> PE(1,0) PE(1,1) PE(1,2) PE(1,3)
+> PE(2,0) PE(2,1) PE(2,2) PE(2,3)
+> PE(3,0) PE(3,1) PE(3,2) PE(3,3)
+
+Input 
+
+Weight 
+
+Output                   
+
+> 𝑋𝑋 0𝑋𝑋 1𝑋𝑋 2𝑋𝑋 3𝐵𝐵
+> 𝐻𝐻 𝑖𝑖𝑖𝑖
+> 𝑌𝑌 0𝑌𝑌 1𝑌𝑌 2𝑌𝑌 3𝐵𝐵
+> 𝐻𝐻 𝑜𝑜𝑜𝑜𝑜𝑜
+> 𝑊𝑊 (0,0)𝑊𝑊 (0,1)𝑊𝑊 (0,2)𝑊𝑊 (0,3)
+> 𝑊𝑊 (1,0)𝑊𝑊 (1,1)𝑊𝑊 (1,2)𝑊𝑊 (1,3)
+> 𝑊𝑊 (2,0)𝑊𝑊 (2,1)𝑊𝑊 (2,2)𝑊𝑊 (2,3)
+> 𝑊𝑊 (3,0)𝑊𝑊 (3,1)𝑊𝑊 (3,2)𝑊𝑊 (3,3)
+> 𝐻𝐻 𝑖𝑖𝑖𝑖
+> 𝐻𝐻 𝑜𝑜𝑜𝑜𝑜𝑜
+
+Input/Weight Distribution  Output Partial Sum Distribution                
+
+> 𝑌𝑌 00𝑌𝑌 10𝑌𝑌 20𝑌𝑌 30
+> 𝑌𝑌 01𝑌𝑌 11𝑌𝑌 21𝑌𝑌 31
+> 𝑌𝑌 02𝑌𝑌 12𝑌𝑌 22𝑌𝑌 32
+> 𝑌𝑌 03𝑌𝑌 13𝑌𝑌 23𝑌𝑌 33
+> 𝑋𝑋 0
+> 𝑊𝑊 (0,0)
+> 𝑋𝑋 0
+> 𝑊𝑊 (0,1)
+> 𝑋𝑋 0
+> 𝑊𝑊 (0,2)
+> 𝑋𝑋 0
+> 𝑊𝑊 (0,3)
+> 𝑊𝑊 (1,0)
+> 𝑋𝑋 1𝑊𝑊 (1,1)
+> 𝑋𝑋 1
+> 𝑊𝑊 (1,2)
+> 𝑋𝑋 1
+> 𝑊𝑊 (1,3)
+> 𝑋𝑋 1
+> 𝑊𝑊 (2,0)
+> 𝑋𝑋 2𝑊𝑊 (2,1)
+> 𝑋𝑋 2
+> 𝑊𝑊 (2,2)
+> 𝑋𝑋 2
+> 𝑊𝑊 (2,3)
+> 𝑋𝑋 2
+> 𝑊𝑊 (3,0)
+> 𝑋𝑋 3𝑊𝑊 (3,1)
+> 𝑋𝑋 3
+> 𝑊𝑊 (3,2)
+> 𝑋𝑋 3
+> 𝑊𝑊 (3,3)
+> 𝑋𝑋 3
+
+Fig. 11. Inter-PE FC Operator Partition Strategy. 
+
+is built on collective primitives , they can be generalized to 
+
+arbitrary PE array sizes and NoC topologies .
+
+Operator Partition: (1) For FC Operators , as shown in Fig. 11, given the runtime variability of decoding batch size under continuous batching [83], we partition only the hidden dims ( Hin , H out ) along the PE array’s two dimensions, leaving the batch size ( B) intact. Accordingly, the input tensor is partitioned along Hin and replicated in accordance with weight tile mapping. Each PE’s local GEMM computation produces a partial sum of the output sub-vector (split along 
+
+Hout ), which will be reduced based on the data distribution demands of subsequent operators. (2) For Tiled Attention , each request’s historical KV cache is split into KV blocks (as shown in Fig. 3-(b)) and distributed across PEs. New KV vectors generated during decoding are appended to the last partially filled block. All attention heads on a given device adopt the same block allocation (discussed later). Given the block mapping, each PE first computes local attention partial sums using the iterative method in Algorithm 1. These partial sums are then accumulated via Eq. (1)-(2) to produce the final result. 
+
+(3) For Elementwise Operators , their computation can be fused into the inter-PE communication procedure. The following paragraphs will elaborate on Helios’s inter-PE communication design for LLM’s different operator blocks. 
+
+Attention Block (MHA/GQA/MQA): (1) Q/K/V Projection to Tiled Attention : For query projection, since every PE may hold KV blocks, the complete query vector needs to be replicated across all PEs for local tiled attention. The corre-sponding inter-PE communication flow is depicted in Fig. 12-(a). Given FC’s partial sum distribution, we first perform a 1D all-reduce along the X-axis to reconstruct the complete sub-vectors. Then, through a 1D all-gather along the Y-axis, we can duplicate full query vectors across all PEs. Unlike query vectors, key/value vectors only need to be sent to the PE holding the corresponding request’s last block. To achieve this, we employ the strategy shown in Fig. 12-(b). In this example, we assume the batch contains 16 requests (R0-R15), with PE(x,y) storing request 4x+y’s last block. Along the X-axis, PEs in each column first send their partial sums to the central PEs, performing in-transit reduction. The central PEs then scatter sub-vectors based on the X-axis (row) ID of the destination PE for each request. For even-sized meshes, we can leverage the two symmetric minimum-depth trees and route requests to the root node closer to their target rows, thereby optimizing the hop count. In Fig. 12-(b)’s example, PE(1,y) and PE(2,y) serve as the root nodes. Requests targeting rows 0–1 are reduced on PE(1,y), while those targeting rows 𝑄𝑄 0 𝑄𝑄 1 𝑄𝑄 2 𝑄𝑄 3                                 
+
+> 𝑄𝑄 0𝑄𝑄 1𝑄𝑄 2𝑄𝑄 3
+> 𝑄𝑄 0𝑄𝑄 1𝑄𝑄 2𝑄𝑄 3
+> 𝑄𝑄 0𝑄𝑄 1𝑄𝑄 2𝑄𝑄 3
+> PE(0,0) PE(0,1) PE(0,2) PE(0,3)
+> PE(1,0) PE(1,1) PE(1,2) PE(1,3)
+> PE(2,0) PE(2,1) PE(2,2) PE(2,3)
+> PE(3,0) PE(3,1) PE(3,2) PE(3,3)
+> 𝑄𝑄 00𝑄𝑄 10𝑄𝑄 20𝑄𝑄 30
+> 𝑄𝑄 01𝑄𝑄 11𝑄𝑄 21𝑄𝑄 31
+> 𝑄𝑄 02𝑄𝑄 12𝑄𝑄 22𝑄𝑄 32
+> 𝑄𝑄 03𝑄𝑄 13𝑄𝑄 23𝑄𝑄 33
+> Y-Axis
+> X-Axis
+
+Step-1: X-Axis All Reduce  Step-2: Y-Axis All Gather  Duplicate Q across All PEs         
+
+> 𝑄𝑄 𝑄𝑄 𝑄𝑄 𝑄𝑄
+> 𝑄𝑄 𝑄𝑄 𝑄𝑄 𝑄𝑄
+> 𝑄𝑄 𝑄𝑄 𝑄𝑄 𝑄𝑄
+> 𝑄𝑄 𝑄𝑄 𝑄𝑄 𝑄𝑄
+> All Reduce
+> All Reduce
+> All Reduce
+> All Reduce
+> All Gather
+> All Gather
+> All Gather
+> All Gather
+
+(a) Query Projection’s Inter-PE Communication             
+
+> PE(0,0) PE(0,1) PE(0,2) PE(0,3)
+> PE(1,0) PE(1,1) PE(1,2) PE(1,3)
+> PE(2,0) PE(2,1) PE(2,2) PE(2,3)
+> PE(3,0) PE(3,1) PE(3,2) PE(3,3)
+> Y-Axis
+> X-Axis
+
+Step-1: X-Axis Reduce  Step-2: X-Axis Scatter  Sub-Vectors on Dst. Rows             
+
+> R0-R7
+> 𝐾𝐾𝑉𝑉 0
+> R0-R7
+> 𝐾𝐾𝑉𝑉 1
+> R0-R7
+> 𝐾𝐾𝑉𝑉 2
+> R0-R7
+> 𝐾𝐾𝑉𝑉 3
+> R8-R15
+> 𝐾𝐾𝑉𝑉 0
+> R8-R15
+> 𝐾𝐾𝑉𝑉 1
+> R8-R15
+> 𝐾𝐾𝑉𝑉 2
+> R8-R15
+> 𝐾𝐾𝑉𝑉 3
+> R0-R3
+> 𝐾𝐾𝑉𝑉 0
+> R0-R3
+> 𝐾𝐾𝑉𝑉 1
+> R0-R3
+> 𝐾𝐾𝑉𝑉 2
+> R0-R3
+> 𝐾𝐾𝑉𝑉 3
+> R4-R7
+> 𝐾𝐾𝑉𝑉 0
+> R4-R7
+> 𝐾𝐾𝑉𝑉 1
+> R4-R7
+> 𝐾𝐾𝑉𝑉 2
+> R4-R7
+> 𝐾𝐾𝑉𝑉 3
+> R8-R11
+> 𝐾𝐾𝑉𝑉 0
+> R8-R11
+> 𝐾𝐾𝑉𝑉 1
+> R8-R11
+> 𝐾𝐾𝑉𝑉 2
+> R8-R11
+> 𝐾𝐾𝑉𝑉 3
+> R12-R15
+> 𝐾𝐾𝑉𝑉 0
+> R12-R15
+> 𝐾𝐾𝑉𝑉 1
+> R12-R15
+> 𝐾𝐾𝑉𝑉 2
+> R12-R15
+> 𝐾𝐾𝑉𝑉 3
+> Scatter
+> Scatter
+> Scatter
+> Scatter
+> Scatter
+> Scatter
+> Scatter
+> Scatter
+> R0-R15
+> 𝐾𝐾𝑉𝑉 00R0-R15
+> 𝐾𝐾𝑉𝑉 10R0-R15
+> 𝐾𝐾𝑉𝑉 20R0-R15
+> 𝐾𝐾𝑉𝑉 30
+> R0-R15
+> 𝐾𝐾𝑉𝑉 01R0-R15
+> 𝐾𝐾𝑉𝑉 11R0-R15
+> 𝐾𝐾𝑉𝑉 21R0-R15
+> 𝐾𝐾𝑉𝑉 31
+> R0-R15
+> 𝐾𝐾𝑉𝑉 02R0-R15
+> 𝐾𝐾𝑉𝑉 12R0-R15
+> 𝐾𝐾𝑉𝑉 22R0-R15
+> 𝐾𝐾𝑉𝑉 32
+> R0-R15
+> 𝐾𝐾𝑉𝑉 03R0-R15
+> 𝐾𝐾𝑉𝑉 13R0-R15
+> 𝐾𝐾𝑉𝑉 23R0-R15
+> 𝐾𝐾𝑉𝑉 33
+> Reduce  Reduce
+> Reduce  Reduce
+> Reduce  Reduce
+> Reduce  Reduce
+
+(b) Key/Value Projection’s Inter-PE Communication             
+
+> PE(0,0) PE(0,1) PE(0,2) PE(0,3)
+> PE(1,0) PE(1,1) PE(1,2) PE(1,3)
+> PE(2,0) PE(2,1) PE(2,2) PE(2,3)
+> PE(3,0) PE(3,1) PE(3,2) PE(3,3)
+> Y-Axis
+> X-Axis
+
+Step-3: Y-Axis Gather  Step-4: Y-Axis Scatter  Full-Vectors on Dst. PEs     
+
+> R6− R7
+> 𝐾𝐾 𝑉𝑉
+> R4− R5
+> 𝐾𝐾 𝑉𝑉
+> R2− R3
+> 𝐾𝐾 𝑉𝑉
+> R0− R1
+> 𝐾𝐾𝑉𝑉
+> R8− R9
+> 𝐾𝐾 𝑉𝑉
+> R10-R11
+> 𝐾𝐾 𝑉𝑉
+> R12-R13
+> 𝐾𝐾 𝑉𝑉
+> R14-R15
+> 𝐾𝐾 𝑉𝑉
+> Scatter Scatter
+> Scatter Scatter
+> Scatter Scatter
+> Scatter Scatter
+> Req.0
+> 𝐾𝐾 𝑉𝑉
+> Req.1
+> 𝐾𝐾 𝑉𝑉
+> Req.2
+> 𝐾𝐾 𝑉𝑉
+> Req.3
+> 𝐾𝐾 𝑉𝑉
+> Req.4
+> 𝐾𝐾 𝑉𝑉
+> Req.5
+> 𝐾𝐾 𝑉𝑉
+> Req.6
+> 𝐾𝐾 𝑉𝑉
+> Req.7
+> 𝐾𝐾 𝑉𝑉
+> Req.8
+> 𝐾𝐾 𝑉𝑉
+> Req.9
+> 𝐾𝐾 𝑉𝑉
+> Req.10
+> 𝐾𝐾 𝑉𝑉
+> Req.11
+> 𝐾𝐾 𝑉𝑉
+> Req.12
+> 𝐾𝐾 𝑉𝑉
+> Req.13
+> 𝐾𝐾 𝑉𝑉
+> Req.14
+> 𝐾𝐾 𝑉𝑉
+> Req.15
+> 𝐾𝐾 𝑉𝑉
+> R8-R11
+> 𝐾𝐾𝑉𝑉 0
+> R8-R11
+> 𝐾𝐾𝑉𝑉 1
+> R8-R11
+> 𝐾𝐾𝑉𝑉 2
+> R8-R11
+> 𝐾𝐾𝑉𝑉 3
+> R12-R15
+> 𝐾𝐾𝑉𝑉 0
+> R12-R15
+> 𝐾𝐾𝑉𝑉 1
+> R12-R15
+> 𝐾𝐾𝑉𝑉 2
+> R12-R15
+> 𝐾𝐾𝑉𝑉 3
+> R0− R3
+> 𝐾𝐾𝑉𝑉 0
+> R0− R3
+> 𝐾𝐾𝑉𝑉 1
+> R0− R3
+> 𝐾𝐾𝑉𝑉 2
+> R0− R3
+> 𝐾𝐾𝑉𝑉 3
+> R4− R7
+> 𝐾𝐾𝑉𝑉 0
+> R4− R7
+> 𝐾𝐾𝑉𝑉 1
+> R4− R7
+> 𝐾𝐾𝑉𝑉 2
+> R4− R7
+> 𝐾𝐾𝑉𝑉 3
+> Gather Gather
+> Gather Gather
+> Gather Gather
+> Gather Gather
+
+Fig. 12. Query/Key/Value Projection FC’s Inter-PE Communication. 
+
+2–3 are reduced on PE(2,y). In this way, Step-2’s scatter can be completed in at most a single hop. Once each row’s PEs have received corresponding sub-vectors, a similar procedure is applied along the Y-axis: We first gather these sub-vectors on central PEs, then scatter complete vectors to target PEs, completing the key/value vector delivery. 
+
+(2) Tiled Attention to Output Projection : After local tiled attention, each PE holds a partial sum of full attention output vectors (denoted as A(x,y )). To accumulate them and scatter the full vector according to the FC-input pattern in Fig. 11, we employ the communication scheme shown in Fig. 13-(a). We first perform a 2D reduce-scatter over the entire array, designating PE(x,y) as the accumulation endpoint for vector chunk A(x,y ). After this step, we only need a single all-gather along the Y-axis to achieve the target data distribution. 
+
+(3) Output Projection to FFN/MoE’s First FC : As shown in Fig. 13-(b), once each PE completes its local output projection tile, a 1D all-reduce along the X-axis replicates the resulting sub-vectors across each column. By pre-allocating the next FC’s weight tile (x,y) to PE(y,x), we can directly compute it after the 1D all-reduce. For inter-block residual, pre-allocating the block input as Oi’s distribution in Fig. 13-(b) can achieve in-place computation. For normalization, if the LLM adopts LayerNorm [4], each vector’s mean and variance are required. They can be obtained via the pairwise algorithm [6]. Formally, if two sub-vectors have means μ1, μ 2 and variances σ21 , σ 22 , the combined mean μ and variance σ2 are: 
+
+μ = n1μ1+n2μ2
+
+n1+n2 , σ 2 = n1σ21 +n2σ22
+
+n1+n2 + n1n2(μ1−μ2)2
+
+(n1+n2)2 (3) where n1, n 2 are element counts of the two sub-vectors. Hence, as shown in Fig. 13-(c), performing a 1D all-reduce on 𝐴𝐴 (0,0) 𝐴𝐴 (0,1) 𝐴𝐴 (0,2) 𝐴𝐴 (0,3)
+
+𝐴𝐴 (1,0) 𝐴𝐴 (1,1) 𝐴𝐴 (1,2) 𝐴𝐴 (1,3)
+
+𝐴𝐴 (2,0) 𝐴𝐴 (2,1) 𝐴𝐴 (2,2) 𝐴𝐴 (2,3)
+
+𝐴𝐴 (3,0) 𝐴𝐴 (3,1) 𝐴𝐴 (3,2) 𝐴𝐴 (3,3)
+
+PE(0,0)  PE(0,1)  PE(0,2)  PE(0,3) 
+
+PE(1,0)  PE(1,1)  PE(1,2)  PE(1,3) 
+
+PE(2,0)  PE(2,1)  PE(2,2)  PE(2,3) 
+
+PE(3,0)  PE(3,1)  PE(3,2)  PE(3,3) 
+
+> Y-Axis
+> X-Axis
+
+Step-1: 2D Reduce Scatter  Step-2: Y-Axis All Gather  Scatter as next FC’s Input 
+
+𝐴𝐴 1 𝐴𝐴 1𝐴𝐴 1 𝐴𝐴 1
+
+𝐴𝐴 0 𝐴𝐴 0𝐴𝐴 0 𝐴𝐴 0
+
+𝐴𝐴 2 𝐴𝐴 2𝐴𝐴 2 𝐴𝐴 2
+
+𝐴𝐴 3 𝐴𝐴 3𝐴𝐴 3 𝐴𝐴 3
+
+All Gather 
+
+All Gather 
+
+All Gather 
+
+All Gather 
+
+Attention Output                
+
+> 𝐴𝐴 (0,0)𝐴𝐴 (0,1)𝐴𝐴 (0,2)𝐴𝐴 (0,3)𝐴𝐴 (1,0)𝐴𝐴 (1,1)𝐴𝐴 (1,2)𝐴𝐴 (1,3)𝐴𝐴 (2,0)𝐴𝐴 (2,1)𝐴𝐴 (2,2)𝐴𝐴 (2,3)𝐴𝐴 (3,0)𝐴𝐴 (3,1)𝐴𝐴 (3,2)𝐴𝐴 (3,3)
+
+𝐴𝐴 0 𝐴𝐴 1 𝐴𝐴 2 𝐴𝐴 3
+
+𝐴𝐴 (0,2) 𝐴𝐴 (0,3)𝐴𝐴 (0,0) 𝐴𝐴 (0,1)
+
+𝐴𝐴 (1,2) 𝐴𝐴 (1,3)𝐴𝐴 (1,0) 𝐴𝐴 (1,1)
+
+𝐴𝐴 (2,2) 𝐴𝐴 (2,3)𝐴𝐴 (2,0) 𝐴𝐴 (2,1)
+
+𝐴𝐴 (3,2) 𝐴𝐴 (3,3)𝐴𝐴 (3,0) 𝐴𝐴 (3,1)
+
+Reduce Scatter 
+
+Reduce Scatter 
+
+(a) Tiled Attention’s Inter-PE Communication 
+
+(b) Output Projection to 1st FC’s Communication & Operator Partition 
+
+(c) LayerNorm’s Inter-PE Communication 
+
+PE(0,0)  PE(0,1)  PE(0,2)  PE(0,3) 
+
+Output Sub-Vector Distribution  Pairwise Mean/Var. Update  Normalize Local Sub-Vectors 
+
+PE(0,0)  PE(0,1)  PE(0,2)  PE(0,3) 
+
+𝑂𝑂 0 𝑂𝑂 1 𝑂𝑂 2 𝑂𝑂 3 𝜇𝜇 0
+
+𝑂𝑂 0 𝜇𝜇 1
+
+𝑂𝑂 1 𝜇𝜇 2
+
+𝑂𝑂 2 𝜇𝜇 3
+
+𝑂𝑂 3
+
+𝜎𝜎 02 𝜎𝜎 12 𝜎𝜎 22 𝜎𝜎 32
+
+All Reduce on 𝜇𝜇 𝑖𝑖 , 𝜎𝜎 𝑖𝑖 2
+
+𝜇𝜇 𝑂𝑂 0 𝜇𝜇  𝑂𝑂 1 𝜇𝜇  𝑂𝑂 2 𝜇𝜇  𝑂𝑂 3
+
+𝜎𝜎 2 𝜎𝜎 2 𝜎𝜎 2 𝜎𝜎 2
+
+𝐴𝐴 0
+
+𝑊𝑊 𝑂𝑂 (0,0)
+
+𝐴𝐴 0
+
+𝑊𝑊 𝑂𝑂 (0,1)
+
+𝐴𝐴 0
+
+𝑊𝑊 𝑂𝑂 (0,2)
+
+𝐴𝐴 0
+
+𝑊𝑊 𝑂𝑂 (0,3)
+
+𝑊𝑊 𝑂𝑂 (1,0)
+
+𝐴𝐴 1 𝑊𝑊 𝑂𝑂 (1,1)
+
+𝐴𝐴 1
+
+𝑊𝑊 𝑂𝑂 (1,2)
+
+𝐴𝐴 1
+
+𝑊𝑊 𝑂𝑂 (1,3)
+
+𝐴𝐴 1
+
+𝑊𝑊 𝑂𝑂 (2,0)
+
+𝐴𝐴 2 𝑊𝑊 𝑂𝑂 (2,1)
+
+𝐴𝐴 2
+
+𝑊𝑊 𝑂𝑂 (2,2)
+
+𝐴𝐴 2
+
+𝑊𝑊 𝑂𝑂 (2,3)
+
+𝐴𝐴 2
+
+𝑊𝑊 𝑂𝑂 (3,0)
+
+𝐴𝐴 3 𝑊𝑊 𝑂𝑂 (3,1)
+
+𝐴𝐴 3
+
+𝑊𝑊 𝑂𝑂 (3,2)
+
+𝐴𝐴 3
+
+𝑊𝑊 𝑂𝑂 (3,3)
+
+𝐴𝐴 3
+
+𝑂𝑂 00 𝑂𝑂 10 𝑂𝑂 20 𝑂𝑂 30
+
+𝑂𝑂 01 𝑂𝑂 11 𝑂𝑂 21 𝑂𝑂 31
+
+𝑂𝑂 02 𝑂𝑂 12 𝑂𝑂 22 𝑂𝑂 32
+
+𝑂𝑂 03 𝑂𝑂 13 𝑂𝑂 23 𝑂𝑂 33
+
+> Y-Axis
+> X-Axis
+
+Output Proj.’s Weight Partition  Comm.: X-Axis All Reduce  Bottom FC’s Weight Partition 
+
+> All Reduce
+> All Reduce
+> All Reduce
+> All Reduce
+
+𝑊𝑊 𝐹𝐹 1(0,0)
+
+𝑂𝑂 0 𝑊𝑊 𝐹𝐹 1(1,0)
+
+𝑂𝑂 1
+
+𝑊𝑊 𝐹𝐹 1(2,0)
+
+𝑂𝑂 2
+
+𝑊𝑊 𝐹𝐹 1(3,0)
+
+𝑂𝑂 3
+
+𝑊𝑊 𝐹𝐹 1(0,1)
+
+𝑂𝑂 0 𝑊𝑊 𝐹𝐹 1(1,1)
+
+𝑂𝑂 1
+
+𝑊𝑊 𝐹𝐹 1(2,1)
+
+𝑂𝑂 2
+
+𝑊𝑊 𝐹𝐹 1(3,1)
+
+𝑂𝑂 3
+
+𝑊𝑊 𝐹𝐹 1(0,2)
+
+𝑂𝑂 0 𝑊𝑊 𝐹𝐹 1(1,2)
+
+𝑂𝑂 1
+
+𝑊𝑊 𝐹𝐹 1(2,2)
+
+𝑂𝑂 2
+
+𝑊𝑊 𝐹𝐹 1(3,2)
+
+𝑂𝑂 3
+
+𝑊𝑊 𝐹𝐹 1(0,3)
+
+𝑂𝑂 0 𝑊𝑊 𝐹𝐹 1(1,3)
+
+𝑂𝑂 1
+
+𝑊𝑊 𝐹𝐹 1(2,3)
+
+𝑂𝑂 2
+
+𝑊𝑊 𝐹𝐹 1(3,3)
+
+𝑂𝑂 3
+
+> Sub-Vector Replication
+
+Sub-Vector Replication Fig. 13. Tiled Attention and Output Projection FC’s Inter-PE Communication. 
+
+each sub-vector’s mean and variance can yield the full vector’s statistics for LayerNorm. For RMSNorm [87], since it only requires full vector’s L2 norm, an all-reduce over each sub-vector’s squared sum is sufficient for this operator. 
+
+FFN & MoE Block: Since the FFN block consists of chained FC operators, by adopting the same weight tile placement as Fig. 13-(b), we only need a single 1D all-reduce to achieve the required data layout. The activation function can be applied in place after the all-reduce. For GLU block, by applying identical partition to the two bottom FCs, corresponding elements reside on the same PE after the 1D all-reduce, enabling in-place elementwise multiplication. For MoE block, expert selection is runtime-dependent. To maximize resource utilization, we distribute each expert across all PEs using the same partition scheme as the FFN block. During execution, the global controller adopts MoE router’s output to inform PEs which expert kernels to compute. The selected experts are then processed in the same manner as the FFN. 
+
+MLA Block: Unlike the attention block, MLA block intro-duces additional FC operators to generate latent KV cache. As shown in Fig. 14-(a), the input ht is first projected through three FCs, where kRt , ckv t are persisted as the latent KV cache. In na¨ ıve MLA, these latent vectors are first reconstructed to all heads’ full-resolution query/key/value vectors, followed by standard MHA computation. This approach generates huge volume of full KV cache as intermediate results, undermining MLA’s benefits. Matrix absorption [14] is proposed to address this issue. As shown in Fig. 14-(b), the reconstruction matrices 
+
+W U K , W U V can be algebraically absorbed into W U Q , W O
+
+via GEMM’s associative property. Without loss of generality, we demonstrate this procedure using a single token t with 𝒒𝒒 𝑡𝑡 𝐴𝐴 =[ 𝒒𝒒 𝑡𝑡 ,1𝐴𝐴 ,…, 𝒒𝒒 𝑡𝑡 ,𝑛𝑛 ℎ𝐴𝐴 ]  
+
+> 𝒖𝒖 𝑡𝑡
+> 𝒉𝒉 𝑡𝑡
+> 𝒄𝒄 𝑡𝑡 𝑄𝑄 𝒄𝒄 𝑡𝑡 𝐾𝐾𝐾𝐾 𝒌𝒌 𝑡𝑡 𝑅𝑅
+
+Multi-Head Attention 
+
+> Latent KV Cache
+> Latent KV Cache
+
+(a) MLA without Matrix Absorb  (b) MLA with Matrix Absorb 
+
+𝑊𝑊 𝐷𝐷 𝑄𝑄  𝑊𝑊 𝐾𝐾 𝑅𝑅  𝑊𝑊 𝐷𝐷 𝐾𝐾𝐾𝐾  
+
+> 𝒐𝒐 𝑡𝑡
+
+[𝑊𝑊 𝑈𝑈 𝑄𝑄 , 𝑊𝑊 𝑄𝑄 𝑅𝑅 ] 𝑊𝑊 𝑈𝑈 𝐾𝐾  𝑊𝑊 𝑈𝑈 𝐾𝐾            
+
+> 𝒒𝒒 𝑡𝑡 ,𝑖𝑖 𝐶𝐶 ,𝒒𝒒 𝑡𝑡 ,𝑖𝑖 𝑅𝑅 ×𝑛𝑛 ℎ𝒗𝒗 𝑡𝑡 ,𝑖𝑖 𝐶𝐶 ×𝑛𝑛 ℎ[𝒌𝒌 𝑡𝑡 ,𝑖𝑖 𝐶𝐶 ,𝒌𝒌 𝑡𝑡 𝑅𝑅 ] × 𝑛𝑛 ℎ
+
+𝑊𝑊 𝑂𝑂  
+
+> 𝒖𝒖 𝑡𝑡
+
+𝑊𝑊 𝐷𝐷 𝑄𝑄  
+
+> 𝒄𝒄 𝑡𝑡 𝑄𝑄 𝒄𝒄 𝑡𝑡 𝐾𝐾𝐾𝐾
+> 𝒒𝒒 𝑡𝑡 𝐶𝐶
+
+Multi-Head Latent Attention 
+
+𝑊𝑊 𝑂𝑂 
+
+> 𝒌𝒌 𝑡𝑡 𝑅𝑅
+
+𝑊𝑊 𝑈𝑈 𝑄𝑄  𝑊𝑊 𝑄𝑄 𝑅𝑅 
+
+𝑊𝑊 𝑈𝑈 𝐾𝐾       
+
+> [𝒒𝒒 𝑡𝑡 ,𝑖𝑖 𝐴𝐴 ,𝒒𝒒 𝑡𝑡 ,𝑖𝑖 𝑅𝑅 ] × 𝑛𝑛 ℎ𝒄𝒄 𝑡𝑡 𝐾𝐾𝐾𝐾
+> [𝒄𝒄 𝑡𝑡 𝐾𝐾𝐾𝐾 ,𝒌𝒌 𝑡𝑡 𝑅𝑅 ]
+
+𝑊𝑊 𝑈𝑈 𝐾𝐾                
+
+> 𝒌𝒌 𝑡𝑡 𝐶𝐶 =[ 𝒌𝒌 𝑡𝑡 ,1𝐶𝐶 ,…, 𝒌𝒌 𝑡𝑡 ,𝑛𝑛 ℎ𝐶𝐶 ]𝒒𝒒 𝑡𝑡 𝑐𝑐 =[ 𝒒𝒒 𝑡𝑡 ,1𝐶𝐶 ,…, 𝒒𝒒 𝑡𝑡 ,𝑛𝑛 ℎ𝐶𝐶 ]𝒒𝒒 𝑡𝑡 𝑅𝑅 =[ 𝒒𝒒 𝑡𝑡 ,1𝑅𝑅 ,…, 𝒒𝒒 𝑡𝑡 ,𝑛𝑛 ℎ𝑅𝑅 ]𝒗𝒗 𝑡𝑡 𝐶𝐶
+> 𝒉𝒉 𝑡𝑡
+> Shared by All
+> Query Heads
+> 𝒒𝒒 𝑡𝑡 𝑅𝑅
+
+𝑊𝑊 𝐷𝐷 𝐾𝐾𝐾𝐾 
+
+𝑊𝑊 𝐾𝐾 𝑅𝑅     
+
+> Intra-PE Comp.
+> 𝑊𝑊 𝐷𝐷 𝑄𝑄
+> 𝑊𝑊 𝐾𝐾 𝑅𝑅
+> 𝑊𝑊 𝐷𝐷 𝐾𝐾𝐾𝐾
+> 𝒄𝒄 𝑡𝑡 𝑄𝑄
+> 𝒌𝒌 𝑡𝑡 𝑅𝑅
+> 𝒄𝒄 𝑡𝑡 𝐾𝐾𝐾𝐾
+> 𝒉𝒉 𝑡𝑡 ×=
+> Inter-PE Comm. Inter-PE Comm. Intra-PE Comp. Inter-PE Comm. Intra-PE Comp. Inter-PE Comm.
+
+Tiled Attn.                
+
+> 𝒌𝒌 𝑡𝑡 𝑅𝑅 and 𝒄𝒄 𝑡𝑡 𝐾𝐾𝐾𝐾
+> On Demand Cache Transfer
+> 𝒄𝒄 𝑡𝑡 𝑄𝑄
+> X-All Reduce
+> 𝑊𝑊 𝑈𝑈 𝑄𝑄
+> 𝑊𝑊 𝑈𝑈 𝑅𝑅
+> 𝒒𝒒 𝑡𝑡 𝐶𝐶
+> 𝒒𝒒 𝑡𝑡 𝑅𝑅 𝒄𝒄 𝑡𝑡 𝑄𝑄 ×=𝒒𝒒 𝑡𝑡 𝐶𝐶
+> Y-All Reduce 𝒒𝒒 𝑡𝑡 𝐶𝐶 ×𝑊𝑊 𝑈𝑈 𝐾𝐾 =𝒒𝒒 𝑡𝑡 𝐴𝐴
+> 𝒒𝒒 𝑡𝑡 𝐴𝐴𝐴𝐴𝐴𝐴 and 𝒒𝒒 𝑡𝑡 𝑅𝑅
+> X/Y All-Reduce
+> Y/X All Gather
+
+(c) MLA Block’s Execution Flow (with Matrix Absorb) 
+
+Same 
+
+as 
+
+Attn. 
+
+Block 
+
+> Huge Capacity
+
+Fig. 14. MLA Block’s Inter-PE Communication. 
+
+nh = 1 . Assuming this token’s softmax score is st, we have: 
+
+qCt (kCt )⊤ = ( cQt W U Q )( cKV t W U K )⊤
+
+= ( cQt W U Q )(( W U K )⊤(cKV t )⊤)= (( cQt W U Q )( W U K )⊤)( cKV t )⊤
+
+(4) 
+
+ut = otW O = ( st · vCt )W O = ( st · (cKV t W U V )) W O
+
+= (( st · cKV t )W U V )W O (5) In this way, all query heads can operate on the shared latent KV cache, without explicitly reconstructing full KV tensors. MLA block’s execution flow is shown in Fig. 14-(c). All PEs first compute W DQ , W KR , W DKV following Fig. 11. Then, latent KV cache kRt , cKV t are transferred on demand via Fig. 12-(b), while cQt undergoes X-axis all-reduce (Fig. 13-(b)) for subsequent FCs. After computing W U Q , W QR , qCt un-dergoes Y-axis all-reduce (Fig. 13-(b)) and is multiplied with 
+
+W U K to produce qAt . Then, qAt , qRt are fully replicated across all PEs following Fig. 12-(a). Finally, PEs perform distribtued tiled attention (Fig. 13-(a)) and chained FC (W U V ,W O )(Fig. 13-(b)) to complete MLA block’s computation. 
+
+Communication Implementation: The whole procedure in-volves two categories of collective primitives: (1) For all-reduce/all-gather/reduce-scatter, we adopt the TidalMesh al-gorithm [47], which achieves state-of-the-art performance on mesh topology compared with ring-/tree-based methods. (2) For reduce/gather/scatter, we employ the minimum-spanning-tree-based algorithm [5] to fully utilize all available links. V. H ELIOS SYSTEM DESIGN 
+
+A. Spatially-Aware KV Cache Allocation 
+
+Demand Analysis: HB-Device contains two load balance demands: (1) Compute/Storage load : It enforces a balanced distribution of attention workloads across all PEs on the HB-Device. For each PE, as discussed in Sec. IV-A, online softmax and partial sum accumulation can be efficiently overlapped by GEMM operations. Therefore, tiled attention’s compute load can be estimated by the corresponding matrix multiplication workloads. Since they are proportional to token number [91], 
+
+we can use token number as the metric to guide compute load balance, which simultaneously serves as a proxy for KV cache storage load balance. (2) Inter-PE communication load :The cost of key/value vector transmission depends on last-block distribution of ongoing requests. As shown in Fig. 12-(b), placing last blocks on central PEs used by X-Reduce/Y-Algorithm 2: Spatially-Aware KV Block Allocation  
+
+> 1
+
+Function Allocate( Req , b, P EState ) // Main allocator  
+
+> 2
+
+for i = 0 to Nf ull − 1 do // Allocate full blocks  
+
+> 3
+
+State F ← Sort (P EState, CMPFull ) 
+
+> 4
+
+P EState.U pdateLoad (State F [0] , Req.ID, b ) 
+
+> 5
+
+State L ← Sort (P EState, CMPLast ) // Allocate last block  
+
+> 6
+
+P EState.U pdateLoad (State L[0] , Req.ID, T last ) 
+
+> 7
+
+Function CMPFull( P E 1, P E 2) // Full block comparator  
+
+> 8
+
+if P E 1.T sum ̸ = P E 2.T sum , return 
+
+P E 1.T sum < P E 2.T sum ; 
+
+> 9
+
+return P E 1.D L1 > P E 2.D L1 
+
+> 10
+
+Function CMPLast( P E 1, P E 2) // Last block comparator  
+
+> 11
+
+if P E 1.T sum ̸ = P E 2.T sum , return 
+
+P E 1.T sum < P E 2.T sum ; 
+
+> 12
+
+if P E 1.D L1̸ = P E 2.D L1 , return P E 1.D L1 < P E 2.D L1 ; 
+
+> 13
+
+if P E 1.N last ̸ = P E 2.N last , return 
+
+P E 1.N last < P E 2.N last ; 
+
+> 14
+
+if P E 1.L Xmst ̸ = P E 2.L Xmst , return 
+
+P E 1.L Xmst < P E 2.L Xmst ; 
+
+> 15
+
+return P E 1.L Ymst < P E 2.L Ymst 
+
+Gather (PE(1,1)/(1,2)/(2,1)/(2,2)) eliminates X/Y-axis scatter in Step-2/4. Additionally, placing last blocks symmetrically 
+
+(e.g., (1,1)-(2,1) for X-axis, (1,1)-(1,2) for Y-axis) can further balance traffic loads across parallel NoC links. 
+
+Allocation Strategy: To satisfy these goals, we propose the strategy listed in Algorithm 2. The main entry allocate 
+
+takes three inputs: request information Req , KV block size b,and all PEs’ load states P EState . It has three steps: 
+
+Step-1 : It derives full block number Nf ull and the last (partially filled) block’s token count Tlast from total token number ( Req.T ) and KV block size b (Line 2 ). T is set to the prompt length for newly arrived requests and to 1 for ongoing requests requiring new blocks. 
+
+Step-2 : For each full block, it first sorts PEs based on 
+
+P EState and selects the top-ranked PE to store the block (Line 4 ). P EState is updated accordingly to guide subsequent decisions ( Line 5 ). The ranking rule CMPFull is defined as: (1) PEs with fewer tokens Tsum have higher priority to balance the compute/storage load ( Line 9 ). (2) If two PEs’ token counts are equal, the PE with larger Manhattan (L1) distance DL1 to its nearest central PE is preferred ( Line 10 ). In the example of Fig. 12-(b), the closest central PE to PE(0,0) is PE(1,1), yielding DL1 to |0 − 1| + |0 − 1| = 2 . This rule reserves PEs closer to the center for unfilled blocks, reducing the inter-PE transfer overhead in Fig. 12-(b). 
+
+Step-3 : It adopts similar sort-and-update procedure to the last block under ranking criterion CMPLast (Line 6-7 ): (1) PEs with fewer tokens Tsum are prioritized to balance compute/storage load ( Line 12 ). (2) If Tsum tie, PEs with smaller DL1 are ranked higher to reduce KV vector’s transfer cost ( Line 13 ). (3) If both metrics are equal, PEs with fewer unfilled blocks Nlast are preferred to balance intra-block fragmentation among PEs ( Line 14 ). (4) Finally, PEs are ranked by the data volume along their X/Y-axis transfer paths 
+
+LXmst /L Ymst , so as to balance the transfer cost across parallel paths of spanning trees in 1D mesh ( Line 15-16 ). 
+
+Block Manager Implementation: As shown in Fig. 15, each PE pre-allocates the KV cache tensor during initialization Model Instance 
+
+> HB-Device
+> PE 0
+> Max Block Num.
+> Blk. Size * Vec. Len.
+> Block 0
+> Block 2
+> Block 7
+> Block 5
+> Block 4
+> PE 1
+> KV
+> Cache
+> PE N-1
+> Max Block Num.
+> Blk. Size * Vec. Len.
+> Block 2
+> Block 3
+> Block 6
+> Block 7
+> Block 1
+> Req. 1  Req. 0
+
+…        
+
+> Centralized Block Manager on CPU
+> Spatially-Aware Allocator
+> Available Block List
+> PE 0: [1,3,6]
+> PE 1: […]
+> PE N-1: [0,4,5]
+> …
+> Request Block List
+> Req. 0
+> PE 0: [0,2,7]
+> …
+> PE N-1: [3,6]
+> Allocate
+> Free Req.
+> Blk.
+> List
+> B Blocks
+> in Total
+> Fixed Base Addr.
+> Req. 1
+> PE 0: [4,5]
+> …
+> PE N-1: [1,2,7]
+> Req. 0  Req. 1
+
+Fig. 15. Helios’s Block Manager Implementation. 
+
+according to serving requirements. With a maximum of M
+
+blocks per PE, block size b, and KV vector length H, the tensor has shape ( M, bH ). Unlike prior NMP designs that reserve full-context-window KV cache for each request, He-lios allocates blocks based on the current request length and distributes them across all PEs using Algorithm 2. Since each KV cache tensor’s base address is fixed, the address of slot j in block i can be computed as: base + ( i · b + j) · H. Therefore, during inference, it suffices to provide each request’s block ID list to resolve KV blocks’ addresses for tiled attention. For each model instance, block tables are centrally main-tained on the CPU. The available block list tracks free block IDs on each PE, while the request block list records the block IDs assigned to each request on each PE. When allocating a new block, the spatially-aware allocator (Algorithm 2) moves a block ID from the available list to the corresponding request list. After decoding completes, all block IDs associated with the request are released back to the available list. Since each block ID exists exclusively in either the available or request list, the space overhead of the block manager scales linearly with the total block number M N (N is PE number), consistent with implementations in current GPU systems [42], [90]. 
+
+Scheduling Overhead Analysis: To select the optimal PE for each block, PE states can be maintained in priority queues under CMPFull /CMPLast comparison rules. Given P PEs, the time complexity of priority-queue-based PE selection is 
+
+O(log P ) [77]. Considering practical architectures contain only a small number of PEs (e.g., 16 in our final design), the runtime overhead of Algorithm 2 is negligible, comparable to that of the SGLang block manager in our evaluation [90]. 
+
+B. Multi-Device Scaling 
+
+Helios’s full-stack design is compatible with multi-device model parallelism: (1) Operator Execution : For TP/PP, op-erators are first split across devices based on TP/PP sizes. During computation, inter-device collective communication is performed via the device router. Once receiving the next opera-tor’s input, each device scatters it via the router NoC according to the partition in Sec. IV-B, then continue operator execution. For EP, each device holds a subset of non-partitioned experts. Thus, after receiving inputs, each device can directly compute selected experts as discussed in Sec. IV-B. This mechanism supports any expert-mapping and input-routing policy. (2) KV Cache Management : Since each device retains an equal share of KV heads after model partition, we can adopt a centralized block manager to uniformly allocate KV blocks via Algorithm 2, similar to vLLM’s practice [42]. TABLE II MODEL CONFIGURATIONS USED FOR EVALUATION                         
+
+> Model Layer (Hidden, Interm.) (Q head, KV head) Expert OPT 66B 64 (9216, 36864) (72, 72) – (Dense) LLaMA3 70B 80 (8192, 28672) (64, 8) – (Dense) Mixtral 8×22B 56 (6144, 16384) (48, 8) 8 experts, top-2 Qwen3 30B-A3B 48 (2048, 768) (32, 4) 128 experts, top-8 DeepSeek 236B 60 (5120, 1536) (128, 128-full/1-latent) 160 experts, top-8
+
+VI. E VALUATION 
+
+A. Evaluation Methodology 
+
+Benchmarks: As listed in Table II, we adopt OPT 66B [88], LLaMA3 70B [15], Mixtral 8×22B [34], Qwen3 30B-A3B [80], and DeepSeek 236B [14] for evaluation, which cover both dense and MoE models with varying attention arith-metic intensities. All models use FP16 data type. For decoding latency comparison, due to capacity constraints, we set max batch size and context length to (32, 4K) for OPT/DeepSeek models, and to (64, 16K) for the other models. For serving performance comparison, following prior works [42], [91], we sample request lengths from the production trace released by MoonCake [61] and generate arrival timestamps using Poisson process under varying request arrival rates. 
+
+Baselines: We compare Helios with four baselines: (1) A100-80GB GPUs connected with 600GB/s NVLink (GPU). We use SGLang [90] with FlashInfer [81] backend for evaluation. (2) 
+
+In-die NMP devices (In-die-NMP). We replace A100’s HBM cubes to AttAcc’s bank-PIM design [58], which integrates a 16-MAC-FPU @ 666MHz near each bank while preserving the cube’s full capacity. (3) Duplex-based devices [86] (Du-plex). We replace A100’s HBM cubes to Duplex cubes, which expose additional TSVs to offer 4× NMP bandwidth. Besides, it places 32 512-MAC-FPUs @ 650MHz on the cube’s logic die, achieving higher compute-bandwidth ratio (8:1) than all existing in-die NMP without sacrificing capacity. (4) HB-Devices with non-tiled attention (HB-non-Tiled). To assess the benefits of our tiled attention design, we evaluate HB-Device’s performance by adopting the execution flow of Stratum [56]. Since Stratum uses the same number of PEs as HB-Device, and its ring topology is a subset of mesh topology, we can directly implement its operator execution dataflow on our HB-Device. All instances are set to TP=8(+EP=8 for MoE models) in eight-device nodes. In serving comparison, GPU/In-die-NMP/Duplex are evaluated under both mixed-batching and disaggregated clusters, while HB-non-tiled/Helios are tested under disaggregated cluster. Helios’s block size is 64. Since NMP offers no prefill speedup, we adopt A100 GPUs to all prefill instances in disaggregated clusters. For fair compari-son, we set each node’s device interconnect to 600GB/s via NVLink fusion [53], and inter-node link to 8×200Gbps NICs. 
+
+Simulation: For decoding execution, we extend Ramula-tor2 [49] and BookSim [35] to simulate HB-Devices. For NMP baselines, we refer to AttAcc and Duplex simulators [33], [68], and inject GPU operator performance profiled on real-machine for end-to-end simulation. GPU’s energy is profiled via PyNVML [63]. NVLink’s energy is 1.3pJ/bit according to its technical report [76]. For serving simulation, we extend DistServe’s simulator [82] to support both mixed and disag-SRAM         
+
+> 1.25W
+> Matrix
+> 17.60 𝐦𝐦𝐦𝐦 𝟐𝟐
+> Vector
+> 6.58 𝐦𝐦𝐦𝐦 𝟐𝟐
+> SRAM
+> 10.66 𝐦𝐦𝐦𝐦 𝟐𝟐
+> NoC
+> 3.𝟑𝟑𝟑𝟑𝐦𝐦𝐦𝐦 𝟐𝟐
+> PE Ctrl.
+> 5.06 𝐦𝐦𝐦𝐦 𝟐𝟐
+> Mem. Crtl.
+> 4.80 𝐦𝐦𝐦𝐦 𝟐𝟐
+> Matrix
+> 3.44W
+> Vector
+> 1.73W
+> NoC
+> 0.043W
+> PE Ctrl.
+> 1.07W
+> 3D DRAM
+> 5.41W
+> (a) Area Breakdown (b) Power Breakdown (c) Thermal Map of the whole HB-Device
+> Fig. 16. Area, Power, and Thermal Analysis of HB-Device
+
+.gregated clusters. We inject the simulated/profiled inference latency to evaluate different designs’ serving performance. 
+
+B. Area, Power, and Thermal Analysis 
+
+Each HB-Device integrates four DRAM dies, each com-prising 256 banks of 80MB (20GB/die). Each bank exposes 256 I/O pins running at 0.5Gbps. The logic die is synthesized with 12nm technology, operating at 1GHz. The PE array is organized as 4×4 mesh according to Sec. III-C. As shown in Fig. 16-(a), each PE’s area is 48mm 2, with 10% consumed by the HB controller and I/O. Matrix unit occupies 17.6mm 2, con-taining 512 16-MAC FPUs. Online softmax/vector/reduction units occupy 6.58mm 2 in total. Each PE’s compute/transfer buffer sizes are both 2.5MB, with 10.66mm 2 area in total according to TSMC SRAM compiler. Each NoC’s area is 1.65mm 2, with 0.91mm 2 for buffers, 0.69mm 2 for wires, and 0.05mm 2 for router. HB-Device’s compute, memory access, and SRAM access energy are 0.43pJ/FLOP, 0.66pJ/bit [72], and 0.019pJ/bit, respectively. Higher temperatures degrade DRAM retention, increasing refresh frequency and reducing effective bandwidth. To ensure reliable operation, 3D-DRAM-based accelerators must avoid excessive temperatures (typically ≤85°C [84], [85]). Given the per-PE power breakdown at maximum utilization in Fig. 16-(b), we perform thermal analysis on HB-Device using Hotspot-7.0 [19]. For 3D-integration, the vertical heat resistance of hybrid bonding interface and TSV are 1.625W/(m ·K) [55] and 190W/(m ·K) [62], respectively. For heat sink, we adopt advanced liquid cooling with ˜0.01W/K heat convection resis-tance, similar to Stratum’s settings [56]. As shown in Fig. 16-(c), the peak temperature of HB-Device remains below 75°C, safely satisfying the constraint and avoiding thermal throttling. 
+
+C. Decoding Performance Comparison 
+
+We first compare Helios’s decoding latency with all base-lines. To better reflect real-world serving workloads, we sam-ple request lengths from MoonCake’s conversation dataset [61] across different length ranges. For In-die-NMP/Duplex (NMP baselines), we adopt Duplex’s execution flow [86], which offloads decoding attention to NMP and overlaps MoE ex-perts between GPU and NMP. To eliminate the impact of imbalanced expert routing on hardware evaluation, we follow Duplex [86] in using uniform distribution to route experts. The results are shown in Fig. 17, where we normalize DeepSeek’s results to GPU and other models to Duplex. By increasing bandwidth, NMP baselines can accelerate both MHA/GQA and MoE expert FCs (arithmetic intensity re-duced by expert routing), thus outperforming GPUs on non-Norm. Speedup  6                                                                                  
+
+> 5
+> 4
+> 3
+> 2
+> 1
+> 0
+> GPU In-die-NMP Duplex HB-non-Tiled Helios
+> 4K 8K 16K
+> BS = 16
+> 1K 2K 4K
+> BS = 16 1K 2K 4K
+> BS = 32
+> 1K 2K 4K
+> BS = 8 4K 8K 16K
+> BS = 32 4K 8K 16K
+> BS = 64
+> 4K 8K 16K
+> BS = 16 4K 8K 16K
+> BS = 32 4K 8K 16K
+> BS = 64 4K 8K 16K
+> BS = 32 4K 8K 16K
+> BS = 64
+> 4K 8K 16K
+> BS = 16 1K 2K 4K
+> BS = 16 1K 2K 4K
+> BS = 32
+> 1K 2K 4K
+> BS = 8
+> 6
+> 5
+> 4
+> 3
+> 2
+> 1
+> 0
+> Energy Efficiency
+> 11.43
+> 11.58
+> 7.00
+> 7.14
+> 5.99
+> 9.39
+> 9.84
+> 8.29
+> 9.51
+> 9.09
+> 9.10
+> 8.69
+> 8.77
+> 8.65
+> 8.71
+> BS = 16
+> 4K 8K 16K 1K 2K 4K
+> BS = 16 4K 1K 2K
+> BS = 32
+> 1K 2K 4K
+> BS = 8 4K 8K 16K
+> BS = 32 16K 4K 8K
+> BS = 64 BS = 16
+> 4K 8K 16K 4K 8K 16K
+> BS = 32 BS = 64 16K 4K 8K 4K 8K 16K
+> BS = 32 16K 4K 8K
+> BS = 64 BS = 16
+> 4K 8K 16K 1K 2K 4K
+> BS = 16 1K 2K 4K
+> BS = 32 BS = 8
+> 1K 2K 4K
+> OPT 66B LLaMA3 70B Mixtral 8 ×22B Qwen3 30B-A3B DeepSeek 236B
+
+Fig. 17. Decoding Performance Comparison under Varying Request Lengths (Top: Speedup. Bottom: Energy Efficiency). 4                                                                                                   
+
+> 3
+> 2
+> 1
+> 0
+> 5
+> 4
+> 3
+> 2
+> 1
+> 0
+> 5
+> 00.4 0.8 1.2 1.6
+> Norm. E2E Lat.
+> Rate 00.4 0.8 1.2 1.6
+> In-die-NMP Disagg. GPU-Mixed Helios Duplex Disagg. GPU Disagg. HB-non-Tiled In-die-NMP Mixed Duplex Mixed
+> 16
+> 12
+> 8
+> 4
+> 002468
+> Norm. TBT Lat.
+> Rate
+> OPT (Left: P50, Right: P99)
+> 16
+> 12
+> 8
+> 4
+> 002468
+> 00.4 0.8 1.2 1.6 00.4 0.8 1.2 1.6 00.4 0.8 1.2 1.6 00.4 0.8 1.2 1.6 0123400.4 0.8 1.2 1.6 00.4 0.8 1.2 1.6
+> 16
+> 12
+> 8
+> 4
+> 0
+> 16
+> 12
+> 8
+> 4
+> 0
+> 0246802468
+> 16
+> 12
+> 8
+> 4
+> 0
+> 16
+> 12
+> 8
+> 4
+> 0
+> 16
+> 12
+> 8
+> 4
+> 0
+> 16
+> 12
+> 8
+> 4
+> 0
+> 40
+> 30
+> 20
+> 10
+> 0
+> 024680246802468024680246802468
+> LLaMA3 (Left: P50, Right: P99) Mixtral (Left: P50, Right: P99) Qwen3 (Left: P50, Right: P99) DeepSeek (Left: P50, Right: P99)
+> 4
+> 3
+> 2
+> 1
+> 0
+> 5
+> 4
+> 3
+> 2
+> 1
+> 0
+> 5
+> 4
+> 3
+> 2
+> 1
+> 0
+> 5
+> 4
+> 3
+> 2
+> 1
+> 0
+> 5
+> 4
+> 3
+> 2
+> 1
+> 0
+> 5
+> 4
+> 3
+> 2
+> 1
+> 0
+> 5
+> 8
+> 6
+> 4
+> 2
+> 0
+> 10
+> 8
+> 6
+> 4
+> 2
+> 0
+> 10
+> 40
+> 30
+> 20
+> 10
+> 0
+> 01234
+
+Fig. 18. Serving Performance Comparison. (Top: E2E Latency under Full Serving. Bottom: TBT Latency under Decoding Stress Test.) 
+
+DeepSeek models. Besides, in-die NMP outperfoms Duplex on MHA-based OPT due to its higher NMP bandwidth, while Duplex performs better on LLaMA3/Mixtral/Qwen3 due to its higher compute power relative to in-die NMP. However, DeepSeek’s MLA significantly boosts arithmetic intensity by sharing one latent KV head across all query heads. Given the limited compute power, in-die NMP/Duplex only yield 21.6-34.5% of GPU performance on DeepSeek. On the other hand, by improving compute power on the holistic logic die and leveraging hybrid bonding’s high bandwidth, HB-non-Tiled outperforms GPU/NMP baselines in most cases. However,statically partitioning key/value matrices fails to accommodate the variable-length requests in real LLM serving workloads. As the context window expands, the divergence in request lengths becomes more pronounced. Con-sequently, HB-non-Tiled’s performance progressively declines and even drops below NMP baselines (e.g., LLaMA3/Qwen with 16K context). By customizing efficient execution flow for tiled attention, Helios fully exploits HB-Device’s capabilities, achieving 1.67/3.25× speedup (geomean) and 1.06/3.36× bet-ter energy efficiency (geomean) compared with HB-non-tiled and best-performing GPU/NMP baselines, respectively. 
+
+D. Serving Performance Comparison 
+
+End-to-end Serving: We first compare with all baselines under both mixed and disaggregated clusters. To minimize the impact of scheduler-induced load imbalance on hardware evaluation, each disaggregated cluster hosts one prefill and one decoding instance, while each mixed cluster runs two SGLang-scheduled instances. Due to capacity limits, we truncate Moon-Cake’s conversation dataset with prompt length ≤8K and decoding length ≤256. To capture the performance impact of cluster architecture, we compare the end-to-end (E2E, both prefill and decoding) latency distribution, and plot P50/P99 trends under varying request rates in the top row of Fig. 18. For GPU/NMP baselines, mixed clusters’ latency increases sharply even under moderate pressure, exceeding that of disag-gregated clusters. Although Duplex overlaps prefill/decoding attention between GPU and NMP to alleviate mixed-batch latency, it still falls short of the benefits achieved by disaggre-gation. In disaggregated clusters, decoding instances operate with small batches (average ≤4) due to prefill throughput limitation. In this low-load condition, in-die NMP and Duplex show comparable performance. Small batches also exacer-bate the load imbalance caused by coarse-grained KV cache management. Although NMP baselines achieve better per-formance than GPU on OPT/LLaMA3/Qwen, this imbalance prevents them from outperforming GPU on Mixtral. Besides, their limited compute power leads to the performance well below GPU on DeepSeek. Compared with best-performing GPU/NMP baselines, Helios achieves only 39.5-56.9%/32.4-65.1% of P50/P99 E2E latency. For HB-non-Tiled, since attention contributes marginal overhead at low load, it reports up to 6.7%/13.7% higher P50/P99 E2E latency than Helios. 
+
+Decoding Stress Test: To thoroughly evaluate decoding serv-ing performance, we conduct stress tests on one decoding instance, assuming prefill throughput is sufficient enough. We also expand sampling range to prompt lengths ≤16K and decoding lengths ≤512. The bottom row of Fig. 18 shows P50/P99 distributions of time-between-tokens (TBT). We can find that TBT performance closely aligns with decoding benchmark results. Among GPU/NMP baselines, in-die NMP performs best on OPT, GPU on DeepSeek, and Duplex on the other models. For low-load Mixtral scenarios (arrival rate 
+
+≤1), NMP baselines exhibit higher TBT than GPU due to the aforementioned attention load imbalance. Compared with best-performing GPU/NMP baselines, Helios achieves only BS=8                                                               
+
+> 142BS=32
+> 142
+> BS=16
+> 142BS=16
+> 416 8BS=32
+> 416 8BS=64
+> 416 8BS=16
+> 416 8BS=32
+> 416 8BS=64
+> 8416 BS=16
+> 416 8BS=32
+> 416 8BS=64
+> 416 8BS=32
+> 142
+> BS=16
+> 142142
+> BS=8
+> Intra-dev. Comm.
+> Breakdown  80
+> 60
+> 40
+> 20
+> 0
+> 100
+> BS=8
+> 142BS=32
+> 214
+> BS=16
+> 214BS=16
+> 8416 BS=32
+> 8416 BS=64
+> 8416 BS=16
+> 416 8BS=32
+> 8416 BS=64
+> 8416 BS=16
+> 8416 BS=32
+> 416 8BS=64
+> 416 8BS=32
+> 214
+> BS=16
+> 214214
+> BS=8
+> Req. Len. (K Tokens)
+> Latency
+> Breakdown  80
+> 60
+> 40
+> 20
+> 0
+> 100
+> Len. (K)
+> OPT 66B LLaMA3 70B Mixtral 8 ×22B Qwen3 30B-A3B DeepSeek 236B
+> Computation Intra-device Communication Inter-device Communication
+> X-axis Comm. Q Comm. KV Comm. Attention Comm. FC Comm. Norm. Comm
+
+Fig. 19. Decoding Latency and Intra-device Communication Breakdown. 
+
+5.6-28.0%/6.9-23.9% of P50/P99 TBT. For HB-non-Tiled, the inefficiency brought by non-tiled attention execution leads to significant performance degradation under high pressure. On LLaMA, severe request accumulation pushes its performance below NMP baselines. On other models, it incurs 1.08-6.87×/ 1.17-4.86× higher P50/P99 TBT than Helios. 
+
+E. Performance Analysis 
+
+Latency Breakdown: To evaluate the effectiveness of our PE granularity exploration and inter-PE communication design, we break down HB-Device’s decoding latency in Sec. VI-C, including PE computation, intra-device (i.e., inter-PE) com-munication, and inter-device communication. As shown in the first row of Fig. 19, inter-PE communication accounts for only 2.94%-16.10% (average 7.08%) of the total latency, validating the efficiency of our communication design. After optimizing intra-device computation and communication over-head, NVLink-based inter-device communication accounts for 8.98%-53.48% (average 27.73%). However, as HB-Device can leverage GPU-compatible inter-device interconnect technolo-gies, this overhead aligns with that of GPU systems and is orthogonal to our architectural design. We further break down inter-PE communication latency. The bar charts show its decomposition into five communica-tion types in Fig. 12-13, and the line plot shows the fraction of traffic along the X-axis. Query vector replication contributes 9.63%-35.53% (average 15.71%) of inter-PE communication latency, translating to only 0.35%-4.07% (average 1.11%) of decoding latency, indicating that it is not a performance bot-tleneck. Besides, X-axis traffic accounts for 49.21%-55.54% of total overhead, demonstrating that our design effectively utilizes links across different mesh dimensions. 
+
+Memory Fragmentation Analysis: To evaluate KV cache memory fragmentation between Helios and existing NMP designs, we measure the peak inter-PE/cube memory us-age disparity under decoding serving stress tests, which is normalized to the available capacity of one PE/cube. As shown in Fig. 20-(a), NMP baselines incur 4.67-23.10× peak fragmentation ratio than Helios. As the load rises, NMP baselines exhibit a 1.66-3.77× escalation in peak fragmentation ratio. On OPT/DeepSeek, this ratio even reaches ˜100% of each cube’s max capacity. These results indicate that coarse-grained schemes cannot accommodate highly dynamic serving workloads. In contrast, Helios’s fine-grained strategy maintains 2.21 × 1.72 ×                                                                                  
+
+> 1.87 ×
+> 1.19 ×
+> 7.33 ×
+> Norm. Throughput
+> Rate
+> 20
+> 15
+> 10
+> 5
+> 0
+> 25
+> 20
+> 15
+> 10
+> 5
+> 0
+> 25
+> 20
+> 15
+> 10
+> 5
+> 0
+> 25
+> 20
+> 15
+> 10
+> 5
+> 0
+> 25
+> 20
+> 15
+> 10
+> 5
+> 0
+> 25
+> 0612 18 24 0612 18 24 0612 18 24 0612 18 24 0612 18 24
+> (c) Decoding Throughput Analysis
+> OPT LLaMA3 Mixtral Qwen3 DeepSeek
+> 02468
+> Avg. Ratio (%)
+> Rate
+> 80
+> 60
+> 40
+> 20
+> 0
+> 100
+> (b) Attention Computation Load Balance Analysis (max–min latency gap / total latency)
+> 80
+> 60
+> 40
+> 20
+> 0
+> 100
+> 80
+> 60
+> 40
+> 20
+> 0
+> 100
+> 80
+> 60
+> 40
+> 20
+> 0
+> 100
+> 024680246802468
+> 10.60 ×
+> 2.70 ×10.44 ×
+> 2.07 ×
+> 9.83 ×1.81 ×13.69 ×
+> 8.28 ×
+> OPT LLaMA3 Mixtral
+> Qwen3
+> 80
+> 60
+> 40
+> 20
+> 0
+> 100
+> 02468
+> 8.01 ×
+> 1.79 ×
+> DeepSeek
+> 17.51 ×
+> 24
+> 18
+> 12
+> 06
+> 0
+> 130
+> 02468
+> Peak Ratio (%)
+> Rate
+> 80
+> 60
+> 40
+> 20
+> 0
+> 100
+> (a) KV Cache Memory Fragmentation Analysis
+> In-die-NMP Disagg. Helios Duplex Disagg.
+> 4.99 ×
+> 32
+> 24
+> 16
+> 08
+> 0
+> 140
+> 12
+> 29
+> 16
+> 03
+> 0
+> 715
+> 80
+> 60
+> 40
+> 20
+> 0
+> 100
+> 02468024680246802468
+> 12.94 ×
+> 5.64 ×
+> 12.49 ×
+> 4.67 ×
+> 19.77 ×
+> 8.26 ×
+> 23.10 ×
+> 5.45 ×
+> OPT LLaMA3 Mixtral Qwen3
+> DeepSeek
+
+Fig. 20. Attention Management Comparison between Helios and Prior NMPs. 4
+
+3
+
+2
+
+1
+
+0
+
+5
+
+> Ratio (%)
+
+Rate  0 2 4 6 8
+
+4
+
+3
+
+2
+
+1
+
+0
+
+5
+
+> Ratio (%)
+
+Rate 
+
+(a) Inter-PE KV Scatter Analysis  (b) PD Cache Transfer Analysis 
+
+0 2 4 6 8    
+
+> OPT LLaMA3 Mixtral Qwen3 DeepSeek
+
+Fig. 21. KV Cache Transfer Overhead Analysis. 
+
+peak fragmentation within 0.2-15.0%, enabling HB-Device to sustain high performance across all loads. 
+
+Load Balance Analysis: We then assess attention computa-tion’s load balance by profiling the average ratio of max inter-PE/cube latency gap in total attention latency under serving stress tests. As shown in Fig. 20-(b), NMP baselines incur 1.79-13.69× higher imbalance ratio than Helios. At low load, the batch size is too small to occupy all cubes in NMP baselines, causing imbalance ratio to reach nearly 100%. Although this ratio falls when request rate rises, it still remains at 19.9-66.6%. In contrast, fine-grained cache management and spatially-aware block allocation enable Helios to confine this ratio within 7.1-13.3%, thus fully utilizing the compute resources across highly dynamic serving workloads. 
+
+Serving Capacity Analysis: To more intuitively illustrate the serving capacity benefits of Helios’s dynamic KV cache man-agement, we compare decoding throughput across different designs. As shown in Fig. 20-(c), Helios achieves 1.19×-7.33× higher throughput than prior NMP solutions. Moreover, prior NMP designs saturate at lower request arrival rates. These results confirm that Helios significantly improves the serving capacity compared with existing NMP architectures. 
+
+Cache Transfer Overhead: We begin by measuring the average fraction of scatter transfers (Fig. 12-(b)) in total query/key/value projection latency under stress tests. As illus-trated in Fig. 21-(a), the proportion remains ≤4.4%, proving the capability of Algorithm 2 in optimizing inter-PE transfer overhead across varying load pressures. We then profile the ratio of non-overlapped KV cache transfer overhead between prefill and decoding instances in E2E serving. As shown in Fig. 21-(b), it remains ≤2.5%, demonstrating the efficiency of the cache transfer mechanism in Fig. 10. Comp. Speedup                                                 
+
+> Len. (K)
+> DeepSeek 236B OPT 66B LLaMA3 70B Mixtral 8 ×22B Qwen3 30B-A3B
+> 4812
+> BS=16
+> 4812
+> BS=32
+> 4812
+> BS=64
+> 64 32 48
+> BS=16
+> 48 32 64
+> BS=32
+> 32 48 64
+> BS=64
+> 48 32 64
+> BS=16
+> 48 32 64
+> BS=32
+> 48 32 64
+> BS=64
+> 48 32 64
+> BS=16
+> 48 32 64
+> BS=32
+> 48 32 64
+> BS=64
+> 12 48
+> BS=16
+> 12 48
+> BS=32
+> 4812
+> BS=64
+> 12 48
+> BS=16
+> 4812
+> BS=32
+> 12 48
+> BS=64
+> 48 32 64
+> BS=16
+> 32 48 64
+> BS=32
+> 48 32 64
+> BS=64
+> 32 48 64
+> BS=16
+> 32 48 64
+> BS=32
+> 32 48 64
+> BS=64
+> 48 32 64
+> BS=16
+> 32 48 64
+> BS=32
+> 64 32 48
+> BS=64
+> 12 48
+> BS=16
+> 4812
+> BS=32
+> 4812
+> BS=64
+> 1.4
+> 1.2
+> 1.0
+> 0.8
+> 1.6
+> 3
+> 2
+> 1
+> 0
+> 4
+> 19
+> 13
+> 7
+> 1
+> Dec. Speedup
+> Dev. Exec. Speedup  Comm. Speedup
+> Decoding Speedup Compute Speedup Communication Speedup Device Execution Speedup
+> Req. Len. (K Tokens)
+> 3
+> 2
+> 1
+> 0
+
+Fig. 22. Comparison with WaferLLM’s Execution Flow. 
+
+F. Comparison with WaferLLM 
+
+A recent work, WaferLLM [28], also designs decoding execution on mesh-based multi-PE accelerators. Although it adopts similar FC execution to Helios (Fig. 13-(b)), similar to existing NMP designs in Table I, it decomposes attention into independent GEMMs . This leads to two limitations: 
+
+Low Compute Efficiency: First , The two attention GEMMs involve query-head, context-length, and head-dim dimensions. Since query-head and head-dim are small (1-128 and 128-576), further partitioning them across the mesh, as in WaferLLM, reduces per-PE arithmetic intensity and results in small per-PE workloads, limiting compute utilization. Second , as discussed in Sec. II-B, context length varies at runtime due to request dynamicity. Therefore, it is difficult to adopt a unified intra-PE tiling strategy that maintains high efficiency across arbitrary context lengths. In their latest implementation [28], similar to existing NMP designs in Table I, they assign a fixed per-PE context length for each request (seq len p pe in the code) to KV cache tensors [22], [24]–[26], which is pre-defined before execution [20], [23]. This requires us to preserve full context window for each request due to the request length dynam-icity, leading to severe internal fragmentation as analyzed in Sec. II-D. In contrast , our tiled attention avoids partitioning along the short dimensions. By adjusting only the macro block size in Fig. 9-(b), we support a unified intra-PE tiling for arbitrary context lengths while preserving high efficiency. 
+
+Low Inter-PE Communication Efficiency: First , Wafer-LLM executes softmax explicitly between the two attention GEMMs [21], incurring additional overhead. Second , its end-to-end decoding implementation [28] does not specify how newly generated KV vectors are inserted into the KV cache and only contains partial-sum all-reduce operators [27]. Al-though a shift operation is proposed for this purpose, it is implemented isolatedly [29] and is not integrated into the end-to-end decoding pipeline [28]. In contrast , our design overlaps softmax with attention GEMMs (Fig. 9-(b)) and provides an integrated execution flow for KV vector transfer (Fig. 12-(b)). We implement WaferLLM’s execution flow [28] on HB-Device and compare it against Helios across multiple mod-els. Workloads consist of variable-length requests randomly sampled from MoonCake dataset [61] given the max context length. To show WaferLLM’s performance upper bound, we manually tune the optimal intra-PE tiling factors for differ-ent context lengths, and assume KV vector transfer incurs no overhead. As shown in the first row of Fig. 22, He-lios achieves 1.06-1.68× decoding speedup and 1.07-3.81× block size = 1024 block size = 64 block size = 16 block size = 4  block size = 256                                          
+
+> Peak Ratio (%)  40
+> 30
+> 20
+> 10
+> 0
+> 12
+> 9
+> 6
+> 3
+> 0
+> 12
+> 9
+> 6
+> 3
+> 0
+> 6
+> 4.5
+> 3
+> 1.5
+> 0
+> 60
+> 45
+> 30
+> 15
+> 0
+> DeepSeek OPT LLaMA3 Mixtral Qwen3
+> 036912 Rate 036912 036912 036912 036912
+> DeepSeek OPT LLaMA3 Mixtral Qwen3
+> 1.8
+> 1.4
+> 1.0
+> 0.6
+> Speedup
+> block size = 4 block size = 16 block size = 64 block size = 256 block size = 1024
+> 1.99×
+> 1.12× 1.06× 1.01×
+> 1.31×
+> DeepSeek OPT LLaMA3 Mixtral Qwen3
+> 1.45×
+> 1.79×
+> 1.32×
+> 1.10× 1.08×
+> P50 TBT P99 TBT
+> (a) KV Cache Memory Fragmentation Analysis
+> (b) Decoding TBT Analysis
+
+Fig. 23. Performance Analysis of Different KV Block Sizes. 20 
+
+15 
+
+10 
+
+5
+
+0 
+
+> TFLOPS per PE  Comp. BW.
+
+Ch./PE  4 8 16  32  64 
+
+4
+
+3
+
+2
+
+1
+
+0TB/s per PE 
+
+(a) Trade-off Analysis 
+
+Thermal 
+
+Effect   
+
+> 16Ch. 4Ch. 8Ch. 64Ch. 32Ch.
+
+1.5 
+
+1.0 
+
+0.5 
+
+0
+
+> Norm. Perf.
+
+BS  4 8 16  32  64 
+
+(b) Decoding Latency Comparison 
+
+4 8 16  32  64 
+
+Dense  MoE 
+
+Fig. 24. Compute-Bandwidth Allocation Trade-off Analysis. 
+
+device-execution speedup (excluding NVLink overhead) over WaferLLM. We further analyze PE computation and inter-PE communication speedup. As shown in the second row of Fig. 22, although Helios only achieves 1.04×/2.51× aver-age computation/communication speedup under short-context OPT/Deepseek workloads, the average speedup reaches 1.55×/6.11× under other long-context workloads, confirming the superiority of our design against WaferLLM. 
+
+G. Sensitivity Analysis 
+
+KV Block Size: Fig. 23 analyzes the effect of KV block size. For each model, we use the same block size across all layers and evaluate memory fragmentation and TBT with block sizes of 4/16/64/256/1024. Since TBT distributions are similar across block sizes at low request rates, we report peak p50/p99 TBT speedups. Increasing block size raises memory fragmentation, yet even with a block size of 1024, in-die NMP/Duplex exhibit 2.26-8.86× higher fragmentation than Helios. Besides, larger block sizes also improve TBT by enabling more contiguous DRAM accesses for KV cache. Therefore, moderate block sizes (e.g., 64-256) can be used to balance such a fragmentation-TBT trade off, while larger block sizes (e.g., 1024) are preferable for latency-sensitive scenarios. For inter-PE communication, block size only affects KV vector transfers. As Algorithm 1 minimizes this overhead (average 2.41% in Fig. 19), its impact on communication is negligible. 
+
+Compute-Bandwidth Allocation: 3D-DRAM’s memory con-trollers share the same logic-die area with compute logic. Therefore, increasing bandwidth reduces the area for compute, creating a compute-bandwidth trade-off [45]. To study this trade-off, we evaluate the allocable compute capacity under different DRAM channel counts, subject to the thermal con-straints in Sec. VI-B and the 4×4 PE array of HB-Device. As shown in Fig. 24-(a), reducing the channel count below the baseline 16 yields only marginal compute gains. In contrast, increasing channel count significantly raises DRAM power. Although area permits additional compute, thermal constraints lead to a substantial reduction in effective compute capacity. Fig. 24-(b) compares decoding performance under different allocations. For each batch size, we sweep context lengths from 4K to 128K (with 1K step) and average non-OOM work-loads’ performance across dense and MoE models. Reducing channel count yields only marginal compute gains, which are insufficient to offset the bandwidth-induced performance degradation. Conversely, increasing channel count benefits small-batch cases—particularly for MoE models with expert routing—but significantly degrades performance at large batch sizes. Therefore, allocating 4/8/32/64 channels achieves only 38.9%/65.9%/93.4%/76.8% of 16-channel’s performance. VII. C ONCLUSION 
+
+This paper proposes Helios, a hybrid-bonding-based LLM serving accelerator with architecture-system co-design. He-lios efficiently supports NMP-native distributed tiled attention by customizing HB-Device architecture and execution flow, thus enabling NMP-native dynamic KV cache management. Helios further customizes spatially-aware KV cache allocation strategy, which not only balances the compute workload distri-bution, but also minimizes the inter-PE data transfer overhead under highly dynamic serving workloads. Compared with existing GPU/NMP designs, Helios achieves 3.25× (geomean) speedup and 3.36× (geomean) better energy efficiency. REFERENCES [1] D. AI, “Deepseek.” https://chat.deepseek.com/, 2025. [2] J. Ainslie, J. Lee-Thorp, M. de Jong, Y. Zemlyanskiy, F. Lebr´ on, and S. Sanghai, “Gqa: Training generalized multi-query transformer models from multi-head checkpoints,” arXiv preprint arXiv:2305.13245 , 2023. [3] Anthropic, “Claude.” https://www.anthropic.com/claude, 2025. [4] J. L. Ba, J. R. Kiros, and G. E. Hinton, “Layer normalization,” 2016. [Online]. Available: https://arxiv.org/abs/1607.06450 [5] E. Chan, M. Heimlich, A. Purkayastha, and R. A. van de Geijn, “Collective communication: theory, practice, and experience,” Concurr. Comput. Pract. Exp. , vol. 19, no. 13, pp. 1749–1783, 2007. [6] T. F. Chan, G. H. Golub, and R. J. LeVeque, “Updating formulae and a pairwise algorithm for computing sample variances,” Stanford, CA, USA, 1979. [7] M. Chen, J. Tworek, H. Jun, Q. Yuan, H. P. de Oliveira Pinto, J. Kaplan, H. Edwards, Y. Burda, N. Joseph, G. Brockman, A. Ray, R. Puri, G. Krueger, M. Petrov, H. Khlaaf, G. Sastry, P. Mishkin, B. Chan, S. Gray, N. Ryder, M. Pavlov, A. Power, L. Kaiser, M. Bavarian, C. Winter, P. Tillet, F. P. Such, D. Cummings, M. Plappert, F. Chantzis, E. Barnes, A. Herbert-Voss, W. H. Guss, A. Nichol, A. Paino, N. Tezak, J. Tang, I. Babuschkin, S. Balaji, S. Jain, W. Saunders, C. Hesse, A. N. Carr, J. Leike, J. Achiam, V. Misra, E. Morikawa, A. Rad-ford, M. Knight, M. Brundage, M. Murati, K. Mayer, P. Welinder, B. McGrew, D. Amodei, S. McCandlish, I. Sutskever, and W. Zaremba, “Evaluating large language models trained on code,” arXiv preprint arXiv:2107.03374 , 2021. [8] C. Consortium, “Compute express link specification revision 3.0.” https: //www.computeexpresslink.org/download-the-specification, 2025. [9] T. Dao, “Flashattention-2: Faster attention with better parallelism and work partitioning,” arXiv preprint arXiv:2307.08691 , 2023. [10] T. Dao, D. Fu, S. Ermon, A. Rudra, and C. R´ e, “Flashattention: Fast and memory-efficient exact attention with io-awareness,” Advances in neural information processing systems , vol. 35, pp. 16 344–16 359, 2022. [11] T. Dao, D. Haziza, F. Massa, and G. Sizov, “Flash-decoding for long-context inference.” https://crfm.stanford.edu/2023/10/12/flashdecoding. html, 2023. [12] DeepSeek-AI, “Deepseek-v3 technical report,” 2024. [Online]. Available: https://arxiv.org/abs/2412.19437 [13] ——, “Deepseek-r1: Incentivizing reasoning capability in llms via reinforcement learning,” 2025. [Online]. Available: https://arxiv.org/abs/ 2501.12948 [14] DeepSeek-AI, A. Liu, B. Feng, B. Wang, B. Wang, B. Liu, C. Zhao, C. Dengr, C. Ruan, D. Dai, D. Guo, D. Yang, D. Chen, D. Ji, E. Li, F. Lin, F. Luo, G. Hao, G. Chen, G. Li, H. Zhang, H. Xu, H. Yang, H. Zhang, H. Ding, H. Xin, H. Gao, H. Li, H. Qu, J. L. Cai, J. Liang, J. Guo, J. Ni, J. Li, J. Chen, J. Yuan, J. Qiu, J. Song, K. Dong, K. Gao, K. Guan, L. Wang, L. Zhang, L. Xu, L. Xia, L. Zhao, L. Zhang, M. Li, M. Wang, M. Zhang, M. Zhang, M. Tang, M. Li, N. Tian, P. Huang, P. Wang, P. Zhang, Q. Zhu, Q. Chen, Q. Du, R. J. Chen, R. L. Jin, R. Ge, R. Pan, R. Xu, R. Chen, S. S. Li, S. Lu, S. Zhou, S. Chen, S. Wu, S. Ye, S. Ma, S. Wang, S. Zhou, S. Yu, S. Zhou, S. Zheng, T. Wang, T. Pei, T. Yuan, T. Sun, W. L. Xiao, W. Zeng, W. An, W. Liu, W. Liang, W. Gao, W. Zhang, X. Q. Li, X. Jin, X. Wang, X. Bi, X. Liu, X. Wang, X. Shen, X. Chen, X. Chen, X. Nie, X. Sun, X. Wang, X. Liu, X. Xie, X. Yu, X. Song, X. Zhou, X. Yang, X. Lu, X. Su, Y. Wu, Y. K. Li, Y. X. Wei, Y. X. Zhu, Y. Xu, Y. Huang, Y. Li, Y. Zhao, Y. Sun, Y. Li, Y. Wang, Y. Zheng, Y. Zhang, Y. Xiong, Y. Zhao, Y. He, Y. Tang, Y. Piao, Y. Dong, Y. Tan, Y. Liu, Y. Wang, Y. Guo, Y. Zhu, Y. Wang, Y. Zou, Y. Zha, Y. Ma, Y. Yan, Y. You, Y. Liu, Z. Z. Ren, Z. Ren, Z. Sha, Z. Fu, Z. Huang, Z. Zhang, Z. Xie, Z. Hao, Z. Shao, Z. Wen, Z. Xu, Z. Zhang, Z. Li, Z. Wang, Z. Gu, Z. Li, and Z. Xie, “Deepseek-v2: A strong, economical, and efficient mixture-of-experts language model,” 
+
+arXiv preprint arXiv:2405.04434 , 2024. [15] A. Dubey, A. Jauhri, A. Pandey, A. Kadian, A. Al-Dahle, A. Letman, A. Mathur, A. Schelten, A. Yang, A. Fan, A. Goyal, A. Hartshorn, A. Yang, A. Mitra, A. Sravankumar, A. Korenev, A. Hinsvark, A. Rao, A. Zhang, A. Rodriguez, A. Gregerson, A. Spataru, B. Roziere, B. Biron, B. Tang, B. Chern, C. Caucheteux, C. Nayak, C. Bi, C. Marra, C. McConnell, C. Keller, C. Touret, C. Wu, C. Wong, C. C. Ferrer, C. Nikolaidis, D. Allonsius, D. Song, D. Pintz, D. Livshits, D. Esiobu, D. Choudhary, D. Mahajan, D. Garcia-Olano, D. Perino, D. Hupkes, E. Lakomkin, E. AlBadawy, E. Lobanova, E. Dinan, E. M. Smith, F. Radenovic, F. Zhang, G. Synnaeve, G. Lee, G. L. Anderson, G. Nail, G. Mialon, G. Pang, G. Cucurell, H. Nguyen, H. Korevaar, H. Xu, H. Touvron, I. Zarov, I. A. Ibarra, I. Kloumann, I. Misra, I. Evtimov, J. Copet, J. Lee, J. Geffert, J. Vranes, J. Park, J. Mahadeokar, J. Shah, J. van der Linde, J. Billock, J. Hong, J. Lee, J. Fu, J. Chi, J. Huang, J. Liu, J. Wang, J. Yu, J. Bitton, J. Spisak, J. Park, J. Rocca, J. Johnstun, J. Saxe, J. Jia, K. V. Alwala, K. Upasani, K. Plawiak, K. Li, K. Heafield, K. Stone, K. El-Arini, K. Iyer, K. Malik, K. Chiu, K. Bhalla, L. Rantala-Yeary, L. van der Maaten, L. Chen, L. Tan, L. Jenkins, L. Martin, L. Madaan, L. Malo, L. Blecher, L. Landzaat, L. de Oliveira, M. Muzzi, M. Pasupuleti, M. Singh, M. Paluri, M. Kardas, M. Oldham, M. Rita, M. Pavlova, M. Kambadur, M. Lewis, M. Si, M. K. Singh, M. Has-san, N. Goyal, N. Torabi, N. Bashlykov, N. Bogoychev, N. Chatterji, O. Duchenne, O. C ¸ elebi, P. Alrassy, P. Zhang, P. Li, P. Vasic, P. Weng, P. Bhargava, P. Dubal, P. Krishnan, P. S. Koura, P. Xu, Q. He, Q. Dong, R. Srinivasan, R. Ganapathy, R. Calderer, R. S. Cabral, R. Stojnic, R. Raileanu, R. Girdhar, R. Patel, R. Sauvestre, R. Polidoro, R. Sumbaly, R. Taylor, R. Silva, R. Hou, R. Wang, S. Hosseini, S. Chennabasappa, S. Singh, S. Bell, S. S. Kim, S. Edunov, S. Nie, S. Narang, S. Raparthy, S. Shen, S. Wan, S. Bhosale, S. Zhang, S. Vandenhende, S. Batra, S. Whitman, S. Sootla, S. Collot, S. Gururangan, S. Borodinsky, T. Her-man, T. Fowler, T. Sheasha, T. Georgiou, T. Scialom, T. Speckbacher, T. Mihaylov, T. Xiao, U. Karn, V. Goswami, V. Gupta, V. Ramanathan, V. Kerkez, V. Gonguet, V. Do, V. Vogeti, V. Petrovic, W. Chu, W. Xiong, W. Fu, W. Meers, X. Martinet, X. Wang, X. E. Tan, X. Xie, X. Jia, X. Wang, Y. Goldschlag, Y. Gaur, Y. Babaei, Y. Wen, Y. Song, Y. Zhang, Y. Li, Y. Mao, Z. D. Coudert, Z. Yan, Z. Chen, Z. Papakipos, A. Singh, A. Grattafiori, A. Jain, A. Kelsey, A. Shajnfeld, A. Gangidi, A. Victoria, A. Goldstand, A. Menon, A. Sharma, A. Boesenberg, A. Vaughan, A. Baevski, A. Feinstein, A. Kallet, A. Sangani, A. Yunus, A. Lupu, A. Alvarado, A. Caples, A. Gu, A. Ho, A. Poulton, A. Ryan, A. Ram-chandani, A. Franco, A. Saraf, A. Chowdhury, A. Gabriel, A. Bharambe, A. Eisenman, A. Yazdan, B. James, B. Maurer, B. Leonhardi, B. Huang, B. Loyd, B. D. Paola, B. Paranjape, B. Liu, B. Wu, B. Ni, B. Han-cock, B. Wasti, B. Spence, B. Stojkovic, B. Gamido, B. Montalvo, C. Parker, C. Burton, C. Mejia, C. Wang, C. Kim, C. Zhou, C. Hu, C.-H. Chu, C. Cai, C. Tindal, C. Feichtenhofer, D. Civin, D. Beaty, D. Kreymer, D. Li, D. Wyatt, D. Adkins, D. Xu, D. Testuggine, D. David, D. Parikh, D. Liskovich, D. Foss, D. Wang, D. Le, D. Holland, E. Dowling, E. Jamil, E. Montgomery, E. Presani, E. Hahn, E. Wood, E. Brinkman, E. Arcaute, E. Dunbar, E. Smothers, F. Sun, F. Kreuk, F. Tian, F. Ozgenel, F. Caggioni, F. Guzm´ an, F. Kanayet, F. Seide, G. M. Florez, G. Schwarz, G. Badeer, G. Swee, G. Halpern, G. Thattai, G. Herman, G. Sizov, Guangyi, Zhang, G. Lakshminarayanan, H. Sho-janazeri, H. Zou, H. Wang, H. Zha, H. Habeeb, H. Rudolph, H. Suk, H. Aspegren, H. Goldman, I. Damlaj, I. Molybog, I. Tufanov, I.-E. Veliche, I. Gat, J. Weissman, J. Geboski, J. Kohli, J. Asher, J.-B. Gaya, J. Marcus, J. Tang, J. Chan, J. Zhen, J. Reizenstein, J. Teboul, J. Zhong, J. Jin, J. Yang, J. Cummings, J. Carvill, J. Shepard, J. McPhie, J. Torres, J. Ginsburg, J. Wang, K. Wu, K. H. U, K. Saxena, K. Prasad, K. Khandelwal, K. Zand, K. Matosich, K. Veeraraghavan, K. Michelena, K. Li, K. Huang, K. Chawla, K. Lakhotia, K. Huang, L. Chen, L. Garg, L. A, L. Silva, L. Bell, L. Zhang, L. Guo, L. Yu, L. Moshkovich, L. Wehrstedt, M. Khabsa, M. Avalani, M. Bhatt, M. Tsimpoukelli, M. Mankus, M. Hasson, M. Lennie, M. Reso, M. Groshev, M. Naumov, M. Lathi, M. Keneally, M. L. Seltzer, M. Valko, M. Restrepo, M. Patel, M. Vyatskov, M. Samvelyan, M. Clark, M. Macey, M. Wang, M. J. Her-moso, M. Metanat, M. Rastegari, M. Bansal, N. Santhanam, N. Parks, N. White, N. Bawa, N. Singhal, N. Egebo, N. Usunier, N. P. Laptev, N. Dong, N. Zhang, N. Cheng, O. Chernoguz, O. Hart, O. Salpekar, O. Kalinli, P. Kent, P. Parekh, P. Saab, P. Balaji, P. Rittner, P. Bontrager, P. Roux, P. Dollar, P. Zvyagina, P. Ratanchandani, P. Yuvraj, Q. Liang, R. Alao, R. Rodriguez, R. Ayub, R. Murthy, R. Nayani, R. Mitra, R. Li, R. Hogan, R. Battey, R. Wang, R. Maheswari, R. Howes, R. Rinott, S. J. Bondu, S. Datta, S. Chugh, S. Hunt, S. Dhillon, S. Sidorov, S. Pan, S. Verma, S. Yamamoto, S. Ramaswamy, S. Lindsay, S. Lindsay, S. Feng, S. Lin, S. C. Zha, S. Shankar, S. Zhang, S. Zhang, S. Wang, S. Agarwal, S. Sajuyigbe, S. Chintala, S. Max, S. Chen, S. Kehoe, S. Satterfield, S. Govindaprasad, S. Gupta, S. Cho, S. Virk, S. Subramanian, S. Choudhury, S. Goldman, T. Remez, T. Glaser, T. Best, T. Kohler, T. Robinson, T. Li, T. Zhang, T. Matthews, T. Chou, T. Shaked, V. Vontimitta, V. Ajayi, V. Montanez, V. Mohan, V. S. Kumar, V. Mangla, V. Albiero, V. Ionescu, V. Poenaru, V. T. Mihailescu, V. Ivanov, W. Li, W. Wang, W. Jiang, W. Bouaziz, W. Constable, X. Tang, X. Wang, X. Wu, X. Wang, X. Xia, X. Wu, X. Gao, Y. Chen, Y. Hu, Y. Jia, Y. Qi, Y. Li, Y. Zhang, Y. Zhang, Y. Adi, Y. Nam, Yu, Wang, Y. Hao, Y. Qian, Y. He, Z. Rait, Z. DeVito, Z. Rosnbrick, Z. Wen, Z. Yang, and Z. Zhao, “The llama 3 herd of models,” arXiv preprint arXiv:2407.21783 , 2024. [16] B. Fujun, J. Xiping, W. Song, Y. Bing, T. Jie, Z. Fengguo, W. Chunjuan, W. Fan, L. Xiaodong, Y. Guoqing, F. Ni, L. Qiannan, L. Hua, W. Kexin, D. Huifu, B. Liang, J. Xuerong, L. Jin, L. Mei, W. Zhengwen, H. Sheng, Z. Jun, Z. Qiong, S. Peng, Y. Daohong, C. Kau, D. Yang, C.-S. Ho, S. Hongbin, L. Hangbing, L. Ming, K. Yi, and R. Qiwei, “A stacked embedded dram array for lpddr4/4x using hybrid bonding 3d integration with 34gb/s/1gb 0.88 pj/b logic-to-memory interface,” in 2020 IEEE International Electron Devices Meeting (IEDM) . IEEE, 2020, pp. 6–6. [17] Google, “Gemini.” https://gemini.google.com/app, 2025. [18] Y. Gu, A. Khadem, S. Umesh, N. Liang, X. Servot, O. Mutlu, R. Iyer, and R. Das, “Pim is all you need: A cxl-enabled gpu-free system for large language model inference,” in Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 , 2025, pp. 862–881. [19] J.-H. Han, X. Guo, K. Skadron, and M. R. Stan, “From 2.5 d to 3d chiplet systems: Investigation of thermal implications with hotspot 7.0,” in 2022 21st IEEE Intersociety Conference on Thermal and Thermomechanical Phenomena in Electronic Systems (iTherm) . IEEE, 2022, pp. 1–6. [20] C. He, Y. Huang, P. Mu, Z. Miao, J. Xue, L. Ma, F. Yang, and L. Mai, “The definition of fixed context length before waferllm’s decoding execution.” https://github.com/MeshInfra/WaferLLM/ blob/7122d0fac527a85b440804f930e0c43b5df88102/Decode/WSE-3/run wse3.sh#L48, 2025. [21] ——, “Explicit softmax between two attention gemms in waferllm’s decoding implementation.” https://github.com/MeshInfra/WaferLLM/ blob/7122d0fac527a85b440804f930e0c43b5df88102/Decode/WSE-3/src/decode.csl#L783, 2025. [22] ——, “K cache shape definition in waferllm’s decoding implementation.” https://github.com/MeshInfra/WaferLLM/blob/ 7122d0fac527a85b440804f930e0c43b5df88102/Decode/WSE-3/src/decode.csl#L239, 2025. [23] ——, “Setting fixed context length when calling waferllm’s decoding execution.” https://github.com/MeshInfra/WaferLLM/ blob/7122d0fac527a85b440804f930e0c43b5df88102/Decode/WSE-3/run wse3.sh#L71, 2025. [24] ——, “The use of k cache in waferllm’s decoding implementation.” https://github.com/MeshInfra/WaferLLM/blob/ 7122d0fac527a85b440804f930e0c43b5df88102/Decode/WSE-3/src/decode.csl#L556, 2025. [25] ——, “The use of v cache in waferllm’s decoding implementation.” https://github.com/MeshInfra/WaferLLM/blob/ 7122d0fac527a85b440804f930e0c43b5df88102/Decode/WSE-3/src/decode.csl#L617, 2025. [26] ——, “V cache shape definition in waferllm’s decoding implementation.” https://github.com/MeshInfra/WaferLLM/blob/ 7122d0fac527a85b440804f930e0c43b5df88102/Decode/WSE-3/src/decode.csl#L243, 2025. [27] ——, “Waferllm’s decoding entry and operator ar-rangement.” https://github.com/MeshInfra/WaferLLM/blob/ 7122d0fac527a85b440804f930e0c43b5df88102/Decode/WSE-3/src/decode.csl#L765, 2025. [28] ——, “Waferllm’s decoding implementa-tion.” https://github.com/MeshInfra/WaferLLM/blob/ 7122d0fac527a85b440804f930e0c43b5df88102/Decode/WSE-3/, 2025. [29] ——, “Waferllm’s shift operator implementa-tion.” https://github.com/MeshInfra/WaferLLM/tree/ 7122d0fac527a85b440804f930e0c43b5df88102/Shift, 2025. [30] M. He, C. Song, I. Kim, C. Jeong, S. Kim, I. Park, M. Thottethodi, and T. Vijaykumar, “Newton: A dram-maker’s accelerator-in-memory (aim) architecture for machine learning,” in 2020 53rd Annual IEEE/ACM International Symposium on Microarchitecture (MICRO) . IEEE, 2020, pp. 372–385. [31] Y. He, H. Mao, C. Giannoula, M. Sadrosadati, J. G´ omez-Luna, H. Li, X. Li, Y. Wang, and O. Mutlu, “Papi: Exploiting dynamic parallelism in large language model decoding with a processing-in-memory-enabled computing system,” in Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 , 2025, pp. 766–782. [32] G. Heo, S. Lee, J. Cho, H. Choi, S. Lee, H. Ham, G. Kim, D. Ma-hajan, and J. Park, “Neupims: Npu-pim heterogeneous acceleration for batched llm inferencing,” in Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 , 2024, pp. 722–737. [33] J. C. Jaehyun Park, “Simulator for attacc,” https://github.com/scale-snu/ attacc simulator/, 2024. [34] A. Q. Jiang, A. Sablayrolles, A. Roux, A. Mensch, B. Savary, C. Bam-ford, D. S. Chaplot, D. de las Casas, E. B. Hanna, F. Bressand, G. Lengyel, G. Bour, G. Lample, L. R. Lavaud, L. Saulnier, M.-A. Lachaux, P. Stock, S. Subramanian, S. Yang, S. Antoniak, T. L. Scao, T. Gervet, T. Lavril, T. Wang, T. Lacroix, and W. E. Sayed, “Mixtral of experts,” arXiv preprint arXiv:2401.04088 , 2024. [35] N. Jiang, D. U. Becker, G. Michelogiannakis, J. Balfour, B. Towles, D. E. Shaw, J. Kim, and W. J. Dally, “A detailed and flexible cycle-accurate network-on-chip simulator,” in 2013 IEEE international symposium on performance analysis of systems and software (ISPASS) . IEEE, 2013, pp. 86–96. [36] N. Jouppi, G. Kurian, S. Li, P. Ma, R. Nagarajan, L. Nai, N. Patil, S. Subramanian, A. Swing, B. Towles, C. Young, X. Zhou, Z. Zhou, and D. A. Patterson, “Tpu v4: An optically reconfigurable supercomputer for machine learning with hardware support for embeddings,” in Proceedings of the 50th Annual International Symposium on Computer Architecture , ser. ISCA ’23. New York, NY, USA: Association for Computing Machinery, 2023. [Online]. Available: https://doi.org/10.1145/3579371.3589350 [37] B. Kim, S. Cha, S. Park, J. Lee, S. Lee, S. Kang, J. So, K. Kim, J. Jung, J. Lee, S. Lee, Y. Paik, H. Kim, J. Kim, W. Lee, Y. Ro, Y. Cho, J. H. Kim, J. Song, J. Yu, S. Lee, J. Cho, and K. Sohn, “The breakthrough memory solutions for improved performance on llm inference,” IEEE Micro , vol. 44, no. 3, pp. 40–48, 2024. [38] G. Kim, J. Kim, N. Kim, W. Shin, J. Won, H. Joo, H. Choi, B. An, G. Shin, D. Yun, J. Kim, C. Kim, I. Kim, J. Park, Y. Song, B. Yang, H. Lee, S. Park, W. Lee, S. Kim, Y. Park, Y. Jung, G. Park, and E. Lim, “Sk hynix ai-specific computing memory solution: From aim device to heterogeneous aimx-xpu system for comprehensive llm inference,” in 
+
+2024 IEEE Hot Chips 36 Symposium (HCS) . IEEE Computer Society, 2024, pp. 1–26. [39] J. H. Kim, Y. Ro, J. So, S. Lee, S. Kang, Y. Cho, H. Kim, B. Kim, K. Kim, S. Park, J. Kim, S. Cha, W. Lee, J. Jung, J. Lee, J. Lee, J. Song, S. Lee, J. Cho, J. Yu, and K. Sohn, “Samsung pim/pnm for transfmer based ai: Energy efficiency on pim/pnm cluster,” in 2023 IEEE Hot Chips 35 Symposium (HCS) . IEEE Computer Society, 2023, pp. 1–31. [40] Kimi, “Mooncake transfer engine.” https://github.com/kvcache-ai/ Mooncake, 2025. [41] H. Kwon, P. Chatarasi, V. Sarkar, T. Krishna, M. Pellauer, and A. Parashar, “Maestro: A data-centric approach to understand reuse, performance, and hardware cost of dnn mappings,” IEEE micro , vol. 40, no. 3, pp. 20–29, 2020. [42] W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. Gonzalez, H. Zhang, and I. Stoica, “Efficient memory management for large language model serving with pagedattention,” in Proceedings of the 29th Symposium on Operating Systems Principles , 2023, pp. 611–626. [43] S. J. Lee, K. Kim, S. Oh, J. Park, G. Hong, D. Y. Ka, K. Hwang, J. Park, K. P. Kang, J. Kim, J. Jeon, N. Kim, Y. Kwon, K. Vladimir, W. Shin, J. Won, M. Lee, H. Joo, H. Choi, J. Lee, D. Ko, Y. Jun, K. Cho, I. Kim, C. Song, C. Jeong, D. Kwon, J. Jang, I. Park, J. Chun, and J. Cho, “A 1ynm 1.25 v 8gb, 16gb/s/pin gddr6-based accelerator-in-memory supporting 1tflops mac operation and various activation functions for deep-learning applications,” in 2022 IEEE International Solid-State Circuits Conference (ISSCC) , vol. 65. IEEE, 2022, pp. 1–3. [44] S. Lee, S. Kang, J. Lee, H. Kim, E. Lee, S. Seo, H. Yoon, S. Lee, K. Lim, H. Shin, J. Kim, S. O, A. Iyer, D. Wang, K. Sohn, and N. S. Kim, “Hardware architecture and software stack for pim based on commercial dram technology: Industrial product,” in 2021 ACM/IEEE 48th Annual International Symposium on Computer Architecture (ISCA) . IEEE, 2021, pp. 43–56. [45] C. Li, Y. Yin, X. Wu, J. Zhu, Z. Gao, D. Niu, Q. Wu, X. Si, Y. Xie, C. Zhang, and G. Sun, “H2-llm: Hardware-dataflow co-exploration for heterogeneous hybrid-bonding-based low-batch llm inference,” in 
+
+Proceedings of the 52nd Annual International Symposium on Computer Architecture , 2025, pp. 194–210. [46] C. Li, Z. Zhou, S. Zheng, J. Zhang, Y. Liang, and G. Sun, “Specpim: Ac-celerating speculative inference on pim-enabled system via architecture-dataflow co-exploration,” in Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 , 2024, pp. 950–965. [47] D. Lim and J. Kim, “Tidalmesh: Topology-driven allreduce collective communication for mesh topology,” in IEEE International Symposium on High Performance Computer Architecture, HPCA 2025, Las Vegas, NV, USA, March 1-5, 2025 . IEEE, 2025, pp. 1526–1540. [48] L. Lu, N. Guan, Y. Wang, L. Jia, Z. Luo, J. Yin, J. Cong, and Y. Liang, “Tenet: A framework for modeling tensor dataflow based on relation-centric notation,” in 2021 ACM/IEEE 48th Annual International Symposium on Computer Architecture (ISCA) . IEEE, 2021, pp. 720– 733. [49] H. Luo, Y. C. Tu, F. N. Bostancı, A. Olgun, A. G. Ya, and O. Mutlu, “Ramulator 2.0: A modern, modular, and extensible dram simulator,” 
+
+IEEE Computer Architecture Letters , 2023. [50] M. Milakov and N. Gimelshein, “Online normalizer calculation for softmax,” 2018. [Online]. Available: https://arxiv.org/abs/1805.02867 [51] E. Nijkamp, B. Pang, H. Hayashi, L. Tu, H. Wang, Y. Zhou, S. Savarese, and C. Xiong, “Codegen: An open large language model for code with multi-turn program synthesis,” arXiv preprint arXiv:2203.13474 , 2022. [52] D. Niu, S. Li, Y. Wang, W. Han, Z. Zhang, Y. Guan, T. Guan, F. Sun, F. Xue, L. Duan, Y. Fang, H. Zheng, X. Jiang, S. Wang, F. Zuo, Y. Wang, B. Yu, Q. Ren, and Y. Xie, “184qps/w 64mb/mm 2 3d logic-to-dram hybrid bonding with process-near-memory engine for recommendation system,” in 2022 IEEE International Solid-State Circuits Conference (ISSCC) , vol. 65. IEEE, 2022, pp. 1–3. [53] NVIDIA, “Build semi-custom ai infrastructure — nvidia nvlink fusion.” https://www.nvidia.com/en-us/data-center/nvlink-fusion/, 2025. [54] OpenAI, “Chatgpt.” https://chatgpt.com/, 2025. [55] H. Oprins, V. Cherman, T. Webers, S.-W. Kim, J. de Vos, G. Van der Plas, and E. Beyne, “3d wafer-to-wafer bonding thermal resistance comparison: Hybrid cu/dielectric bonding versus dielectric via-last bond-ing,” in 2020 19th IEEE Intersociety Conference on Thermal and Thermomechanical Phenomena in Electronic Systems (ITherm) . IEEE, 2020, pp. 219–228. [56] Y. Pan, Z. Xia, P. Hsu, L. Hu, H. Kim, J. Sharda, M. Zhou, N. S. Kim, S. Yu, T. Rosing, and M. Kang, “Stratum: System-hardware co-design with tiered monolithic 3d-stackable dram for efficient moe serving,” in Proceedings of the 58th IEEE/ACM International Symposium on Microarchitecture® , 2025, pp. 1–17. [57] A. Parashar, P. Raina, Y. S. Shao, Y.-H. Chen, V. A. Ying, A. Mukkara, R. Venkatesan, B. Khailany, S. W. Keckler, and J. Emer, “Timeloop: A systematic approach to dnn accelerator evaluation,” in 2019 IEEE inter-national symposium on performance analysis of systems and software (ISPASS) . IEEE, 2019, pp. 304–315. [58] J. Park, J. Choi, K. Kyung, M. J. Kim, Y. Kwon, N. S. Kim, and J. H. Ahn, “Attacc! unleashing the power of pim for batched transformer-based generative model inference,” in Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 , 2024, pp. 103–119. [59] P. Patel, E. Choukse, C. Zhang, A. Shah, ´ I. Goiri, S. Maleki, and R. Bianchini, “Splitwise: Efficient generative llm inference using phase splitting,” in 2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) . IEEE, 2024, pp. 118–132. [60] R. Pope, S. Douglas, A. Chowdhery, J. Devlin, J. Bradbury, A. Levskaya, J. Heek, K. Xiao, S. Agrawal, and J. Dean, “Efficiently scaling transformer inference,” 2022. [Online]. Available: https://arxiv.org/abs/2211.05102 [61] R. Qin, Z. Li, W. He, J. Cui, F. Ren, M. Zhang, Y. Wu, W. Zheng, and X. Xu, “Mooncake: Trading more storage for less computation—a 
+
+{KVCache-centric } architecture for serving {LLM } chatbot,” in 23rd USENIX Conference on File and Storage Technologies (FAST 25) , 2025, pp. 155–170. [62] Z. Ren, A. Alqahtani, N. Bagherzadeh, and J. Lee, “Thermal tsv optimization and hierarchical floorplanning for 3-d integrated circuits,” 
+
+IEEE Transactions on Components, Packaging and Manufacturing Tech-nology , vol. 10, no. 4, pp. 599–610, 2020. [63] Rjzamora, “pynvml,” https://pypi.org/project/pynvml, 2024. [64] J. Shah, G. Bikshandi, Y. Zhang, V. Thakkar, P. Ramani, and T. Dao, “Flashattention-3: Fast and accurate attention with asynchrony and low-precision,” 2024. [Online]. Available: https://arxiv.org/abs/2407.08608 [65] N. Shazeer, “Fast transformer decoding: One write-head is all you need, 2019,” URL https://arxiv. org/abs , p. 23, 2019. [66] ——, “Glu variants improve transformer,” arXiv preprint arXiv:2002.05202 , 2020. [67] B. Sun, Z. Huang, H. Zhao, W. Xiao, X. Zhang, Y. Li, and W. Lin, “Llumnix: Dynamic scheduling for large language model serving,” in 
+
+18th USENIX Symposium on Operating Systems Design and Implemen-tation (OSDI 24) , 2024, pp. 173–191. [68] J. C. Sungmin Yun, Kwanhee Kyung, “Llmsimulator,” https://github. com/scale-snu/LLMSimulator/, 2025. [69] I. Ultra Accelerator Link Consortium, “Ualink 200 rev 1.0 specification.” https://ualinkconsortium.org/specification/, 2025. [70] A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez, L. Kaiser, and I. Polosukhin, “Attention is all you need,” Advances in Neural Information Processing Systems , 2017. [71] S. Wang, Y. Guo, W. Tao, X. Jia, F. Bai, J. Tan, Y. Wang, L. Bai, F. Guo, Q. Liu, J. Li, P. Yin, F. Liu, J. Liu, X. Long, Y. Han, Z. Yu, M. Cheng, S. Chen, and X. Jiang, “A 3d unified analysis method (3d-uam) for wafer-on-wafer stacked near-memory structure,” IEEE Transactions on Very Large Scale Integration (VLSI) Systems , 2025. [72] S. Wang, B. Yu, W. Xiao, F. Bai, X. Long, L. Bai, X. Jia, F. Zuo, J. Tan, Y. Guo, P. Sun, J. Zhou, Q. Zhan, S. Hu, Y. Zhou, Y. Kang, Q. Ren, and X. Jiang, “A 135 gbps/gbit 0.66 pj/bit stacked embedded dram with multilayer arrays by fine pitch hybrid bonding and mini-tsv,” in 2023 IEEE Symposium on VLSI Technology and Circuits (VLSI Technology and Circuits) . IEEE, 2023, pp. 1–2. [73] Y. Wang, Y. Chen, Z. Li, Z. Tang, R. Guo, X. Wang, Q. Wang, A. C. Zhou, and X. Chu, “Towards efficient and reliable llm serving: A real-world workload study,” CoRR , 2024. [74] J. Wei, Y. Tay, R. Bommasani, C. Raffel, B. Zoph, S. Borgeaud, D. Yogatama, M. Bosma, D. Zhou, D. Metzler, E. H. Chi, T. Hashimoto, O. Vinyals, P. Liang, J. Dean, and W. Fedus, “Emergent abilities of large language models,” 2022. [Online]. Available: https://arxiv.org/abs/2206.07682 [75] J. Wei, X. Wang, D. Schuurmans, M. Bosma, B. Ichter, F. Xia, E. Chi, Q. Le, and D. Zhou, “Chain-of-thought prompting elicits reasoning in large language models,” 2023. [Online]. Available: https://arxiv.org/abs/2201.11903 [76] Y. Wei, Y. C. Huang, H. Tang, N. Sankaran, I. Chadha, D. Dai, O. Oluwole, V. Balan, and E. Lee, “Nvlink-c2c: A coherent off package chip-to-chip interconnect with 40gbps/pin single-ended signaling,” in IEEE International Solid- State Circuits Conference, ISSCC 2023, San Francisco, CA, USA, February 19-23, 2023 . IEEE, 2023, pp. 160–161. [77] Wikipedia, “Priority queue.” https://en.wikipedia.org/wiki/Priority queue, 2025. [78] J. Wuu, R. Agarwal, M. Ciraula, C. Dietz, B. Johnson, D. Johnson, R. Schreiber, R. Swaminathan, W. Walker, and S. Naffziger, “3d v-cache: the implementation of a hybrid-bonded 64mb stacked cache for a 7nm x86-64 cpu,” in 2022 IEEE International Solid-State Circuits Conference (ISSCC) , vol. 65. IEEE, 2022, pp. 428–429. [79] Y. Xiang, X. Li, K. Qian, W. Yu, E. Zhai, and X. Jin, “Servegen: Workload characterization and generation of large language model serving in production,” arXiv preprint arXiv:2505.09999 , 2025. [80] A. Yang, A. Li, B. Yang, B. Zhang, B. Hui, B. Zheng, B. Yu, C. Gao, C. Huang, C. Lv, C. Zheng, D. Liu, F. Zhou, F. Huang, F. Hu, H. Ge, H. Wei, H. Lin, J. Tang, J. Yang, J. Tu, J. Zhang, J. Yang, J. Yang, J. Zhou, J. Zhou, J. Lin, K. Dang, K. Bao, K. Yang, L. Yu, L. Deng, M. Li, M. Xue, M. Li, P. Zhang, P. Wang, Q. Zhu, R. Men, R. Gao, S. Liu, S. Luo, T. Li, T. Tang, W. Yin, X. Ren, X. Wang, X. Zhang, X. Ren, Y. Fan, Y. Su, Y. Zhang, Y. Zhang, Y. Wan, Y. Liu, Z. Wang, Z. Cui, Z. Zhang, Z. Zhou, and Z. Qiu, “Qwen3 technical report,” arXiv preprint arXiv:2505.09388 , 2025. [81] Z. Ye, L. Chen, R. Lai, W. Lin, Y. Zhang, S. Wang, T. Chen, B. Kasikci, V. Grover, A. Krishnamurthy, and L. Ceze, “Flashinfer: Efficient and customizable attention engine for llm inference serving,” 
+
+arXiv preprint arXiv:2501.01005 , 2025. [Online]. Available: https: //arxiv.org/abs/2501.01005 [82] S. L. Yinmin Zhong, “Distserve simulator,” https://github.com/ LLMServe/DistServe/tree/main/simdistserve, 2024. [83] G.-I. Yu, J. S. Jeong, G.-W. Kim, S. Kim, and B.-G. Chun, “Orca: A distributed serving system for {Transformer-Based } generative models,” in 16th USENIX Symposium on Operating Systems Design and Imple-mentation (OSDI 22) , 2022, pp. 521–538. [84] Z. Yue, H. Wang, J. Fang, J. Deng, G. Lu, F. Tu, R. Guo, Y. Li, Y. Qin, Y. Wang, C. Li, H. Han, S. Wei, Y. Hu, and S. Yin, “Exploiting similarity opportunities of emerging vision ai models on hybrid bonding architecture,” in 2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) . IEEE, 2024, pp. 396–409. [85] Z. Yue, Y. Wang, C. Li, S. Wei, Y. Hu, and S. Yin, “3d-path: A hierarchy lut processing-in-memory accelerator with thermal-aware hybrid bond-ing integration,” in Proceedings of the 58th IEEE/ACM International Symposium on Microarchitecture , 2025, pp. 78–93. [86] S. Yun, K. Kyung, J. Cho, J. Choi, J. Kim, B. Kim, S. Lee, K. Sohn, and J. H. Ahn, “Duplex: A device for large language models with mixture of experts, grouped query attention, and continuous batching,” in 2024 57th IEEE/ACM International Symposium on Microarchitecture (MICRO) . IEEE, 2024, pp. 1429–1443. [87] B. Zhang and R. Sennrich, “Root mean square layer normalization,” 2019. [Online]. Available: https://arxiv.org/abs/1910.07467 [88] S. Zhang, S. Roller, N. Goyal, M. Artetxe, M. Chen, S. Chen, C. Dewan, M. Diab, X. Li, X. V. Lin, T. Mihaylov, M. Ott, S. Shleifer, K. Shuster, D. Simig, P. S. Koura, A. Sridhar, T. Wang, and L. Zettlemoyer, “Opt: Open pre-trained transformer language models,” arXiv preprint arXiv:2205.01068 , 2022. [89] C. Zhao, C. Deng, C. Ruan, D. Dai, H. Gao, J. Li, L. Zhang, P. Huang, S. Zhou, S. Ma, W. Liang, Y. He, Y. Wang, Y. Liu, and Y. X. Wei, “Insights into deepseek-v3: Scaling challenges and reflections on hardware for ai architectures,” 2025. [Online]. Available: https://arxiv.org/abs/2505.09343 [90] L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, C. W. Barrett, and Y. Sheng, “Sglang: Efficient execution of structured language model programs,” in Advances in Neural Information Processing Systems 38: Annual Conference on Neural Information Processing Systems 2024, NeurIPS 2024, Vancouver, BC, Canada, December 10 - 15, 2024 , 2024. [91] Y. Zhong, S. Liu, J. Chen, J. Hu, Y. Zhu, X. Liu, X. Jin, and H. Zhang, “{DistServe }: Disaggregating prefill and decoding for goodput-optimized large language model serving,” in 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) , 2024, pp. 193–210.
