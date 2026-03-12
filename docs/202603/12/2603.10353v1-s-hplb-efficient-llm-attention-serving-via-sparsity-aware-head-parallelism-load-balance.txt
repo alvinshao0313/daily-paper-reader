@@ -1,0 +1,396 @@
+Title: S-HPLB: Efficient LLM Attention Serving via Sparsity-Aware Head Parallelism Load Balance
+
+URL Source: https://arxiv.org/pdf/2603.10353v1
+
+Published Time: Thu, 12 Mar 2026 00:31:56 GMT
+
+Number of Pages: 7
+
+Markdown Content:
+# S-HPLB : Efficient LLM Attention Serving via Sparsity-Aware Head Parallelism Load Balance 
+
+# Di Liu, Yifei Liu, Chen Chen ∗, Zhibin Yu †, Xiaoyi Fan ‡, Quan Chen, Minyi Guo 
+
+Shanghai Jiao Tong University, †Chinese Academy of Science, ‡Shenzhen MSU-BIT University 
+
+## Abstract 
+
+With the increasing volumes of Large Language Models (LLMs) and the expanding context lengths, attention computation has become a key performance bottleneck in LLM serving. For fast attention computation, recent practices often parallelize the attention heads on multiple GPUs, and also widely adopt attention sparsification to reduce the computation amount—which selectively computes a subset of attention pairs under a preset sparsity budget. In this paper, we notice that attention heads of an LLM model often exhibit 
+
+heterogeneous-yet-stable sparsity elasticities, which motivates us to enforce head-adaptive sparsity budgets to attain better efficiency while preserving high inference quality. Yet, from the system aspect, with heterogeneous sparsity levels, attention computation time on different heads would be inconsistent, yielding cross-GPU resource bubbles under head-parallel deployment. To further minimize such bubbles, we propose a novel attention deployment strategy called 
+
+Sparsity-aware Head-Parallel Load Balance (S-HPLB). Experiments on long-context benchmark show that, S-HPLB can achieve a 2.88 ×
+
+improvement in average attention computation latency without quality degradation. 
+
+## 1 Introduction 
+
+Recent advances in large language models (LLMs) have enabled remarkable capabilities in natural language understanding and gen-eration. Meanwhile, applications such as document understand-ing [ 24 ], long-form question answering [ 14 ], and code synthe-sis [ 2, 11 ] feed models with increasingly longer context inputs. As both model size and context length grow, the computational demand of LLM inference—especially the attention operation—escalates dra-matically. For instance, when processing an input with a 128K context length using the Llama-3-8B model, attention operation accounts for over 70% of the total time-to-first-token (TTFT) [ 16 ]. Therefore, reducing the cost of attention operation is crucial for efficient LLM serving. For efficient LLM attention serving, from the system perspec-tive, recent practices increasingly adopt distributed attention de-ployment [ 13 , 23 , 32 , 33 ]. On the one hand, to avoid cross-module resource interference, the attention module in each Transformer layer can be decoupled from the other modules (e.g., FFN), which is called attention-FFN disaggregation (AFD) [ 22 , 23 , 33 ]; this renders it possible to optimize the attention efficiency independently. On the other hand, to particularly speed up the attention module with expanded resources, leading LLM serving systems [ 13 , 32 ] often evenly distribute the attention heads of an attention module on different GPUs, a deployment mechanism we call Head-parallelism 
+
+(or HP, which is a special form of the classical Tensor Parallelism). Meanwhile, from the algorithm perspective, sparse attention is a popular optimization technique in the literature [ 10 , 21 , 27 , 31 ]. 
+
+> ∗Chen Chen is the corresponding author.
+
+Specifically, the attention operation has inherent sparsity, meaning that each query vector essentially interacts with only a subset of the key vectors; sparse attention can thus alleviate the attention cost by bypassing the attention computation of insignificant query-key pairs. Moreover, in determining the number of tokens to select in attention computation, existing sparse-attention methods typically rely on a fixed token budget (i.e., adopting the top-𝑘 policy where 𝑘 
+
+is the selected token number) [10, 27], which is uniformly applied to all the attention heads. However, in attaining high attention efficiency while still preserv-ing the accuracy quality, we find that enforcing a uniform sparsity budget across different heads is far from optimal. In fact, our testbed measurements (Figure 3) show that the attention heads of a Trans-former layer usually exhibit diverse sparsity levels (i.e., with diverse relationship shapes between the overall attention weight and the sparsity budget). In that case, enforcing a uniform token budget would lead to redundant computations on some (high-sparsity) heads, yet at the same time incur large attention loss on other (low-sparsity) heads. Recently, some works [ 15 , 29 ] have proposed the top-𝑝 method to implicitly handle such sparsity heterogeneity, which adaptively determines the token budget for each head—such that the total attention weight of its computed query-key pairs reaches a preset threshold 𝑝 . Nonetheless, such a top-𝑝 method requires costly analysis of the attention map, and is often inaccu-rate in determining the attention participants [ 15 ]. Besides, when attention heads have different sparsity budgets, the attention com-putation time on different GPUs would be inconsistent, suffering resource wastage due to the synchronization barriers. Motivated by the above discussions, in this paper we present 
+
+Sparsity-aware Head Parallelism Load Balance (S-HPLB ), a system-algorithm co-designed mechanism to improve the end-to-end at-tention serving efficiency while maintaining high accuracy. From the algorithm aspect, we first observe that, despite the cross-head sparsity heterogeneity, on each head the sparsity pattern is however stable across different use cases that have diverse input lengths and tasks; this makes it possible to conduct per-head sparsity modeling in an offline manner. Besides, given an expected sparsification ratio (i.e., the 𝑘 budget) and the profiled per-head sparsity pattern, we propose to better off the low-sparsity heads with cross-head budget shifting, so as to enhance the accuracy performance without inflat-ing the overall computation amount. Moreover, from the system aspect, with the algorithm-side sparsity budgets, we model the head deployment problem as a classical multiway partitioning problem, and propose a greedy heuristic to minimize the resource wastage caused by cross-GPU load inconsistency. We evaluate both the accuracy and efficiency of S-HPLB on three leading open source LLMs, running the widely adopted RULER benchmark [ 9] on a server equipped with eight A100 GPUs. Ex-perimental results show that, compared to state-of-the-art sparse-attention algorithms, S-HPLB improves the model accuracy and      
+
+> arXiv:2603.10353v1 [cs.DC] 11 Mar 2026 Di Liu, Yifei Liu, Chen Chen ∗, Zhibin Yu †, Xiaoyi Fan ‡, Quan Chen, Minyi Guo Head 0
+> Head 1
+> Head 2
+> Head 3
+> +
+> FFN
+> “A
+> ns
+> Tokens
+> BC“
+> Attn Head 0
+> Attn Head 1
+> Attn Head 2
+> Attn Head 3
+> GPU 1GPU 2
+> FFN
+
+Figure 1: Illustration of the attention head parallelism. 
+
+attention latency by up to 5.34% and 2.88 ×, respectively. Further deep-dive studies demonstrate that, S-HPLB operates consistently on the Pareto frontier of the latency-accuracy skyline. Meanwhile, the head parallel load balancer itself reduces latency by 1.26 ×.
+
+## 2 Background and Motivation 2.1 Attention in LLM Inference 
+
+A critical operation of LLM inference is self-attention. Given an input of 𝑛 tokens, self-attention first transforms them into three matrices: query 𝑄 , key 𝐾 , and value 𝑉 . Using the query and key, the attention weight 𝐴 is derived and the output 𝑂 is computed as the weighted sum over the value 𝑉 :
+
+𝐴 = Softmax ( 𝑄 × 𝐾 𝑇 
+
+√𝑑 ), 𝑂 = 𝐴 × 𝑉 (1) In mainstream attention architectures such as Multi-Head Atten-tion (MHA) and Group-Query Attention (GQA) [ 1], the attention operation is typically composed of multiple modules, each known as an attention head (e.g., 32 heads for the Llama-3.1-8B model). Each head independently performs self-attention as in Eq. (1) and captures diverse features from different subspaces. The results from all heads are then aggregated to yield the output. Moreover, recent LLMs have demonstrated exceptional perfor-mance in processing long contexts , supporting a wide range of ap-plications like document understanding and repository-level code debugging [ 2, 11 ]. While crucial for capturing relationships within sequences, efficiently serving attention in long-context scenarios remains challenging. In the prefill phase, processing all input to-kens at once incurs quadratic computational complexity, making the attention operation compute-bound. As an illustration, the at-tention operation accounts for over 70% of the total latency when handling a 128K context length input in the Llama-3.1-8B model. In the decoding phase, key-value (KV) cache optimization reduces the complexity to linear, but the operation becomes memory-bound due to frequent memory accesses. In this work, we focus on optimizing the computation cost in the prefill phase, complementing existing studies that optimize decoding attention. 
+
+## 2.2 Distributed Attention Deployment 
+
+Since attention has become a critical bottleneck, existing work has focused on optimizing attention serving through distributed model deployment strategies [ 13 , 23 , 32 , 33 ]. Given the differing computational characteristics between the attention and other op-erations, some studies have proposed attention-FFN disaggregation (AFD) deployment strategies [ 23 , 33 ]. AFD makes optimizing at-tention serving efficiency as the sole objective possible. For the Query  
+
+> Key
+> Attention Score Attention Weights
+> Value
+> Output
+
+Figure 2: Illustration of the sparse attention workflow. 
+
+attention operation itself, current serving systems primarily opti-mize inference latency through tensor parallelism. As discussed in Section 2.1, the multi-head nature of attention is inherently suit-able for parallelization. Therefore, as shown in Figure 1, leading serving systems [ 13 , 32 ] typically employ head parallelism (HP) for attention to improve serving quality. 
+
+## 2.3 Sparse Attention 
+
+Apart from the system-side distributed attention deployment, sparse attention, as an algorithm-side optimization technique, is also widely adopted for fast attention computation [ 4, 10 , 16 , 21 , 27 , 29 , 30 ]. Sparse attention leverages the inherent sparsity of the attention mechanism to alleviate the quadratic complexity. As illustrated in Figure 2, this sparsity arises naturally from the weighted average in attention computation, where only the value vectors associated with high attention weights contribute most significantly to the attention output. For example, Liu et al. [ 16 ] reports that the top-1% of the total tokens account for 89% of the overall attention weight. Ideally, if a proper number of most-significant query-key pairs are selected in attention calculation, the inference process can be substantially accelerated with negligible accuracy degradation. For example, some works observe structure sparsity patterns of the attention map in prefill phase and accordingly optimize the quadratic computation overhead. StreamingLLM [ 28 ] proposes to only compute the initial and recent tokens in the context window, and MInference [ 10 ] combines different sparsity patterns (e.g., local window, vertical-slash and block sparse) when selecting the token candidates for attention computation. Despite with different selec-tion principles, all those works rely on a critical hyperparameter— the token budget ( 𝑘 )—to specify the ultimate number of tokens that participate in attention computation on each attention head. 
+
+## 2.4 Cross-head Sparsity Heterogeneity 
+
+While the above sparse-attention works enforce an identical token budget on each head, we find that different attention heads of an LLM model often exhibit heterogeneous sparsity characteristics. That is, some attention heads require only a small number of tokens to recover high attention weight (i.e., 𝐴 in Eq. (1) ), while others do not. To confirm, we quantify the attention sparsity by calculating the cumulative sum of attention weight of top-𝑘 critical tokens. This cumulative sum, called recovery ratio, indicates how much of the full attention can be recovered using a small number of critical tokens (a higher recovery ratio reflects a larger sparsity). When processing a 32K context-length input (from PG-19 [ 20 ]) using the S-HPLB : Efficient LLM Attention Serving via Sparsity-Aware Head Parallelism Load Balance 1 5 10 15 20 25 30 
+
+> Head
+> 1510 15 20 25 30
+> Layer
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+
+Figure 3: Heterogeneity of at-tention weight recovery ratio across different heads. 1 5 10 15 20 25 30 
+
+> Sorted Head Index
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Normalized Budget  Layer 1
+> Layer 10
+> Layer 20
+> Layer 30
+
+Figure 4: Normalized budget for each head across multiple layers. 
+
+Llama-3.1-8B model, we profile the recovery ratio for the top-𝑘 
+
+(k=4096) tokens across different attention heads. As shown in Fig-ure 3, there exists considerable heterogeneity in the recovery ratio of different attention heads. Such heterogeneity is also corroborated by some recent works [25, 26]. Given the existence of cross-head sparsity heterogeneity, it would be suboptimal to enforce a uniform token budget 𝑘 on each atten-tion head. When 𝑘 is set too high, it leads to excessive budget allocation for sparser heads, resulting in redundant computations; conversely, when 𝑘 is too low, it allocates insufficient budget to less sparse heads, resulting in compromised accuracy. Recently, some works have proposed top-𝑝 strategy [ 15 , 29 ] to implicitly handle cross-head heterogeneity, where each attention head includes all the significant tokens whose cumulative attention weight exceeds a certain threshold 𝑝 . While this top-𝑝 method can attain relatively good accuracy performance by adaptively adjust-ing the number of tokens in attention computation, it nonetheless has significant deficiencies. First, it incurs large analysis overheads to transfer the top-𝑝 objective to the specific token candidates. Un-like top-𝑘 methods, which only require ordinal information, the threshold-based top-𝑝 method demands more precise (often inacces-sible) online estimation of varying token importance. Meanwhile, when allowing each head to have a distinct token budget, the at-tention computation amount across different heads—and further across different GPUs in HP—would be inconsistent. We sample the number of tokens required for each head across several layers at 𝑝 = 0.9, and the results are shown in Figure 4. This demonstrates a significant variation in the budget required by different heads to meet the same threshold. Since the downstream FFN module cannot be launched before the completion of all the heads’ attention computation, this would incur remarkable resource wastage at the module barriers. To summarize, while different attention heads have heteroge-neous sparsity characteristics, it is however a non-trivial task to leverage such cross-head attention heterogeneity for efficient and accurate attention serving. On the one hand, we need to precisely determine the token (key vector) candidates for sparsified attention computation on each head—so as to make substantial reduction on the overall computation amount. On the other hand, we need to minimize the resource wastage caused by inconsistent computation loads on different GPU devices. We address the two challenges in the next section. Head      
+
+> 1
+> Head
+> 3
+> Head
+> 2
+> Head
+> 4
+> Original Deployment
+> Optimized Deployment
+> Head
+> 1
+> Head
+> 2
+> Head
+> 3
+> Head
+> 4
+> Sparsity
+> Profiling
+> Budget
+> Allocation
+> Problem
+> Formulation
+> Greedy
+> Solution
+> Dense
+> Head
+> Sparse
+> Head
+> GPU 0GPU 1
+> Head Parallel
+> Load Balance
+> 2
+> Adaptive Head
+> Budget Allocation
+> 1
+
+Figure 5: Architecture of S-HPLB .
+
+## 3 S-HPLB Design 3.1 Architecture Overview 
+
+In this work, we propose S-HPLB (Sparsity-Aware Head-Parallel Load Balancing), a novel system-algorithm co-designed framework for efficient LLM attention serving. S-HPLB is tailored to strike an optimal balance between accuracy performance and computation efficiency. Figure 5 illustrates the system architecture of S-HPLB ,which comprises two core components: 1 : Adaptive head budget allocation. It profiles the heterogeneous sparsity patterns of indi-vidual attention heads across diverse inputs via offline profiling, and then adaptively distributes computational budgets across the heads using a max–min optimization strategy. 2 : Head parallel load balance. It formulates the head-to-device assignment as a mul-tiway partitioning problem, and minimizes the inter-device load imbalance with a greedy algorithm. 
+
+## 3.2 Adaptive Head Budget Allocation 
+
+Stability of per-head sparsity characteristics. As detailed in Section 2.4, cross-head sparsity heterogeneity demonstrates the necessity of allocating differentiated token budgets across heads to balance accuracy preservation and computation reduction. How-ever, existing top-𝑝 methods rely on online token significance anal-ysis, which significantly exacerbates inference latency. Fortunately, our empirical findings reveal that, despite the variation in the spar-sity of different heads, the relative sparsity of individual attention heads exhibits notable cross-request stability. In other words, the proportion of tokens required to recover a significant portion of the attention weight for each head is highly stable across different contexts or batches, even though the absolute number of tokens may vary. We perform experiments using the Llama-3.1-8B model on a se-ries of calibration datasets [ 9]. Specifically, we carefully adjust the budget required for each attention head to reach a specified atten-tion weight recovery ratio of 0.9 (across various context lengths and task domains, including classification, generation, and reasoning). The results presented in Figure 6 demonstrate that the sparsity ratio for each attention head remains highly stable across different input datasets. This consistency across diverse tasks and context lengths suggests that the sparsity behavior of attention heads generalizes well, rather than being specific to a particular scenario. This find-ing is also corroborated by several existing studies [ 25 ]. Therefore, Di Liu, Yifei Liu, Chen Chen ∗, Zhibin Yu †, Xiaoyi Fan ‡, Quan Chen, Minyi Guo 1 5 10 15 20 25 30        
+
+> Sorted Head Index
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> Normalized Budget
+> Length 16K
+> Length 32K
+> Length 64K
+> 1510 15 20 25 30
+> Sorted Head Index
+> 0.6
+> 0.8
+> 1.0
+> Normalized Budget
+> s1
+> mk1
+> fwe
+> (a) Different context lengths (b) Different tasks
+
+Figure 6: Normalized budget required by different heads to achieve a fixed attention weight recovery ratio under inputs of varying context lengths and tasks. 
+
+offline profiling on a calibration dataset can provide valuable in-sights for determining the sparsity level of each attention head and precomputing the optimal budget for each head. 
+
+Max-min sparsity budget shifting. We introduce an efficient algorithm for budget allocation across attention heads using the max-min strategy. Top-𝑝 methods approximate the accuracy of full attention by including tokens with cumulative attention weights above a threshold. However, it is challenging to precisely find the best token candidates that in total yield the desired 𝑝 attention score, making the top-𝑝 method computationally inefficient and also inaccurate [ 15 ]. To achieve both efficiency and high accuracy, we propose an algorithm that approximates top-𝑝 accuracy within a fixed computational amount, using a budget allocation strategy based on the max-min principle. The core idea is to iteratively ad-just the budget allocation across attention heads, assigning more resources to heads with lower sparsity while reducing redundant computation for sparser heads. This approach strikes a balance be-tween efficiency and accuracy, ensuring effective budget utilization while maintaining performance close to top-𝑝 .The budget allocation algorithm proceeds in several stages. As illustrated in Figure 7, each attention head is first assigned an equal budget, while their attention-weight recovery ratios may differ (hollow circles). The algorithm then iteratively transfers budget from the head with the highest sparsity to the one with the low-est sparsity. This adjustment continues until one of the following conditions is reached: (i) additional reallocation no longer yield benefits (dashed line), indicating that the budget-providing head has become the new minimum; or (ii) no further budget can be extracted because all attention heads have reached a predefined lower bound (typically a small value such as 128). However, allocating different budgets to attention heads intro-duces cross-GPU load imbalance. Existing head-parallel (HP) meth-ods assume that all attention heads have equal computational cost and thus assign them sequentially. Differentiated budget allocation breaks this assumption, leading to uneven computational loads. Fig-ure 8 shows the load imbalance observed when a specific layer of the Llama-3.1-8B model is naively distributed across 4 GPUs, with similar patterns appearing in other layers. The imbalance can be as high as 2.78 ×, highlighting the need for a more effective load balance strategy to ensure consistent computation times across devices and improve overall resource utilization. r
+
+## 2. 计
+
+## t
+
+## 3. 寻
+
+## 4. 如
+
+## ⼤   
+
+> Budget
+> Recover
+> Budget
+> Recovery  Ratio
+> Head AHead B
+
+Figure 7: Illustration of the iterative max–min budget al-location process. 0.0 0.2 0.4 0.6 0.8 1.0  
+
+> Normalized Computation Load
+> D1
+> D2
+> D3
+> D4
+> GPU Device
+> 1.0
+> 0.88
+> 0.36
+> 0.64
+> Computation Idle
+
+Figure 8: Load imbalance aris-ing from naive head parallel attention deployment. 
+
+## 3.3 Head Parallel Load Balance 
+
+In Section 3.2, we design an adaptive budget allocation mecha-nism to strike an optimal trade-off between accuracy and efficiency. However, computational inconsistency across heads may lead to substantial GPU idleness, as faster GPUs are forced to wait for straggler devices to complete their computations. Therefore, in this section, we first formulate the load balancing optimization prob-lem and subsequently present an efficient greedy algorithm, Head Parallel Load Balance, to resolve cross-GPU load inconsistency. 
+
+Problem formulation. To address the load imbalance issue, we formulate an optimization problem to efficiently allocate atten-tion heads across multiple devices. Given a set of attention heads 
+
+𝐻 = {ℎ1, ℎ 2, . . . , ℎ 𝑁 } with corresponding budgets 𝑏 ℎ1 , 𝑏 ℎ2 , . . . , 𝑏 ℎ𝑁 .Let 𝐷 represent the set of devices, and 𝐻 𝑑 ∈ 𝐻 be the subset of heads assigned to device 𝑑 ∈ 𝐷 . The optimization problem can be formulated as follows: 
+
+min   
+
+> {𝐻 𝑑 }𝑑 ∈𝐷
+
+I = max 𝑑 ∈𝐷 𝐿 𝑑  
+
+> 1
+> |𝐷 |
+
+Í𝑑 ∈𝐷 𝐿 𝑑 
+
+,
+
+s.t. 𝐿 𝑑 =∑︁ 
+
+> ℎ∈𝐻 𝑑
+
+𝑏 ℎ, ∀𝑑 ∈ 𝐷, 
+
+Ø 
+
+> 𝑑 ∈𝐷
+
+𝐻 𝑑 = 𝐻, 𝐻 𝑑 1 ∩ 𝐻 𝑑 2 = ∅, ∀𝑑 1 ≠ 𝑑 2,
+
+(2) where 𝐿 𝑑 denotes the total load of the device 𝑖 . Our objective is to minimize the load imbalance ratio I, subject to the constraint that each head is assigned to exactly one device. 
+
+A greedy heuristic for efficient problem solving. This atten-tion head deployment problem is essentially an NP-hard multiway partitioning problem [ 5]. Although exact algorithms such as dy-namic programming guarantee an optimal solution, their state space grows exponentially with the number of devices |𝐷 | and the upper budget bound 𝐿 , with a complexity of 𝑂 (𝑁 · 𝐿 |𝐷 | − 1). This makes them computationally infeasible when either 𝐷 or 𝐿 is large. There-fore, we employ an efficient greedy algorithm to solve this problem. The algorithm begins by sorting attention heads in descending or-der of their budgets. Each attention head is then assigned to the device with the currently smallest load. This process continues until all heads have been allocated. The greedy approach minimizes the load imbalance by prioritizing the allocation of the most demanding heads first, ensuring a balanced load distribution. This algorithm S-HPLB : Efficient LLM Attention Serving via Sparsity-Aware Head Parallelism Load Balance 
+
+Table 1: Performance (%) comparison of different models and methods on RULER. S-HPLB outperforms all other methods and maintains accuracy comparable to that of full attention across all models. 
+
+Methods NS1 NS2 NS3 MK1 MK2 MK3 MV MQ VT CWE FWE QA1 QA2 Avg. 
+
+> Llama-3.1-8B
+
+Full Attention 100.00 100.00 99.00 99.00 87.00 58.00 91.50 97.75 90.00 0.00 51.67 76.00 43.00 76.38 StreamingLLM 93.00 48.00 38.00 32.00 6.00 0.00 35.75 33.75 68.60 0.10 58.67 16.00 24.00 34.91 MInference 99.00 97.00 100.00 95.00 78.00 33.00 84.25 94.00 79.00 0.20 52.33 65.00 40.00 70.52 XAttention 100.00 100.00 99.00 97.00 84.00 44.00 92.50 97.50 89.20 0.20 49.33 56.00 44.00 73.29 
+
+S-HPLB 100.00 99.00 100.00 95.00 86.00 63.00 86.75 96.50 86.80 0.50 58.67 72.00 42.00 75.86 
+
+> Qwen2.5-7B
+
+Full Attention 100.00 100.00 92.00 93.00 49.00 17.00 69.50 86.25 83.80 37.70 62.76 50.00 36.00 67.46 StreamingLLM 77.00 84.00 88.00 27.00 4.00 1.00 45.25 34.25 23.40 10.80 73.00 11.00 21.00 38.44 MInference 100.00 96.00 96.00 90.00 47.00 5.00 59.00 81.50 72.60 20.90 66.00 36.00 33.00 61.77 XAttention 100.00 100.00 95.00 84.00 22.00 13.00 69.00 90.75 75.60 37.50 64.00 35.00 39.00 63.45 
+
+S-HPLB 100.00 100.00 96.00 94.00 59.00 11.00 67.00 90.50 70.60 30.10 63.00 38.00 40.00 66.09 
+
+> Qwen2.5-72B
+
+Full Attention 100.00 100.00 98.00 100.00 82.00 28.00 96.50 100.00 100.00 92.80 86.67 54.00 50.00 83.69 StreamingLLM 10.00 26.00 92.00 26.00 6.00 0.00 9.50 48.50 4.40 3.00 87.50 18.00 24.00 27.30 MInference 100.00 100.00 100.00 92.00 74.00 38.00 90.50 99.50 85.20 74.00 86.81 42.00 54.00 79.69 XAttention 100.00 100.00 98.00 96.00 58.00 20.00 93.00 98.00 96.00 88.80 87.50 46.00 58.00 79.95 
+
+S-HPLB 100.00 100.00 100.00 98.00 80.00 48.00 92.00 100.00 82.80 79.00 85.42 34.00 48.00 80.56 
+
+has a relatively low time complexity of 𝑂 (𝑁 log 𝑁 + 𝑁 log 𝐾 ), mak-ing it suitable for adoption in practice. 
+
+## 4 Implementation 
+
+S-HPLB is implemented with 1.6K lines of Python code on top of an existing sparse attention framework, MInference [ 10 ]. Since S-HPLB focuses on adaptive budget allocation for different attention heads, we build upon the sparse pattern kernels from MInference. 
+
+S-HPLB extends the adaptive head budget allocation algorithm and incorporates a sparsity-aware attention head deployment strategy to achieve load balance in head-parallel scenario. 
+
+## 5 Evaluation 
+
+In this section, we comprehensively evaluate S-HPLB , comparing it with full attention and other state-of-the-art sparse attention methods on different models and tasks. 
+
+## 5.1 Experimental Setup 
+
+Models and benchmark. We evaluate S-HPLB primarily on three leading open-source LLMs: Llama-3.1-8B [ 17 ], Qwen2.5-7B [ 19 ], and Qwen2.5-72B [ 18 ]. All models support a context window of up to 128K tokens. Moreover, we include the Llama-3-8B-262K model [ 7 ] in our evaluation to assess efficiency and scalability in scenarios with longer contexts. We evaluate model accuracy on the widely-used long-context benchmark, RULER [ 9 ], which is designed to challenge sparse attention methods. RULER consists of four categories and thirteen tasks, including retrieval, multi-hop tracing, aggregation, and QA, with context lengths of up to 128K. 
+
+Hardware testbed. All experiments were conducted on a single server equipped with an Intel Xeon Platinum 8369B CPU and eight NVIDIA A100 80GB GPUs connected via NVLink. The server runs CentOS 7 with CUDA 12.4 and torch 2.6.0. 
+
+Baselines. We compare S-HPLB against several strong baselines representing the state-of-the-art in efficient LLM inference. For full attention baseline we run FlashAttention [ 6]. For sparse at-tention, we select representative methods from two categories: (1) Top-𝑘 methods: StreamingLLM [ 27 ] and MInference [ 10 ]. These methods rely on a predefined computational budget, but differ in how the budget is allocated: StreamingLLM adopts an initial and tail local window, while MInference employs three distinct sparse attention patterns. (2) Top-𝑝 method: XAttention [ 29 ]. This method dynamically determines the budget at runtime to ensure the cumu-lative attention weight meets a predefined threshold. We set the hyperparameter for all methods according to original papers. 
+
+Metrics. We evaluate S-HPLB based on two primary metrics: model accuracy and average attention serving latency (in time to first token). These metrics reflect S-HPLB ’s performance from both the algorithmic and system perspectives. 
+
+## 5.2 End-to-End Results 
+
+This section provides a comparative analysis of various attention mechanisms, aiming to demonstrate the accuracy and efficiency of 
+
+S-HPLB in comparison to existing methods. 
+
+Accuracy. Table 1 shows the model accuracy of various methods on the RULER benchmark. S-HPLB consistently outperforms the other sparse-attention methods and matches 1 the average accuracy of full attention. S-HPLB experiences only a drop of 0.52%/1.37%/3.13% compared to full attention on Llama3.1-8B/Qwen2.5-7B/Qwen2.5-72B, respectively. When compared to the best-performing sparse attention baseline XAttention, S-HPLB achieves accuracy improve-ments of 2.57%/2.94%/0.61% on each model, respectively. Intuitively, the top-𝑝 method should achieve the best accuracy. However, in practice, due to the inaccurate and computationally expensive esti-mation of attention weights, its performance is suboptimal.              
+
+> 1Not that for certain tasks (e.g., MK3 on Llama3.1-8B, and also for some points in later Figure 10), S-HPLB achieves even higher accuracy than the full attention mechanism. This improvement can be attributed to S-HPLB ’s ability to filter out noise and help the model concentrate on critical tokens. Other sparse attention studies have also reported this phenomenon [3]. Di Liu, Yifei Liu, Chen Chen ∗, Zhibin Yu †, Xiaoyi Fan ‡, Quan Chen, Minyi Guo HP = 2 HP = 4 HP = 8
+> Parallelism
+> 5
+> 10
+> Attention Latency (s)
+> (a) Llama-3.1-8B
+> HP = 2 HP = 4 HP = 7
+> Parallelism
+> 5
+> 10
+> (b) Qwen2.5-7B
+> HP = 2 HP = 4 HP = 8
+> Parallelism
+> 10
+> 20
+> 30
+> OOM
+> (c) Qwen2.5-72B
+> Full Attention StreamingLLM MInference XAttention S-HPLB
+
+Figure 9: Latency of attention serving across models with 128K input. S-HPLB outperforms the top-𝑝 method and achieves comparable performance to the top-𝑘 method. 0.3 0.4 0.5   
+
+> Normalized Latency
+> 0
+> 50
+> Accuracy (%)
+> (a) Llama-3.1-8B
+> 0.3 0.4 0.5
+> Normalized Latency
+> 25
+> 50
+> Accuracy (%)
+> (b) Qwen2.5-7B
+> Full Attention
+> StreamingLLM
+> MInference
+> XAttention
+> S-HPLB
+
+Figure 10: Accuracy-latency trade-off (Skyline) across various methods on two models. Attention latency. We evaluate the attention serving latency across different models and degrees of parallelism under a 128K con-text length. As shown in Figure 9, S-HPLB achieves 3.39 ×/4.27 ×/3.31 ×
+
+lower latency than full attention on the three evaluated models. In comparison with sparse attention baselines, S-HPLB reduces la-tency by 2.09 ×/2.22 ×/2.88 × relative to XAttention. Benefited from head-parallel load balancing, S-HPLB also attains latency on par with top-𝑘 methods. 
+
+## 5.3 Sensitivity Study 
+
+For a better understanding of S-HPLB , we further analyze how varying the configurations impacts overall performance. For top-𝑘 -based methods, we vary the uniform budget 𝑘 , while for top-𝑝 -based methods, we adjust the threshold 𝑝 . For S-HPLB , we modify the total budget across all heads. These settings directly control the sparsity level. We evaluate the performance of all methods on the challenging MK2 task from the RULER benchmark [ 9 ] using two different models. Figure 10 shows the curves between latency (nor-malized by the latency of full attention) and accuracy for various methods. Compared to other baselines, S-HPLB consistently occu-pies a more favorable position on the Pareto frontier, offering a better trade-off between accuracy and efficiency. 
+
+## 5.4 Ablation Study 
+
+To check the effectiveness of our head parallel load balancer, we experiment respectively with and without the load balancer. We measure the attention latency across different degrees of paral-lelism with a fixed context length of 128K using the Llama-3.1-8B TP=2 TP=4 TP=8    
+
+> Parallelism
+> 0
+> 2
+> 4
+> Attn. Latency (s)
+> (a) Various Parallelisms
+> S-HP S-HPLB
+> 64 128 256
+> Context Length (K)
+> 0
+> 2
+> 4
+> Attn. Latency (s)
+> (b) Various Context Lengths
+
+Figure 11: Impact of head parallel load balance under differ-ent parallelism degrees and context lengths. 
+
+model. Additionally, we evaluate latency across different context lengths with a parallelism degree of 4. As shown in Figure 11, the load balancer consistently reduces latency across all configurations. Across different parallelism degrees and context lengths, it achieves a latency reduction of up to 1.19 × and 1.26 ×, respectively. 
+
+## 6 Related Work 
+
+Attention acceleration. Recent research has explored various strategies to improve the efficiency of attention mechanisms [ 6, 8,12 , 13 ]. System optimization techniques include FlashAttention [ 6 ], which accelerates attention computation by optimizing memory access patterns, and PagedAttention [ 13 ], which addresses mem-ory fragmentation through a paged management approach. On the other hand, algorithmic optimization has been explored in several works [ 8, 12 ], which propose alternative efficient attention meth-ods. These efforts are complementary to S-HPLB , which further enhances attention serving efficiency. 
+
+## 7 Conclusion 
+
+This paper presents S-HPLB , a system-algorithm co-designed mech-anism to improve the attention serving efficiency while maintaining high accuracy. S-HPLB leverages the sparsity stability of attention heads and introduces a novel adaptive head budget allocation algo-rithm. It further mitigates tail latency stemming from cross-GPU load inconsistency by employing head parallel load balance. Exper-imental results show that S-HPLB achieves an optimal trade-off between latency and accuracy, consistently operating on the Pareto frontier compared to the state-of-the-art sparse attention baselines. S-HPLB : Efficient LLM Attention Serving via Sparsity-Aware Head Parallelism Load Balance 
+
+## References 
+
+[1] Joshua Ainslie, James Lee-Thorp, Michiel de Jong, Yury Zemlyanskiy, Federico Lebrón, and Sumit Sanghai. 2023. GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing, EMNLP 2023, Singapore, December 6-10, 2023 .[2] Ramakrishna Bairi, Atharv Sonwane, Aditya Kanade, Vageesh D. C., Arun Iyer, Suresh Parthasarathy, Sriram K. Rajamani, Balasubramanyan Ashok, and Shashank Shet. 2024. CodePlan: Repository-Level Coding using LLMs and Plan-ning. Proc. ACM Softw. Eng. (2024). [3] Yaoqi Chen, Jinkai Zhang, Baotong Lu, Qianxi Zhang, Chengruidong Zhang, Jingjia Luo, Di Liu, Huiqiang Jiang, Qi Chen, Jing Liu, Bailu Ding, Xiao Yan, Jiawei Jiang, Chen Chen, Mingxing Zhang, Yuqing Yang, Fan Yang, and Mao Yang. 2025. RetroInfer: A Vector-Storage Approach for Scalable Long-Context LLM Inference. arXiv preprint arXiv:2505.02922 (2025). [4] Zhuoming Chen, Ranajoy Sadhukhan, Zihao Ye, Yang Zhou, Jianyu Zhang, Niklas Nolte, Yuandong Tian, Matthijs Douze, Léon Bottou, Zhihao Jia, and Beidi Chen. 2025. MagicPIG: LSH Sampling for Efficient LLM Generation. In The Thirteenth International Conference on Learning Representations, ICLR 2025 .[5] Jason Cong and Sung Kyu Lim. 1998. Multiway partitioning with pairwise movement. In Proceedings of the 1998 IEEE/ACM international conference on Computer-aided design .[6] Tri Dao, Daniel Y Fu, Stefano Ermon, Atri Rudra, and Christopher Re. 2022. FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness. In Advances in Neural Information Processing Systems .[7] gradient. 2024. Llama-3-8B-Instruct-262k. https://huggingface.co/gradientai/ Llama-3-8B-Instruct-262k. [8] Albert Gu and Tri Dao. 2024. Mamba: Linear-Time Sequence Modeling with Selective State Spaces. In First Conference on Language Modeling .[9] Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shantanu Acharya, Dima Rekesh, Fei Jia, and Boris Ginsburg. 2024. RULER: What’s the Real Context Size of Your Long-Context Language Models?. In First Conference on Language Modeling .[10] Huiqiang Jiang, Yucheng Li, Chengruidong Zhang, Qianhui Wu, Xufang Luo, Surin Ahn, Zhenhua Han, Amir H. Abdi, Dongsheng Li, Chin-Yew Lin, Yuqing Yang, and Lili Qiu. 2024. MInference 1.0: Accelerating Pre-filling for Long-Context LLMs via Dynamic Sparse Attention. In Annual Conference on Neural Information Processing Systems 2024, NeurIPS 2024 .[11] Carlos E. Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, and Karthik R. Narasimhan. 2024. SWE-bench: Can Language Models Resolve Real-world Github Issues?. In The Twelfth International Conference on Learning Representations, ICLR 2024 .[12] Angelos Katharopoulos, Apoorv Vyas, Nikolaos Pappas, and François Fleuret. 2020. Transformers are RNNs: Fast Autoregressive Transformers with Linear Attention. In Proceedings of the 37th International Conference on Machine Learning, ICML 2020, 13-18 July 2020, Virtual Event .[13] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. In Proceedings of the 29th Symposium on Operating Systems Principles, SOSP 2023, Koblenz, Germany, October 23-26, 2023 .[14] Tianle Li, Ge Zhang, Quy Duc Do, Xiang Yue, and Wenhu Chen. 2025. Long-context LLMs Struggle with Long In-context Learning. Trans. Mach. Learn. Res. 
+
+(2025). [15] Chaofan Lin, Jiaming Tang, Shuo Yang, Hanshuo Wang, Tian Tang, Boyu Tian, Ion Stoica, Song Han, and Mingyu Gao. 2025. Twilight: Adaptive Attention Spar-sity with Hierarchical Top-$p$ Pruning. In The Thirty-ninth Annual Conference on Neural Information Processing Systems .[16] Di Liu, Meng Chen, Baotong Lu, Huiqiang Jiang, Zhenhua Han, Qianxi Zhang, Qi Chen, Chengruidong Zhang, Bailu Ding, Kai Zhang, Chen Chen, Fan Yang, Yuqing Yang, and Lili Qiu. 2025. RetrievalAttention: Accelerating Long-Context LLM Inference via Vector Retrieval. In The Thirty-ninth Annual Conference on Neural Information Processing Systems .[17] Meta. 2024. Llama-3.1-8B-Instruct. https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct. [18] Meta. 2024. Qwen2.5-72B-Instruct. https://huggingface.co/Qwen/Qwen2.5-72B-Instruct. [19] Qwen. 2024. Qwen2.5-7B-Instruct. https://huggingface.co/Qwen/Qwen2.5-7B-Instruct. [20] Jack W. Rae, Anna Potapenko, Siddhant M. Jayakumar, Chloe Hillier, and Tim-othy P. Lillicrap. 2020. Compressive Transformers for Long-Range Sequence Modelling. In International Conference on Learning Representations .[21] Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao, Baris Kasikci, and Song Han. 2024. QUEST: Query-Aware Sparsity for Efficient Long-Context LLM Inference. In Forty-first International Conference on Machine Learning, ICML 2024 .[22] XDS Team. 2025. xDeepServe: Model-as-a-Service on Huawei CloudMatrix384. arXiv:2508.02520 [cs.DC] https://arxiv.org/abs/2508.02520 [23] Bin Wang, Bojun Wang, Changyi Wan, Guanzhe Huang, Hanpeng Hu, Haonan Jia, and Nie Hao. 2025. Step-3 is Large yet Affordable: Model-system Co-design for Cost-effective Decoding. CoRR (2025). [24] Minzheng Wang, Longze Chen, Fu Cheng, Shengyi Liao, Xinghua Zhang, Bingli Wu, Haiyang Yu, Nan Xu, Lei Zhang, Run Luo, Yunshui Li, Min Yang, Fei Huang, and Yongbin Li. 2024. Leave No Document Behind: Benchmarking Long-Context LLMs with Extended Multi-Doc QA. In Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing, EMNLP 2024, Miami, FL, USA, November 12-16, 2024 .[25] Wenhao Wu, Yizhong Wang, Guangxuan Xiao, Hao Peng, and Yao Fu. 2025. Re-trieval Head Mechanistically Explains Long-Context Factuality. In The Thirteenth International Conference on Learning Representations, ICLR 2025 .[26] Guangxuan Xiao, Jiaming Tang, Jingwei Zuo, junxian guo, Shang Yang, Haotian Tang, Yao Fu, and Song Han. 2025. DuoAttention: Efficient Long-Context LLM Inference with Retrieval and Streaming Heads. In The Thirteenth International Conference on Learning Representations .[27] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient Streaming Language Models with Attention Sinks. In The Twelfth Inter-national Conference on Learning Representations, ICLR 2024 .[28] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient Streaming Language Models with Attention Sinks. In The Twelfth Inter-national Conference on Learning Representations .[29] Ruyi Xu, Guangxuan Xiao, Haofeng Huang, Junxian Guo, and Song Han. 2025. XAttention: Block Sparse Attention with Antidiagonal Scoring. arXiv preprint arXiv:2503.16428 (2025). [30] Hailin Zhang, Xiaodong Ji, Yilin Chen, Fangcheng Fu, Xupeng Miao, Xiaonan Nie, Weipeng Chen, and Bin Cui. 2025. PQCache: Product Quantization-based KVCache for Long Context LLM Inference. Proc. ACM Manag. Data (2025). [31] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark W. Barrett, Zhangyang Wang, and Beidi Chen. 2023. H2O: Heavy-Hitter Oracle for Efficient Generative Inference of Large Language Models. In Advances in Neural Information Processing Systems 36: Annual Conference on Neural Information Processing Systems 2023, NeurIPS 2023, New Orleans, LA, USA, December 10 - 16, 2023 .[32] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark W. Barrett, and Ying Sheng. 2024. SGLang: Efficient Execution of Struc-tured Language Model Programs. In Advances in Neural Information Processing Systems 38: Annual Conference on Neural Information Processing Systems 2024, NeurIPS 2024, Vancouver, BC, Canada, December 10 - 15, 2024 .[33] Ruidong Zhu, Ziheng Jiang, Chao Jin, Peng Wu, Cesar A Stuardo, Dongyang Wang, Xinlei Zhang, Huaping Zhou, Haoran Wei, Yang Cheng, et al . 2025. MegaScale-Infer: Efficient Mixture-of-Experts Model Serving with Disaggre-gated Expert Parallelism. In Proceedings of the ACM SIGCOMM 2025 Conference .
