@@ -6,92 +6,127 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-03-12
-- 运行时间：2026-03-12 19:39:16 UTC
+- 最新运行日期：2026-03-13
+- 运行时间：2026-03-13 19:29:06 UTC
 - 运行状态：成功
-- 本次总论文数：24
-- 精读区：13
+- 本次总论文数：35
+- 精读区：24
 - 速读区：11
 
 ### 今日简报（AI）
-今日深度解析 24 篇 AI 论文，重点攻克多模态大模型（VLM）的推理效率与跨模态
-- 详情：[/202603/12/README](/202603/12/README)
+今日精选 35 篇前沿论文，重点突破多模态 Token 压缩与视频理解蒸馏技术。
+UniCompress 实现了视觉语言理解与生成的统一压缩，而多样本蒸馏显著提升了视频理解的可靠性。
+建议关注 1.7B 小参数模型 VisionPangu 及 VLA 模型的自适应推理，探索轻量化与智能决策的平衡。
+- 详情：[/202603/13/README](/202603/13/README)
 
 ### 精读区论文标签
-1. [Prune Redundancy, Preserve Essence: Vision Token Compression in VLMs via Synergistic Importance-Diversity](/202603/12/2603.09480v2-prune-redundancy-preserve-essence-vision-token-compression-in-vlms-via-synergistic-importance-diversity)  
+1. [UniCompress: Token Compression for Unified Vision-Language Understanding and Generation](/202603/13/2603.11320v1-unicompress-token-compression-for-unified-vision-language-understanding-and-generation)  
    标签：评分：10.0/10、query:mc
-   evidence：VLM中的视觉Token压缩与剪枝
-2. [From Images to Words: Efficient Cross-Modal Knowledge Distillation to Language Models from Black-box Teachers](/202603/12/2603.10877v1-from-images-to-words-efficient-cross-modal-knowledge-distillation-to-language-models-from-black-box-teachers)  
+   evidence：统一视觉语言模型的令牌压缩
+2. [Beyond Single-Sample: Reliable Multi-Sample Distillation for Video Understanding](/202603/13/2603.11423v1-beyond-single-sample-reliable-multi-sample-distillation-for-video-understanding)  
    标签：评分：10.0/10、query:mc
-   evidence：从VLM到LLM的跨模态知识蒸馏
-3. [Leech Lattice Vector Quantization for Efficient LLM Compression](/202603/12/2603.11021v1-leech-lattice-vector-quantization-for-efficient-llm-compression)  
+   evidence：针对大型视觉语言模型的多样本蒸馏
+3. [LongFlow: Efficient KV Cache Compression for Reasoning M](/202603/13/2603.11504v1-longflow-efficient-kv-cache-compression-for-reasoning-m)  
    标签：评分：10.0/10、query:mc
-   evidence：用于LLM压缩的矢量量化
-4. [Vector-Quantized Soft Label Compression for Dataset Distillation](/202603/12/2603.03808v1-vector-quantized-soft-label-compression-for-dataset-distillation)  
+   evidence：推理模型的KV缓存压缩
+4. [MedPruner: Training-Free Hierarchical Token Pruning for Efficient 3D Medical Image Understanding in Vision-Language Models](/202603/13/2603.11625v1-medpruner-training-free-hierarchical-token-pruning-for-efficient-3d-medical-image-understanding-in-vision-language-models)  
+   标签：评分：10.0/10、query:mc
+   evidence：用于VLM高效部署的免训练Token剪枝
+5. [Bielik-Minitron-7B: Compressing Large Language Models via Structured Pruning and Knowledge Distillation for the Polish Language](/202603/13/2603.11881v1-bielik-minitron-7b-compressing-large-language-models-via-structured-pruning-and-knowledge-distillation-for-the-polish-language)  
+   标签：评分：10.0/10、query:mc
+   evidence：通过结构化剪枝和知识蒸馏压缩LLM
+6. [ForensicZip: More Tokens are Better but Not Necessary in Forensic Vision-Language Models](/202603/13/2603.12208v1-forensiczip-more-tokens-are-better-but-not-necessary-in-forensic-vision-language-models)  
+   标签：评分：10.0/10、query:mc
+   evidence：取证视觉语言模型的视觉令牌剪枝
+7. [Attend Before Attention: Efficient and Scalable Video Understanding via Autoregressive Gazing](/202603/13/2603.12254v1-attend-before-attention-efficient-and-scalable-video-understanding-via-autoregressive-gazing)  
+   标签：评分：10.0/10、query:mc
+   evidence：通过Patch剪枝实现MLLM高效视频理解
+8. [VLN-Cache: Enabling Token Caching for VLN Models with Visual/Semantic Dynamics Awareness](/202603/13/2603.07080v2-vln-cache-enabling-token-caching-for-vln-models-with-visualsemantic-dynamics-awareness)  
    标签：评分：9.0/10、query:mc
-   evidence：用于数据集蒸馏的矢量量化软标签压缩
-5. [Decoding the Pulse of Reasoning VLMs in Multi-Image Understanding Tasks](/202603/12/2603.04676v1-decoding-the-pulse-of-reasoning-vlms-in-multi-image-understanding-tasks)  
+   evidence：视觉语言导航模型的令牌缓存以降低推理成本
+9. [Shorter Thoughts, Same Answers: Difficulty-Scaled Segment-Wise RL for CoT Compression](/202603/13/2603.07598v1-shorter-thoughts-same-answers-difficulty-scaled-segment-wise-rl-for-cot-compression)  
    标签：评分：9.0/10、query:mc
-   evidence：推理型视觉语言模型的推理时方法
-6. [Does the Question Really Matter? Training-Free Data Selection for Vision-Language SFT](/202603/12/2603.09715v1-does-the-question-really-matter-training-free-data-selection-for-vision-language-sft)  
+   evidence：大语言模型推理链的训练后压缩
+10. [Scaling Test-Time Robustness of Vision-Language Models via Self-Critical Inference Framework](/202603/13/2603.07659v1-scaling-test-time-robustness-of-vision-language-models-via-self-critical-inference-framework)  
    标签：评分：9.0/10、query:mc
-   evidence：视觉语言模型(VLM)的免训练数据选择
-7. [ES-dLLM: Efficient Inference for Diffusion Large Language Models by Early-Skipping](/202603/12/2603.10088v1-es-dllm-efficient-inference-for-diffusion-large-language-models-by-early-skipping)  
+   evidence：大型视觉语言模型（LVLM）的鲁棒性挑战
+11. [DyLLM: Efficient Diffusion LLM Inference via Saliency-based Token Selection and Partial Attention](/202603/13/2603.08026v1-dyllm-efficient-diffusion-llm-inference-via-saliency-based-token-selection-and-partial-attention)  
    标签：评分：9.0/10、query:mc
-   evidence：扩散大语言模型（dLLM）的高效推理
-8. [S-HPLB: Efficient LLM Attention Serving via Sparsity-Aware Head Parallelism Load Balance](/202603/12/2603.10353v1-s-hplb-efficient-llm-attention-serving-via-sparsity-aware-head-parallelism-load-balance)  
+   evidence：利用时间稀疏性和标记选择实现高效LLM推理
+12. [Evolution Strategy-Based Calibration for Low-Bit Quantization of Speech Models](/202603/13/2603.08173v1-evolution-strategy-based-calibration-for-low-bit-quantization-of-speech-models)  
    标签：评分：9.0/10、query:mc
-   evidence：用于高效 LLM 注意力服务的稀疏感知多头并行
-9. [HEAL: Hindsight Entropy-Assisted Learning for Reasoning Distillation](/202603/12/2603.10359v1-heal-hindsight-entropy-assisted-learning-for-reasoning-distillation)  
+   evidence：语音模型的低比特量化
+13. [FVG-PT: Adaptive Foreground View-Guided Prompt Tuning for Vision-Language Models](/202603/13/2603.08708v1-fvg-pt-adaptive-foreground-view-guided-prompt-tuning-for-vision-language-models)  
    标签：评分：9.0/10、query:mc
-   evidence：从大模型中蒸馏推理能力
-10. [The Curse and Blessing of Mean Bias in FP4-Quantized LLM Training](/202603/12/2603.10444v1-the-curse-and-blessing-of-mean-bias-in-fp4-quantized-llm-training)  
+   evidence：用于高效VLM提示微调的蒸馏补偿
+14. [Evolving Prompt Adaptation for Vision-Language Models](/202603/13/2603.09493v1-evolving-prompt-adaptation-for-vision-language-models)  
    标签：评分：9.0/10、query:mc
-   evidence：FP4量化LLM训练及频谱各向异性分析
-11. [DepthCache: Depth-Guided Training-Free Visual Token Merging for Vision-Language-Action Model Inference](/202603/12/2603.10469v1-depthcache-depth-guided-training-free-visual-token-merging-for-vision-language-action-model-inference)  
+   evidence：大规模视觉语言模型（VLM）的适配
+15. [GLM-OCR Technical Report](/202603/13/2603.10910v1-glm-ocr-technical-report)  
    标签：评分：9.0/10、query:mc
-   evidence：视觉语言动作模型的视觉标记压缩
-12. [Taking Shortcuts for Categorical VQA Using Super Neurons](/202603/12/2603.10781v1-taking-shortcuts-for-categorical-vqa-using-super-neurons)  
+   evidence：具有多标记预测的高效紧凑多模态模型
+16. [Scaling Reasoning Efficiently via Relaxed On-Policy Distillation](/202603/13/2603.11137v1-scaling-reasoning-efficiently-via-relaxed-on-policy-distillation)  
    标签：评分：9.0/10、query:mc
-   evidence：视觉语言模型的稀疏注意力向量
-13. [GroundCount: Grounding Vision-Language Models with Object Detection for Mitigating Counting Hallucinations](/202603/12/2603.10978v1-groundcount-grounding-vision-language-models-with-object-detection-for-mitigating-counting-hallucinations)  
+   evidence：用于转移推理能力的在线策略蒸馏
+17. [Frequency-Modulated Visual Restoration for Matryoshka Large Multimodal Models](/202603/13/2603.11220v1-frequency-modulated-visual-restoration-for-matryoshka-large-multimodal-models)  
    标签：评分：9.0/10、query:mc
-   evidence：视觉语言模型接地
+   evidence：多模态大模型的视觉Token缩减
+18. [ReHARK: Refined Hybrid Adaptive RBF Kernels for Robust One-Shot Vision-Language Adaptation](/202603/13/2603.11542v1-rehark-refined-hybrid-adaptive-rbf-kernels-for-robust-one-shot-vision-language-adaptation)  
+   标签：评分：9.0/10、query:mc
+   evidence：大规模视觉语言模型（VLM）的适配
+19. [Where Matters More Than What: Decoding-aligned KV Cache Compression via Position-aware Pseudo Queries](/202603/13/2603.11564v1-where-matters-more-than-what-decoding-aligned-kv-cache-compression-via-position-aware-pseudo-queries)  
+   标签：评分：9.0/10、query:mc
+   evidence：用于大语言模型高效推理的KV缓存压缩
+20. [ZeroSense:How Vision matters in Long Context Compression](/202603/13/2603.11846v1-zerosensehow-vision-matters-in-long-context-compression)  
+   标签：评分：9.0/10、query:mc
+   evidence：多模态大模型视觉文本压缩的评估框架
+21. [Slow-Fast Inference: Training-Free Inference Acceleration via Within-Sentence Support Stability](/202603/13/2603.12038v1-slow-fast-inference-training-free-inference-acceleration-via-within-sentence-support-stability)  
+   标签：评分：9.0/10、query:mc
+   evidence：通过稀疏内存实现免训练推理加速
+22. [Long-Context Encoder Models for Polish Language Understanding](/202603/13/2603.12191v1-long-context-encoder-models-for-polish-language-understanding)  
+   标签：评分：9.0/10、query:mc
+   evidence：通过知识蒸馏训练的压缩模型变体
+23. [IndexCache: Accelerating Sparse Attention via Cross-Layer Index Reuse](/202603/13/2603.12201v1-indexcache-accelerating-sparse-attention-via-cross-layer-index-reuse)  
+   标签：评分：9.0/10、query:mc
+   evidence：加速LLM中的稀疏注意力
+24. [HiAP: A Multi-Granular Stochastic Auto-Pruning Framework for Vision Transformers](/202603/13/2603.12222v1-hiap-a-multi-granular-stochastic-auto-pruning-framework-for-vision-transformers)  
+   标签：评分：9.0/10、query:mc
+   evidence：视觉 Transformer 的多粒度随机自动剪枝
 
 ### 速读区论文标签
-1. [Ouroboros: Wafer-Scale SRAM CIM with Token-Grained Pipelining for Large Language Model Inference](/202603/12/2603.02737v1-ouroboros-wafer-scale-sram-cim-with-token-grained-pipelining-for-large-language-model-inference)  
+1. [Underrepresented in Foundation Model Pretraining Data? A One-Shot Probe](/202603/13/2603.04346v1-underrepresented-in-foundation-model-pretraining-data-a-one-shot-probe)  
    标签：评分：8.0/10、query:mc
-   evidence：用于高效LLM推理和KV缓存管理的晶圆级架构
-2. [SemanticDialect: Semantic-Aware Mixed-Format Quantization for Video Diffusion Transformers](/202603/12/2603.02883v1-semanticdialect-semantic-aware-mixed-format-quantization-for-video-diffusion-transformers)  
+   evidence：评估视觉语言基础模型
+2. [VisionPangu: A Compact and Fine-Grained Multimodal Assistant with 1.7B Parameters](/202603/13/2603.04957v1-visionpangu-a-compact-and-fine-grained-multimodal-assistant-with-17b-parameters)  
    标签：评分：8.0/10、query:mc
-   evidence：视频扩散 Transformer 的混合格式量化
-3. [Semi-Supervised Few-Shot Adaptation of Vision-Language Models](/202603/12/2603.02959v1-semi-supervised-few-shot-adaptation-of-vision-language-models)  
+   evidence：具有高效对齐的紧凑型1.7B参数多模态模型
+3. [Act, Think or Abstain: Complexity-Aware Adaptive Inference for Vision-Language-Action Models](/202603/13/2603.05147v1-act-think-or-abstain-complexity-aware-adaptive-inference-for-vision-language-action-models)  
    标签：评分：8.0/10、query:mc
-   evidence：视觉语言模型的适配
-4. [DeepScan: A Training-Free Framework for Visually Grounded Reasoning in Large Vision-Language Models](/202603/12/2603.03857v1-deepscan-a-training-free-framework-for-visually-grounded-reasoning-in-large-vision-language-models)  
+   evidence：视觉-语言-动作模型的自适应推理以降低延迟
+4. [InfoFlow KV: Information-Flow-Aware KV Recomputation for Long Context](/202603/13/2603.05353v1-infoflow-kv-information-flow-aware-kv-recomputation-for-long-context)  
    标签：评分：8.0/10、query:mc
-   evidence：大型视觉语言模型(LVLM)中的视觉定位推理
-5. [Hardware-Software Co-design for 3D-DRAM-based LLM Serving Accelerator](/202603/12/2603.04797v1-hardware-software-co-design-for-3d-dram-based-llm-serving-accelerator)  
+   evidence：长文本LLM的KV缓存压缩
+5. [An LLM-Guided Query-Aware Inference System for GNN Models on Large Knowledge Graphs](/202603/13/2603.04545v1-an-llm-guided-query-aware-inference-system-for-gnn-models-on-large-knowledge-graphs)  
    标签：评分：7.0/10、query:mc
-   evidence：LLM推理加速器与KV缓存管理
-6. [Diff-ES: Stage-wise Structural Diffusion Pruning via Evolutionary Search](/202603/12/2603.05105v1-diff-es-stage-wise-structural-diffusion-pruning-via-evolutionary-search)  
+   evidence：利用剪枝、量化和蒸馏的LLM引导推理
+6. [WavSLM: Single-Stream Speech Language Modeling via WavLM Distillation](/202603/13/2603.05299v1-wavslm-single-stream-speech-language-modeling-via-wavlm-distillation)  
    标签：评分：7.0/10、query:mc
-   evidence：通过进化搜索进行结构化扩散模型剪枝
-7. [Trainable Bitwise Soft Quantization for Input Feature Compression](/202603/12/2603.05172v1-trainable-bitwise-soft-quantization-for-input-feature-compression)  
+   evidence：语音语言模型的蒸馏与量化
+7. [POET-X: Memory-efficient LLM Training by Scaling Orthogonal Transformation](/202603/13/2603.05500v1-poet-x-memory-efficient-llm-training-by-scaling-orthogonal-transformation)  
    标签：评分：7.0/10、query:mc
-   evidence：可训练的位级软量化
-8. [SarcasmMiner: A Dual-Track Post-Training Framework for Robust Audio-Visual Sarcasm Reasoning](/202603/12/2603.05275v1-sarcasmminer-a-dual-track-post-training-framework-for-robust-audio-visual-sarcasm-reasoning)  
+   evidence：内存高效的大语言模型训练
+8. [SODA: Sensitivity-Oriented Dynamic Acceleration for Diffusion Transformer](/202603/13/2603.07057v1-soda-sensitivity-oriented-dynamic-acceleration-for-diffusion-transformer)  
    标签：评分：7.0/10、query:mc
-   evidence：多模态推理的双轨蒸馏
-9. [A Benchmark Study of Neural Network Compression Methods for Hyperspectral Image Classification](/202603/12/2603.04720v1-a-benchmark-study-of-neural-network-compression-methods-for-hyperspectral-image-classification)  
+   evidence：扩散Transformer加速的动态剪枝技术
+9. [PromptTuner: SLO-Aware Elastic System for LLM Prompt Tuning](/202603/13/2603.05087v1-prompttuner-slo-aware-elastic-system-for-llm-prompt-tuning)  
    标签：评分：6.0/10、query:mc
-   evidence：神经网络压缩方法的评估
-10. [Beyond Linear LLM Invocation: An Efficient and Effective Semantic Filter Paradigm](/202603/12/2603.04799v1-beyond-linear-llm-invocation-an-efficient-and-effective-semantic-filter-paradigm)  
+   evidence：优化LLM提示词微调资源成本的系统
+10. [Frequency-Aware Error-Bounded Caching for Accelerating Diffusion Transformers](/202603/13/2603.05315v1-frequency-aware-error-bounded-caching-for-accelerating-diffusion-transformers)  
    标签：评分：6.0/10、query:mc
-   evidence：LLM 调用的高效语义过滤范式
-11. [Beyond Scattered Acceptance: Fast and Coherent Inference for DLMs via Longest Stable Prefixes](/202603/12/2603.05454v1-beyond-scattered-acceptance-fast-and-coherent-inference-for-dlms-via-longest-stable-prefixes)  
+   evidence：通过缓存加速扩散Transformer
+11. [Compression as Adaptation: Implicit Visual Representation with Diffusion Foundation Models](/202603/13/2603.07615v1-compression-as-adaptation-implicit-visual-representation-with-diffusion-foundation-models)  
    标签：评分：6.0/10、query:mc
-   evidence：扩散语言模型的推理优化
+   evidence：利用扩散基础模型进行感知视频压缩
 
 
 <div class="dpr-home-promo-card">

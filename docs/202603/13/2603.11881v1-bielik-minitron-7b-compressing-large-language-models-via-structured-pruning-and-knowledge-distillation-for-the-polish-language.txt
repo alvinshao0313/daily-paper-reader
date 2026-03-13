@@ -1,0 +1,612 @@
+Title: Bielik-Minitron-7B: Compressing Large Language Models via Structured Pruning and Knowledge Distillation for the Polish Language
+
+URL Source: https://arxiv.org/pdf/2603.11881v1
+
+Published Time: Fri, 13 Mar 2026 00:55:15 GMT
+
+Number of Pages: 23
+
+Markdown Content:
+# BIELIK -M INITRON -7B: C OMPRESSING LARGE LANGUAGE 
+
+# MODELS VIA STRUCTURED PRUNING AND KNOWLEDGE 
+
+# DISTILLATION FOR THE POLISH LANGUAGE 
+
+Remigiusz Kinas 
+
+Bielik.AI, Ingenix.ai 
+
+remigiusz.kinas@bielik.ai 
+
+Paweł Kiszczak 
+
+Bielik.AI, Vstorm 
+
+pawel.kiszczak@bielik.ai 
+
+Sergio P. Perez 
+
+NVIDIA 
+
+sergiop@nvidia.com 
+
+Krzysztof Ociepa 
+
+Bielik.AI, Azurro.pl 
+
+krzysztof.ociepa@bielik.ai 
+
+Łukasz Flis 
+
+Bielik.AI, ACK Cyfronet AGH 
+
+lukasz.flis@cyfronet.pl 
+
+Krzysztof Wróbel 
+
+Bielik.AI, Jagiellonian University 
+
+krzysztof.wrobel@bielik.ai 
+
+Adrian Gwo´ zdziej 
+
+Bielik.AI, ACK Cyfronet AGH 
+
+adrian.gwozdziej@bielik.ai 
+
+# ABSTRACT 
+
+This report details the creation of Bielik-Minitron-7B, a compressed 7.35B parameter version of the Bielik-11B-v3.0 model, specifically optimized for European languages. By leveraging a two-stage compression methodology inspired by the NVIDIA Minitron approach, we combined structured hy-brid pruning and knowledge distillation to reduce the model’s parameter count by 33.4%, from 11.04B to 7.35B. We utilized the NVIDIA Model Optimizer for structural pruning and the NVIDIA NeMo Framework for logit-based distillation for quality recovery. Following distillation, the model under-went a rigorous alignment pipeline consisting of Supervised Fine-Tuning (SFT), Direct Preference Optimization (DPO-P), and Reinforcement Learning (GRPO). Our final model successfully recovered approximately 90% of the baseline model’s performance while providing up to 50% inference speedup. This approach demonstrates an efficient pathway to create language models for less-represented languages, preserving the original model quality while reducing inference deployment costs. 
+
+Keywords LLM · Model Compression · Structured Pruning · Hybrid Pruning · Knowledge Distillation · Polish Language · NVIDIA NeMo · NVIDIA Model Optimizer · GRPO 
+
+# 1 Introduction 
+
+The progress on Large Language Models (LLMs) continues to transform natural language processing, leading to wider adoption and better model capabilities. As the size of the models grows, it is crucial to address the significant increase in computational resources to deploy them, especially in terms of GPU-accessible VRAM. For the European languages market and ecosystem, there is a critical need for models that maintain a balance between high-performance reasoning and deployment efficiency. An emerging technique to address the increasing size of LLMs is model compression. It aims to shrink the LLM so that it requires less memory and compute to deploy it, while preserving most of its original quality and behaviour. Today model compression has become an indispensable step when releasing a model, see, for instance, Qwen3 [ 1], Nemotron-Nano-9B-v2 [ 2] or DeepSeek-R1 [ 3]. In addition, model compression is also employed to reduce the cost to post-train an open source model [ 4]: by reducing the size before the post-training, less compute is needed for stages such as supervised fine-tuning and reinforcement learning. 
+
+> arXiv:2603.11881v1 [cs.CL] 12 Mar 2026
+
+Bielik-Minitron-7B: Compressing LLMs for the Polish Language In collaboration with NVIDIA, we developed Bielik-Minitron-7B by compressing our flagship LLM Bielik-11B-v3.0 [ 5]. By enhancing our usual training pipeline, created and developed throughout the different iterations of the Bielik project, with structured pruning and distillation strategies rather than training a smaller-sized model from scratch, we significantly reduced the carbon footprint and computational cost of development while maintaining high linguistic fidelity, optimal size and quality of the final product. 
+
+# 2 Related Work 
+
+Our methodology is rooted in the NVIDIA Minitron approach [ 6, 7 ], which demonstrates that structured pruning followed by distillation is superior to training smaller models from scratch. This section provides a comprehensive overview of neural network pruning approaches for LLMs, situating our work within the broader landscape of model compression techniques. 
+
+2.1 Taxonomy of Pruning Methods 
+
+Neural network pruning methods can be broadly categorized along two primary axes: pruning granularity and 
+
+importance estimation strategy . In terms of granularity, methods fall into two major categories: • Unstructured Pruning: Removes individual weights regardless of their position within weight matrices. While achieving high compression ratios, unstructured sparsity typically requires specialized hardware or software (e.g., sparse matrix libraries) to realize actual speedups during inference. • Structured Pruning: Removes entire architectural components such as attention heads, neurons, or trans-former layers. This approach yields immediate hardware-friendly acceleration without requiring sparse computation support. We now survey the most prominent pruning methods for LLMs, comparing their importance estimation strategies and practical applicability. 
+
+2.2 Magnitude-Based Pruning 
+
+The foundational approach to neural network pruning, introduced by Han et al. [ 8], operates on a simple principle: weights with small absolute magnitudes contribute less to the network’s output and can be safely removed. Given a weight matrix W, the importance score for each weight wij is computed as: 
+
+Smag  
+
+> ij
+
+= |wij | (1) Weights below a threshold τ are pruned: wij = 0 if |wij | < τ . The method follows a three-stage pipeline: (1) train the network to convergence, (2) prune weights with smallest magnitudes, and (3) retrain to recover accuracy. Han et al. demonstrated 9 × compression on AlexNet and 13 × on VGG-16 without accuracy loss. However, for modern LLMs, the retraining phase becomes prohibitively expensive, motivating the development of one-shot pruning methods. 
+
+2.3 SparseGPT: One-Shot Pruning via Optimal Brain Compression 
+
+SparseGPT [ 9] addresses the scalability challenge by enabling pruning of massive models (100B+ parameters) without any retraining. The method reformulates pruning as a sparse regression problem, solving for optimal weight updates that minimize the reconstruction error after removing weights. For a layer with weight matrix W and calibration inputs X, SparseGPT minimizes: 
+
+min 
+
+> ˆW
+
+∥WX − ˆWX ∥22 subject to sparsity constraint on ˆW (2) The algorithm proceeds row-by-row through the weight matrix, using the Hessian H = XX T to compute optimal weight updates that compensate for pruned weights. For each row, weights are greedily pruned while remaining weights are adjusted according to: 
+
+δrow = − wp
+
+[H−1]pp 
+
+· H−1:,p (3) where wp is the pruned weight and [H−1]pp is the corresponding diagonal element of the inverse Hessian. This enables 50-60% unstructured sparsity on OPT-175B and BLOOM-176B in under 4.5 hours with negligible perplexity increase. SparseGPT also supports semi-structured patterns (2:4, 4:8) compatible with hardware acceleration. 2Bielik-Minitron-7B: Compressing LLMs for the Polish Language 
+
+2.4 Wanda: Pruning by Weights and Activations 
+
+Wanda (Pruning by Weights and A ctivations) [ 10 ] provides an even simpler approach that requires no weight updates. The key insight is that a weight’s importance depends not only on its magnitude but also on the magnitude of its corresponding input activations. The importance score combines both factors: 
+
+Swanda  
+
+> ij
+
+= |wij | · ∥ xj ∥2 (4) where wij is the weight connecting input j to output i, and ∥xj ∥2 is the ℓ2-norm of the j-th input feature computed over a small calibration set. Pruning is performed per-output , meaning for each output neuron i, the weights with smallest 
+
+Swanda  
+
+> ij
+
+scores are removed independently. This formulation is motivated by the observation that LLMs exhibit emergent large-magnitude features—certain activation dimensions consistently show much larger values than others. By incorporating activation norms, Wanda naturally preserves weights connected to these important features. The method significantly outperforms magnitude pruning and performs competitively with SparseGPT while being simpler and faster (no Hessian computation required). 
+
+2.5 ShortGPT: Depth Pruning via Block Influence 
+
+ShortGPT [ 11 ] takes a fundamentally different approach by removing entire transformer layers rather than individual weights. The method introduces the Block Influence (BI) metric to quantify each layer’s contribution to the model’s representational transformation. For layer i with input hidden states Hi and output hidden states Hi+1 , the Block Influence score measures how much the layer transforms its input: BI i = 1 − 1
+
+N
+
+> N
+
+X
+
+> n=1
+
+cos_sim (H(n) 
+
+> i
+
+, H(n)
+
+> i+1
+
+) (5) where N is the number of calibration samples and cos_sim (·, ·) denotes cosine similarity averaged over the sequence dimension. Layers with low BI scores (high similarity between input and output) are considered redundant and can be removed. The pruning algorithm proceeds as follows: (1) compute BI scores for all layers using a calibration dataset, (2) rank layers by BI score in ascending order, and (3) remove the k lowest-scoring layers. Empirically, ShortGPT found that layers in the middle-to-later portions of the network (e.g., layers 21-29 in LLaMA-2-7B) exhibit the highest redundancy. The method achieves state-of-the-art results for depth pruning and is orthogonal to quantization, enabling combined compression strategies. 
+
+2.6 LLM-Pruner: Task-Agnostic Structural Pruning 
+
+LLM-Pruner [12] introduces a comprehensive framework for structured pruning that preserves multi-task capabilities. The method operates through three stages: 
+
+Stage 1 - Dependency Discovery: LLM-Pruner constructs dependency graphs to identify coupled structures —groups of parameters that must be pruned together to maintain architectural validity. For example, in multi-head attention, the output projections of all heads feeding into the same residual connection form a coupled group. 
+
+Stage 2 - Importance Estimation: Group importance is computed using first-order Taylor expansion: 
+
+Ig = X
+
+> w∈g
+
+w · ∂L
+
+∂w (6) where g denotes a coupled group and L is the loss on calibration data. This approximates the change in loss when removing the entire group. Alternatively, LLM-Pruner supports ℓ1/ℓ 2 norm-based importance and Hessian-weighted variants. 
+
+Stage 3 - Recovery: A lightweight post-training phase using LoRA [ 13 ] on approximately 50K samples recovers performance. The entire pipeline (3 minutes pruning + 3 hours recovery) is significantly more efficient than retraining from scratch. LLM-Pruner supports multiple granularities: block-wise (entire attention/MLP blocks), channel-wise (hidden dimen-sions), and layer-wise (transformer layers), making it a versatile framework applicable to LLaMA, BLOOM, and other architectures. 3Bielik-Minitron-7B: Compressing LLMs for the Polish Language 
+
+2.7 Sheared LLaMA: Targeted Structured Pruning 
+
+Sheared LLaMA [ 14 ] introduces a principled approach to structured pruning that produces models matching specific target architectures. The method combines two key innovations: 
+
+Targeted Structured Pruning: Rather than heuristically selecting components to prune, Sheared LLaMA learns binary masks through ℓ0 regularization: 
+
+Ltotal = LLM + λ · ∥ z∥0 (7) where z represents learnable mask variables for each prunable component (attention heads, hidden dimensions, intermediate dimensions, layers). The masks are relaxed to continuous values during training using the hard-concrete distribution, and components with near-zero masks are removed. Lagrangian relaxation dynamically adjusts λ to meet target architecture specifications. 
+
+Dynamic Batch Loading: To accelerate convergence, Sheared LLaMA dynamically adjusts the sampling proportions across training domains (e.g., Wikipedia, code, books) based on per-domain loss. Domains where the model struggles receive more samples, improving data efficiency. Starting from LLaMA-2-7B, Sheared LLaMA produces 1.3B and 2.7B parameter models that outperform comparably-sized models trained from scratch, while requiring only 3% of the original pre-training compute. 
+
+2.8 The Minitron Approach 
+
+The Minitron methodology [ 6 , 7 ], which inspires the model compression strategy of this work, combines structured pruning across multiple axes with knowledge distillation for performance recovery. We describe the approach in detail as it directly informs our compression of Bielik-11B-v3. 
+
+2.8.1 Multi-Axis Pruning 
+
+Minitron prunes along four orthogonal dimensions: 1. Depth Pruning: Removes entire transformer layers, reducing sequential computation. 2. Width Pruning (Hidden Dimension): Reduces the embedding/hidden dimension dmodel , affecting all linear projections. 3. Attention Pruning: Reduces the number of attention heads nheads or key-value heads in grouped-query attention. 4. MLP Pruning: Reduces the intermediate dimension dff of feed-forward layers. 
+
+2.8.2 Activation-Based Importance Estimation 
+
+Component importance in Minitron is estimated using purely activation-based metrics that require only forward passes over a calibration dataset—no gradient computation is needed. For each prunable component (attention heads, MLP neurons, embedding channels), the framework collects activation magnitudes and computes importance scores by aggregating statistics across calibration samples. Specifically, the importance of a component is determined by the magnitude of its activations: components with consistently low activation magnitudes are considered least critical and are therefore candidates for removal. The concrete formulas for hidden dimension and FFN intermediate dimension importance are detailed in Section 2.8.3. 
+
+2.8.3 Neuron Selection Mechanism 
+
+For width pruning, Minitron computes per-neuron importance scores by aggregating activation statistics during forward passes: 
+
+Hidden Dimension Importance: Hooks attached to layer normalization outputs collect activation magnitudes: 
+
+Ihidden  
+
+> j
+
+=
+
+> L
+
+X
+
+> ℓ=1
+
+1
+
+N
+
+> N
+
+X
+
+> n=1
+
+|a(n) 
+
+> ℓ,j
+
+|
+
+!2
+
+(8) where a(n) 
+
+> ℓ,j
+
+is the activation of neuron j at layer ℓ for sample n. Neurons with highest importance scores are retained. 4Bielik-Minitron-7B: Compressing LLMs for the Polish Language 
+
+FFN Intermediate Dimension Importance: Similarly, for MLP layers: 
+
+Iffn  
+
+> j
+
+=
+
+> L
+
+X
+
+> ℓ=1
+
+1
+
+N
+
+> N
+
+X
+
+> n=1
+
+|h(n) 
+
+> ℓ,j
+
+|
+
+!2
+
+(9) where h(n) 
+
+> ℓ,j
+
+is the intermediate activation at position j.The top-k neurons according to these importance scores are selected, and weight matrices are sliced accordingly using 
+
+torch.index_select operations. 
+
+2.8.4 Depth Pruning via Block Influence 
+
+For layer removal, Minitron employs a Block Influence strategy similar to ShortGPT, see equation (5) . Layers with lowest BI scores (indicating minimal transformation of hidden states) are candidates for removal. Alternatively, an iterative approach evaluates different pruning configurations and selects the one with minimal performance degradation on a validation task. 
+
+2.8.5 Knowledge Distillation Recovery 
+
+After pruning, the student model is initialized with the surviving weights from the teacher and undergoes knowledge distillation. Following the empirical findings of [ 7], the training objective uses a logit-only forward KL divergence loss, ignoring both the standard cross-entropy loss against ground-truth labels and intermediate state matching: 
+
+L = KL (σ(zt/T )∥σ(zs/T )) (10) where zt and zs are the teacher and student logits respectively, σ denotes the softmax function, and T is a temperature hyperparameter that softens the output distributions. This formulation enables the student to learn directly from the teacher’s full probability distribution over the vocabulary, capturing inter-token relationships and confidence calibration that would be lost with hard-label training alone. The authors of [ 7] demonstrate that logit-only distillation is sufficient for high-quality recovery when depth reduction is moderate, making it well-suited for our configuration. Crucially, Minitron achieves strong results using less than 3% of the original pre-training data, making it highly efficient compared to training from scratch. The resulting models achieve 2-4 × compression with up to 16% improvement in MMLU compared to equivalently-sized models trained de novo. 
+
+2.9 Summary of Pruning Approaches 
+
+Table 1 summarizes the key characteristics of the surveyed pruning methods. 
+
+Method Granularity Importance Metric Retraining One-Shot Hardware-Friendly 
+
+Magnitude [8] Unstructured |w| Required No No SparseGPT [9] Unstructured/Semi Hessian-based No Yes Partial (2:4) Wanda [10] Unstructured/Semi |w| · ∥ x∥ No Yes Partial (2:4) ShortGPT [11] Structured (Depth) Block Influence Optional Yes Yes LLM-Pruner [12] Structured Taylor / ℓ1/ℓ2 Light (LoRA) Yes Yes Sheared LLaMA [14] Structured Learned ℓ0 masks Integrated No Yes Minitron [7] Structured (Hybrid) Activation + BI Distillation Yes Yes Table 1: Comparison of LLM pruning methods. 
+
+2.10 Rationale for Selecting Minitron 
+
+Among the surveyed pruning methodologies, we selected the Minitron approach for compressing Bielik-11B-v3.0 based on several strategic and technical considerations. First, Minitron offers a hybrid pruning framework that simultaneously optimizes across multiple architectural dimensions—depth, width, attention heads, and MLP intermediate size—rather than being limited to a single axis. As demonstrated in Table 1, methods like ShortGPT focus exclusively on depth pruning, while Wanda and SparseGPT target unstructured weight sparsity. In contrast, Minitron’s multi-axis approach enables fine-grained control over the compression-performance trade-off, allowing us to identify an optimal “Golden Ratio” configuration (EXP_010) that balances layer removal with intermediate dimension reduction. 5Bielik-Minitron-7B: Compressing LLMs for the Polish Language This hybrid flexibility proved essential for preserving the complex morphological and syntactic structures inherent in Polish while achieving our target parameter reduction of over 33%. Second, this work was conducted in direct collaboration with NVIDIA , which has open-sourced the Minitron tooling within the NeMo Framework and Model Optimizer [ 15 ] in order to conduct sensitivity-based pruning and logit-matching distillation. This partnership enabled us to leverage production-grade infrastructure (NVIDIA DGX Cloud Lepton with H200 GPUs) and battle-tested compression pipelines that have been validated on models up to 15B parameters. Critically, our broader objective extends beyond a single model: we aim to establish a reproducible blueprint for creating high-quality, efficient language models for European languages , where computational resources are often more constrained than in English-centric research ecosystems. By demonstrating that Minitron-style compression can recover over 90% of a teacher model’s performance using less than 3% of the original pre-training compute, we validate a pathway that reduces both the financial and environmental costs of LLM development. For less-represented languages like Polish, Czech, or Hungarian, this approach makes state-of-the-art NLP accessible without requiring the multi-million-dollar budgets typically associated with training frontier models from scratch. 
+
+2.11 Positioning of Our Work 
+
+The approach utilized in [ 7] involves a sophisticated distillation pipeline where the Nemotron-4 15B model [ 16 ] serves as the teacher of a 4B student. The process begins with structured pruning—specifically targeting both width (hidden dimension, intermediate hidden dimension and attention heads) and depth (number of layers)—to derive the student architecture. This is followed by logit-based Knowledge Distillation (KD), which minimizes the Kullback–Leibler (KL) divergence between the student’s and teacher’s output distributions. Unlike standard cross-entropy training, this method allows the smaller model to inherit the teacher’s nuanced probability distributions, effectively compressing its reasoning capabilities. Furthermore, the pipeline integrates a supervised fine-tuning (SFT) stage using high-quality synthetic data and Preference Alignment (DPO) [17] to refine the model’s instruction-following accuracy. The results of this methodology demonstrate a significant shift in the efficiency-to-performance ratio. Nemotron-Mini-4B-Instruct, despite its smaller footprint, outperformed several larger state-of-the-art models, including Llama-3-8B and Mistral-7B, across critical benchmarks. Notably, it achieved superior scores in mathematical reasoning (GSM8K) and coding tasks (HumanEval), proving that a distilled 4B model can rival or exceed the performance of 8B-class models when trained with high-fidelity teacher signals. This work builds upon the Bielik-11B-v3.0 architecture [ 18 – 20 ], adapting these distillation and pruning insights for local deployment on consumer-grade hardware like the NVIDIA RTX 4090/5090 GPU series. By focusing on the logit-distillation patterns established in [ 21 ], we aim to preserve the complex Polish-language reasoning of the larger Bielik variants within a more hardware-accessible parameter count. 
+
+# 3 Methodology 
+
+The transformation of Bielik-11B-v3.0 into the compact yet high-performing Bielik-Minitron-7B model was carried out using a principled two-stage compression strategy followed by multi-level fine-tuning and alignment processes. Our methodology was inspired by recent advances in structured pruning and post-pruning knowledge recovery as demonstrated in large-scale transformer compression studies, particularly those employing NVIDIA Model Optimizer, NeMo, and Minitron-style distillation pipelines. The overarching objective was to achieve substantial parameter and latency reduction while preserving reasoning capability, distributional fidelity, and downstream task performance. 
+
+3.1 Stage I: Structured Pruning via Importance-Aware Sensitivity Analysis 
+
+We adopted structured pruning as the primary compression mechanism, prioritizing hardware-efficient model reductions over sparsity-only approaches. Unlike unstructured pruning, which removes individual weights and often yields limited real-world speedups, structured pruning removes entire architectural components (e.g., transformer layers, attention heads, and feed-forward hidden dimension), ensuring compatibility with accelerator-optimized inference runtimes. 
+
+Pruning methods Model pruning is a fundamental optimization technique designed to address the computational inefficiencies of over-parameterized Large Language Models (LLMs). While increasing parameter counts typically enhances a model’s functional capacity and knowledge density, it imposes significant costs in terms of inference latency and hardware requirements. Pruning aims to mitigate these drawbacks by strategically removing redundant parameters, thereby optimizing the model for deployment without substantial loss in output quality. Structured pruning within this framework is generally categorized into three approaches: 6Bielik-Minitron-7B: Compressing LLMs for the Polish Language • Depth pruning involves the removal of entire transformer blocks or layers from the network. This approach significantly reduces the sequential complexity of the model, directly improving inference throughput. • Width pruning focuses on reducing the internal dimensionality of the model by removing individual neurons, attention heads, or MLP intermediate dimensions. This results in a "narrower" architecture that reduces the memory footprint and per-layer computation. • Hybrid pruning integrates both depth and width reduction, simultaneously scaling down the model across multiple architectural dimensions. While independent application of depth or width pruning can yield efficient models, recent empirical evidence suggests that a hybrid approach — optimizing both dimensions in tandem — often produces student models that outperform those derived from single-dimensional pruning at equivalent parameter counts [7]. 
+
+Pruning methodology To minimize performance degradation, the framework [ 22 ] identifies the least critical com-ponents using activation-based importance estimation on a calibration dataset. By performing forward passes on a representative subset of data, the framework collects activation statistics for each architectural unit—attention heads, MLP neurons, and embedding channels—and computes importance scores based on activation magnitudes. Components with consistently low activation magnitudes are identified as having minimal influence on the model’s representational capacity and are therefore candidates for removal. This purely forward-pass approach avoids the computational overhead of gradient-based methods, enabling rapid architectural optimization without the need for extensive retraining. 
+
+Pruning candidates A comprehensive set of pruning configurations was established based on best practices from the Minitron approach [ 6, 7], NVIDIA technical guidelines [ 23 ], and preliminary empirical observations. These candidates were designed to explore the performance trade-offs between different architectural dimensions–specifically depth (layer count) and width (hidden and intermediate sizes)–while targeting a parameter reduction of approximately 25% to 35% from the base model. The detailed architectural specifications for each experimental scenario are summarized in Table 2. Values which are not explicitly defined in the table remain as in the original model. 
+
+Experiment ID Hidden size Intermediate size Layers Total Parameters [B] 
+
+Original model 4096 14336 50 11.04 EXP_001 3072 — — 8.28 EXP_002 — 9216 — 7.90 EXP_003 — — 36 7.99 EXP_004 — 12288 40 7.85 EXP_005 — 10240 — 8.52 EXP_006 — 11264 44 8.07 EXP_007 3648 12800 44 7.92 EXP_008 — — 32 7.11 EXP_009 — 8192 — 7.26 EXP_010 — 11264 40 7.35 Table 2: Model pruning scenarios. 
+
+Importance Estimation To identify pruning candidates, the framework utilizes a purely activation-based importance estimation strategy that requires only forward propagation passes. This approach assesses the significance of architectural units—specifically attention heads, MLP neurons, and embedding channels—by analyzing the magnitudes of their activations on a small calibration dataset. Specifically, for width-based pruning, importance scores are computed by calculating the ℓ2-norm across the batch dimension and the mean across the sequence length for the activations of each component. This criterion identifies units with minimal activation magnitudes as having the least influence on the model’s representational capacity. By ranking components according to these scores, the framework can perform structured pruning efficiently, avoiding the computational overhead associated with gradient-based or loss-sensitivity calculations. 
+
+Granularity of Pruning Importance scores were computed across multiple structural levels to identify redundancies at different scales of the transformer architecture: 7Bielik-Minitron-7B: Compressing LLMs for the Polish Language • Transformer Depth: Entire residual blocks were evaluated for their contribution to the residual stream, allowing for the removal of redundant layers. • Multi-Head Attention (MHA): Individual attention heads were ranked, enabling the reduction of the model’s width while preserving the most critical heads for capturing long-range dependencies. • Feed-Forward Networks (FFN): The intermediate hidden dimensions of the MLP layers were pruned, targeting the components with the lowest activation magnitudes. This multi-granular analysis allowed us to jointly optimize depth and width reductions while maintaining architectural balance. 
+
+Final Pruned Configuration Based on a comprehensive analysis of sensitivity rankings and empirical validation across the candidate pool, the configuration corresponding to EXP_010 was selected as the optimal architecture. This strategy reduced the model depth from 50 to 40 transformer layers and downscaled the FFN intermediate dimension from 14,336 to 11,264. The resulting student model, Bielik-Minitron-7B , comprises approximately 7.35B parameters—representing a 33.4% reduction in total parameter count from the 11.04B baseline. Crucially, this configuration preserved the original hidden dimension ( dmodel = 4096 ) and the multi-head attention topology, including the Rotary Positional Embedding (RoPE) scheme. By maintaining these structural invariants, we were able to initialize the student directly with the most significant weights from the teacher, providing a high-fidelity foundation for the subsequent knowledge recovery phase. As our experiments did not include pruning the attention heads, this dimension remains a possibility for future work. 
+
+3.2 Stage II: Knowledge Distillation for Post-Pruning Recovery 
+
+While structured pruning delivers efficient hardware-level compression, the abrupt removal of weights and layers inevitably introduces representational damage and disrupts the internal feature maps of the model. To mitigate these effects, we employed knowledge distillation (KD) as a post-pruning recovery mechanism. Unlike standard pre-training, which relies solely on ground-truth token labels, this stage enables the student model to re-approximate the complex functional behavior of the original Bielik-11B-v3.0 network by learning from its full output distribution. By minimizing the divergence between the teacher’s and the student’s logits, the pruned model inherits the "dark knowledge" of the larger network—specifically the nuanced probabilities assigned to incorrect or alternative tokens. This process allows the 7.35B-parameter student to recover linguistic reasoning and distributional fidelity that would otherwise require significantly more data and compute if trained from scratch. 
+
+Teacher–Student Setup We utilized the NVIDIA NeMo Framework (v24.09) to facilitate large-scale, distributed distillation. In this configuration, the original Bielik-11B-v3.0 model served as a frozen teacher , providing a high-dimensional reference signal. The pruned Bielik-Minitron-7B model acted as the student , having been initialized directly with the surviving weights of the teacher to preserve as much pre-existing knowledge as possible. The student was trained to minimize the discrepancy between its output logits and those of the teacher over a diverse corpus of unlabeled Polish and multi-lingual text. This logit-based alignment ensures that the student inherits not only the teacher’s top-1 predictions but also its nuanced reasoning patterns and underlying calibration properties. 
+
+Distillation Objective Following the best practices established in [ 7], the training objective employed a logit-only forward KL divergence loss: 
+
+L = KL (σ(zt/T )∥σ(zs/T )) (11) where zt and zs denote the teacher and student logits, σ is the softmax function, and T is the temperature hyperparameter. Crucially, the standard cross-entropy loss against ground-truth labels was not used during distillation—the student learned exclusively from the teacher’s output distribution. This design choice follows the finding that logit-only distillation provides superior recovery when depth reduction is moderate, as in our configuration (50 → 40 layers). By focusing solely on the KL divergence between the full probability distributions, the student inherits not only the teacher’s top-1 predictions but also the nuanced inter-token relationships and confidence calibration encoded in the long tail of the distribution. 
+
+Temperature Scaling Temperature scaling was applied to the softmax logits during the distillation process. The temperature T flattens the teacher’s probability distributions, amplifying signals from low-probability tokens that reside in the long tails of the distribution. By increasing the entropy of the target distribution, this scaling enabled the student to capture nuanced decision boundaries and subtle linguistic dependencies that are often suppressed during standard hard-label training. This proved instrumental in preserving the teacher’s calibration, particularly for the complex morphological structures inherent in the Polish language. 8Bielik-Minitron-7B: Compressing LLMs for the Polish Language 
+
+3.3 Alignment Objectives and Outcomes 
+
+The integrated pruning-and-distillation pipeline was engineered to address the inherent trade-offs between model compression and linguistic capability, focusing on three primary objectives: 1. Efficiency: Achieving a significant reduction in parameter count and inference latency without introducing architectural fragmentation, thereby ensuring compatibility with standard optimization toolkits like TensorRT-LLM. 2. Fidelity: Preserving the teacher model’s representational depth, reasoning logic, and nuanced output distribu-tion, particularly for the specific syntactic requirements of the Polish language. 3. Stability: Maintaining training and inference robustness after aggressive structural reduction, preventing the "catastrophic forgetting" or divergence often associated with high-compression regimes. Empirically, the distilled Bielik-Minitron-7B successfully recovered the vast majority of the performance margin lost during the initial pruning phase. Our internal evaluation benchmarks indicate that the student model achieves near-parity with the Bielik-11B-v3.0 baseline, while delivering a substantial increase in throughput and a reduced memory footprint. These results validate that importance-aware structured pruning, when coupled with high-temperature logit distillation, provides a highly effective and computationally efficient pathway for producing compact, deployment-ready language models for localized markets. 
+
+3.4 Post-Distillation Alignment Pipeline 
+
+To transition the distilled base model into a production-ready assistant, the 7.35B student underwent a rigorous, multi-stage alignment protocol. This pipeline was designed to mirror the treatment of the Bielik-11B-v3.0 [ 18 ] flagship, ensuring that the efficiency gains of pruning did not come at the expense of instruction-following precision or safety. 1. Supervised Fine-Tuning (SFT): The model was fine-tuned on a curated set of high-quality Polish and English instruction-following pairs. This stage established the primary conversational interface and aligned the model with specific linguistic nuances and formatting requirements of the Polish market. The model was trained for 3 epochs on approximately 20 million instructions and dialogue samples, using a maximum sequence length of 32,768 tokens. 2. Preference Alignment (DPO-P)[ 24 ]: We employed Direct Preference Optimization using a "Positive" (DPO-P) variant. By focusing on stabilizing the policy gradient and emphasizing high-reward trajectories, this stage improved the model’s adherence to human preferences and significantly reduced the likelihood of generating harmful or irrelevant content. The training was conducted for 3 epochs on a dataset of 114,000 preference-labeled samples, with a maximum sequence length of 32,768 tokens. 3. Reinforcement Learning (GRPO)[ 25 ]: To bridge the reasoning gap often found in smaller models, we integrated Group Relative Policy Optimization . By utilizing verifiable reward functions for STEM, mathe-matical, and logical tasks, GRPO allowed the model to explore "thought chains" and self-correct without the computational overhead of a separate critic network. This stage was trained on 143,000 task-specific samples. 
+
+# 4 Systematic Architecture Search 
+
+To identify the "Golden Ratio" of parameter reduction—defined as the optimal balance between computational throughput and representational capacity—we conducted an extensive search across 10 distinct pruning configurations. Our empirical findings revealed a non-linear relationship between structural reduction and model stability. Aggressive width-only pruning (e.g., EXP_009 , 34.2% reduction) led to significant training instability and gradient spikes during the initial phases of distillation. Conversely, conservative pruning (e.g., EXP_006 , 26.9% reduction) failed to meet our predefined efficiency targets for local deployment. EXP_010 was ultimately selected as the optimal production candidate, providing the most robust recovery curve and the best hardware-utilization profile. 
+
+# 5 Experimental Setup 
+
+5.1 Data and Hardware 
+
+The training process utilized the Bielik Dataset , a curated Polish-English corpus comprising 8.0M high-quality samples (raw text samples for pretraining). This dataset was specifically balanced to maintain the model’s multilingual proficiency while deepening its grasp of Polish idiomatic and technical structures. 9Bielik-Minitron-7B: Compressing LLMs for the Polish Language 
+
+Experiment Parameters Reduction Structural Modifications Status 
+
+Original (11B-v3) 11.04B — Baseline Configuration Baseline EXP_006 8.07B 26.9% Layers: 50 → 44, Intermediate: 14336 → 11264 Sub-optimal EXP_009 7.26B 34.2% Intermediate: 14336 → 8192 Unstable 
+
+EXP_010 7.35B 33.4% Layers: 40, Intermediate: 11264 Selected 
+
+Table 3: Systematic Search: Comparison of Key Pruning Candidates. Computational workloads focused on pruning and distillation processes were executed on a cluster comprising two nodes totaling 16 NVIDIA H200 GPUs (via DGX Cloud Lepton). The H200’s 141GB of HBM3e memory proved to be a critical enabler for the distillation pipeline. With a total memory bandwidth of 4.8 TB/s and expanded capacity, the hardware allowed both the 11.04B teacher and the 7.35B student models to reside in the GPU VRAM simultaneously. This high-residency configuration eliminated the need for activation offloading or intensive tensor parallelism, signif-icantly reducing inter-GPU communication overhead and facilitating a highly efficient, high-throughput distillation process. The remaining post-training processes were conducted as usual for the Bielik project at ACK Cyfronet AGH. This part included the training pipeline which was used for the creation of the Bielik-11B-v3.0 model, further described in [ 18 ]. 
+
+5.2 Training Dynamics 
+
+The distillation of each architectural candidate was orchestrated over a period of 48–72 hours, with the comprehensive experimental search and validation cycle encompassing approximately three weeks. To govern the optimization trajectory, we employed the AdamW optimizer coupled with a cosine annealing scheduler ; the learning rate was initialized at a peak of 1.5 × 10 −4 and was systematically attenuated to a terminal value of 1.5 × 10 −5.
+
+> EXP_006 EXP_009 EXP_010
+
+Figure 1: Training convergence profiles of distillation loss. The legend indicates the three architectural variants evaluated during the search phase - EXP_006, EXP_009 and EXP_010. As evidenced by our telemetry (Figure 1), the global distillation training loss exhibited a seamless and stable convergence across all variants. The loss objective exhibits a smooth, monotonic decay from an initial ∼1.12 to a converged steady state near ∼0.89 over 8,000 optimization steps, signifying high numerical stability during the distillation phase. By leveraging the NVIDIA NeMo implementation of logit-matching, we maintained a sustained 90% GPU utilization 
+
+across the two-node H200 cluster. This high level of hardware saturation, combined with the lack of memory-offloading bottlenecks, resulted in a significant reduction in total wall-clock time compared to traditional distillation setups on previous-generation hardware. 
+
+# 6 Results & Evaluation 
+
+The evaluation of Bielik-Minitron-7B focused on its ability to replicate the teacher’s performance across the most challenging Polish linguistic and logical benchmarks. Our primary candidate, EXP_010 , successfully retained 90.1% 
+
+10 Bielik-Minitron-7B: Compressing LLMs for the Polish Language of the Bielik-11B-v3.0 baseline’s performance. As shown in Table 4, the model exhibited exceptional recovery in semantic and affective tasks, while maintaining a high degree of generative quality. 
+
+Task Category Recovery % Evaluation Metric Overall Aggregate Score 90.1% Avg. Benchmark Accuracy 
+
+Open PL LLM Leaderboard 94.7% Average Score Polish EQ-Bench 90.0% Average Score CPTUB 90.6% Average Score Polish Medical Leaderboard 88.3% Accuracy INCLUDE-base-44 88.6% Regional Knowledge Belebele 94.0% Reading Comprehension FLORES Machine Translation 80.8% BLEU Score EuroEval 91.4% Average Score BFCL 92.3% Average Score Table 4: Performance Recovery Analysis: Student (7.35B) vs. Teacher (11.04B). 
+
+6.1 Open PL LLM Leaderboard 
+
+Open PL LLM Leaderboard is a benchmark inspired by Open LLM Leaderboard [ 26 ] and described in detail in the Bielik v0.1 paper [ 20 ]. Evaluation tasks consist of various NLP tasks testing sentiment analysis, categorization or text classification explicitly in Polish language. Some of the tasks included are the likes of polemo2, klej-ner, dyk, polqa 
+
+or poquad . Scores presented are average across all tasks in 5-shot evaluation manner. The performance of Bielik-Minitron-7B-v3.0-Instruct on the Open PL LLM Leaderboard (Table 5) validates the efficiency of the pruning and knowledge recovery pipeline. Despite a 33.4% reduction in parameter count, the 7.35B student model retains approximately 94.7% of the performance of its parent, Bielik-11B-v3.0-Instruct (65.93). Notably, it represents a massive generational leap over the original Bielik-7B-Instruct-v0.1 (44.70), demonstrating that distilling a high-capacity 11B teacher is significantly more effective than traditional training at the 7B scale. When compared to external competitors, Bielik-Minitron-7B exhibits best-in-class efficiency. It significantly outper-forms direct rivals of similar scale, such as Qwen2.5-7B-Instruct (54.93) and Mistral-7B-v0.3 (47.74), leading by 7.53 and 14.72 points respectively. The model achieves parity with or exceeds the performance of much larger architectures, including Qwen3-14B (62.24), gemma-3-12b-it (62.20), and even Qwen2.5-32B-Instruct (61.21). It ranks as one of the most capable models under 10B parameters on the leaderboard, trailing the 14.7B phi-4 (62.57) by only 0.11 points. These results suggest that the Minitron methodology effectively preserves the linguistic nuances and capabilities of the teacher model while drastically reducing the computational footprint. 
+
+6.2 Polish EQ-Bench 
+
+The evaluation in the Polish EQ-Bench (Table 6) assesses the models’ capacity for emotional understanding and social reasoning in a Polish context. Bielik-Minitron-7B-v3.0-Instruct achieved a score of 64.09 , placing it firmly in the mid-tier of the leaderboard despite being significantly smaller than its competitors. The 7.35B student model maintains approximately 90% of the emotional reasoning capabilities of the Bielik-11B-v3.0-Instruct parent (71.20). In particular, it outperforms the earlier 11B variant Bielik-11B-v2.1 (60.07), suggesting that the knowledge recovery phase effectively transfers the refined social nuances of the v3.0 teacher. Bielik-Minitron-7B exceeds the scores of several larger models, including Mistral-Nemo-Instruct-2407 (61.76, 12.2B) and the 
+
+PLLuM-12B-chat (52.26). While the model trails the Mistral-Small-24B and much larger 70B+ architectures, its ability to outperform glm-4-9b-chat (61.79) demonstrates that the pruning process preserves complex "soft skills" like emotional intensity prediction better than some larger, non-distilled models. 
+
+6.3 Complex Polish Text Understanding Benchmark (CPTUB) 
+
+The CPTUB results (Table 7) provide a granular look at the models’ mastery of the Polish language in specialized categories, which is well known for its complex morphological and syntactic structures. 11 Bielik-Minitron-7B: Compressing LLMs for the Polish Language 
+
+Model Parameters (B) Average 
+
+Mistral-Large-Instruct-2411 123.0 69.84 Meta-Llama-3.1-405B-Instruct-FP8 405.0 69.44 Mistral-Large-Instruct-2407 123.0 69.11 Qwen2.5-72B-Instruct 72.7 67.92 QwQ-32B-Preview 32.8 67.01 Llama-3.3-70B-Instruct 70.6 66.40 
+
+Bielik-11B-v3.0-Instruct 11.2 65.93 
+
+Qwen2-72B-Instruct 72.7 65.87 Bielik-11B-v2.3-Instruct 11.2 65.71 Bielik-11B-v2.2-Instruct 11.2 65.57 Meta-Llama-3.1-70B-Instruct 70.6 65.49 Bielik-11B-v2.1-Instruct 11.2 65.45 Mixtral-8x22B-Instruct-v0.1 141.0 65.23 Bielik-11B-v2.0-Instruct 11.2 64.98 Meta-Llama-3-70B-Instruct 70.6 64.45 Bielik-11B-v2.6-Instruct 11.2 64.26 Qwen3-32B 32.8 64.24 Llama-4-Scout-17B-16E-Instruct 109.0 64.21 Bielik-11B-v2.5-Instruct 11.2 63.95 Mistral-Small-24B-Instruct-2501 24.0 62.97 phi-4 14.7 62.57 
+
+Bielik-Minitron-7B-v3.0-Instruct 7.35 62.46 
+
+Qwen3-14B 14.8 62.24 gemma-3-12b-it 12.0 62.20 Mistral-Small-Instruct-2409 22.2 61.41 Qwen2.5-32B-Instruct 32.8 61.21 Qwen2.5-14B-Instruct 14.8 59.91 aya-23-35B 35.0 56.37 Bielik-4.5B-v3.0-Instruct 4.8 56.13 gemma-3-27b-it 27.0 55.92 Qwen3-8B 8.2 55.78 Qwen3-4B 4.0 55.49 Mistral-Nemo-Instruct-2407 12.2 55.27 EuroLLM-22B-Instruct-Preview 22.0 55.17 Qwen2.5-7B-Instruct 7.6 54.93 EuroLLM-9B-Instruct 9.0 50.07 GaMS-9B-Instruct 9.0 48.78 Mistral-7B-Instruct-v0.3 7.2 47.74 Apertus-8B-Instruct-2509 8.0 47.27 Mistral-7B-Instruct-v0.2 7.2 45.95 Bielik-7B-Instruct-v0.1 7.2 44.70 gemma-2-9b-it 9.0 42.12 Qwen2.5-3B-Instruct 3.0 41.23 Mistral-7B-Instruct-v0.1 7.0 33.11 Qwen2.5-1.5B-Instruct 1.5 31.89 
+
+Table 5: Open PL LLM Leaderboard results for instruction-tuned models (5-shot evaluation) In the Language Understanding category, the 7.35B student model achieves a score of 3.83 , which is close to the 11B teacher’s 3.91 . This indicates that the pruning process successfully preserved the core syntactic and grammatical capabilities of the larger model. Bielik-Minitron-7B outperforms several larger or international models, including 
+
+phi-4 (3.30) and Qwen2.5-7B-Instruct (3.07). It also matches the performance of Llama-PLLuM-70B-instruct 
+
+(3.33), despite a nearly 10x difference in parameter count. The model shows particular resilience in Sentiment (3.72) and Implicatures (3.59). Although there is an expected drop in Phraseology and Tricky Questions compared to the 11B teacher, the student remains significantly more capable than the first generation of Bielik family – Bielik-7B-v0.1 
+
+(2.88). 
+
+6.4 Polish Medical Leaderboard 
+
+The evaluation on the Polish Medical Leaderboard (Table 8) tests the models’ domain-specific knowledge using questions from the Medical Final Examination (LEK) and the State Specialization Exam (PES) . Bielik-Minitron-
+
+12 Bielik-Minitron-7B: Compressing LLMs for the Polish Language                                                                         
+
+> Model Parameters (B) Score
+> Mistral-Large-Instruct-2407 †123.0 78.07 Mistral-Large-Instruct-2411 †123.0 77.29 Meta-Llama-3.1-405B-Instruct-FP8 405.0 77.23 gpt-4o-2024-08-06 Unknown 75.15 gpt-4-turbo-2024-04-09 Unknown 74.59 Bielik-11B-v2.6-Instruct 11.2 73.8 DeepSeek-V3-0324 685.0 73.46 Mistral-Small-Instruct-2409 22.2 72.85 Llama-PLLuM-70B-chat 70.6 72.56 Meta-Llama-3.1-70B-Instruct 70.6 72.53 Bielik-11B-v2.5-Instruct 11.2 72.00 Qwen2-72B-Instruct 72.7 71.23 Meta-Llama-3-70B-Instruct 70.6 71.21
+> Bielik-11B-v3.0-Instruct 11.2 71.20
+> gpt-4o-mini-2024-07-18 Unknown 71.15 Qwen2.5-32B-Instruct 32.8 71.15 Bielik-11B-v2.3-Instruct 11.2 70.86 Llama-3.3-70B-Instruct 70.6 70.73 Llama-PLLuM-70B-instruct 70.6 69.99 WizardLM-2-8x22B 141.0 69.56 Qwen2.5-14B-Instruct 14.8 69.17 Bielik-11B-v2.2-Instruct 11.2 69.05 Bielik-11B-v2.0-Instruct 11.2 68.24
+> Bielik-Minitron-7B-v3.0-Instruct 7.35 64.09
+> glm-4-9b-chat 9.0 61.79 Mistral-Nemo-Instruct-2407 12.2 61.76 Bielik-11B-v2.1-Instruct 11.2 60.07 pllum-12b-nc-chat-250715 12.2 55.20 EuroLLM-9B-Instruct 9.2 54.10 Bielik-4.5B-v3.0-Instruct 4.8 53.58 PLLuM-12B-chat 12.2 52.26 PLLuM-8x7B-nc-chat †46.7 47.29 Llama-PLLuM-8B-chat 8.0 46.20 PLLuM-8x7B-chat 46.7 45.22 PLLuM-12B-nc-chat †12.2 35.41
+> †Models with a non-commercial license.
+
+Table 6: Polish EQ-Bench results for various models. 
+
+7B-v3.0-Instruct achieved an average score of 44.36% , demonstrating a high degree of retention of specialized knowledge. The 7.35B student model performs on par with several 11.2B predecessors, including Bielik-11B-v2.6-Instruct 
+
+(44.88%) and Bielik-11B-v2.5-Instruct (44.85%). Crucially, it outperforms the v2.3, v2.2, and v2.1 generations of the 11B model, suggesting that the v3.0 teacher passed down a more refined medical knowledge base that survived the pruning process. 
+
+Bielik-Minitron-7B exceeds the performance of notably larger models such as Mistral-Small-Instruct-2409 (43.60%, 22.2B) and Mistral-Nemo-Instruct-2407 (40.36%, 12.2B). It also maintains a lead over established small models like Meta-Llama-3.1-8B-Instruct (40.60%). Within its immediate size category, the model shows superior medical reasoning compared to Qwen2.5-7B-Instruct (42.69%) and provides a massive improvement (+14.62 points) over the previous Bielik-7B-v0.1 (29.74%). Although there is a 5.85-point gap between the student and the Bielik-11B-v3.0-Instruct teacher (50.21%), the student remains highly competitive with nearly all models in the 10B–25B parameter range. 
+
+6.5 INCLUDE-base-44 
+
+The results presented from the INCLUDE-base-44 benchmark (Table 9) are based on a subset of 20 languages, whereas the full version consists of 44 languages [ 27 ]. This selection is due to the 11B teacher model being optimized specifically for the scope of European languages. 13 Bielik-Minitron-7B: Compressing LLMs for the Polish Language 
+
+Model Params (B) Overall Implicatures Senti- Language Phrase- Tricky Average Average ment Understanding ology Questions 
+
+gemini-2.0-flash-001 Unknown 4.29 4.39 4.52 4.32 4.34 3.99 DeepSeek-R1 685.0 4.14 4.14 4.49 4.35 3.60 4.12 gemini-2.0-flash-lite-001 Unknown 4.09 4.17 4.23 4.05 4.24 3.85 DeepSeek-V3-0324 685.0 4.03 4.03 4.36 4.20 3.54 4.02 Mistral-Large-Instruct-2411 † 123.0 4.00 4.10 4.33 3.98 3.99 3.72 Qwen2.5-72B-Instruct 72.7 3.95 3.99 4.08 3.97 3.93 3.81 Mistral-Large-Instruct-2407 † 123.0 3.93 4.03 4.23 4.00 3.86 3.65 Llama-4-Maverick-17B-128E-Instruct 402.0 3.93 3.99 4.39 4.11 3.48 3.76 gemma-3-27b-it 27.4 3.81 3.90 3.88 3.79 4.03 3.53 Meta-Llama-3-70B-Instruct 70.6 3.78 3.81 4.13 3.82 3.47 3.71 Qwen2.5-32B-Instruct 32.8 3.75 3.80 3.81 3.57 4.04 3.59 Llama-4-Scout-17B-16E-Instruct 109.0 3.75 3.94 4.10 3.81 3.90 3.19 
+
+Bielik-11B-v3.0-Instruct 11.2 3.73 3.92 3.88 3.91 3.96 3.19 
+
+Mistral-Small-24B-Instruct-2501 23.6 3.71 3.80 3.91 3.60 3.88 3.45 pllum-12b-nc-chat-250715 † 12.2 3.67 3.92 4.36 3.96 3.46 2.90 Bielik-11B-v2.6-Instruct 11.2 3.64 3.82 4.10 3.94 3.41 3.10 Mixtral-8x22B-Instruct-v0.1 141.0 3.56 3.67 3.78 3.68 3.55 3.24 Qwen2.5-14B-Instruct 14.8 3.55 3.62 3.91 3.57 3.37 3.34 Llama-PLLuM-70B-chat 70.6 3.53 3.63 3.94 3.61 3.35 3.21 
+
+Bielik-Minitron-7B-v3.0-Instruct 7.35 3.38 3.59 3.72 3.83 3.23 2.74 
+
+Bielik-4.5B-v3.0-Instruct 4.8 3.38 3.68 3.76 3.61 3.67 2.46 Llama-PLLuM-70B-instruct 70.6 3.33 3.56 3.78 3.63 3.26 2.63 phi-4 14.7 3.30 3.50 3.72 3.54 3.24 2.72 PLLuM-12B-chat 12.2 3.14 3.32 3.32 3.21 3.43 2.59 PLLuM-8x7B-nc-instruct † 46.7 3.11 3.56 3.88 3.59 3.22 1.76 Qwen2.5-7B-Instruct 7.62 3.07 3.23 3.56 3.03 3.10 2.58 EuroLLM-9B-Instruct 9.0 3.15 3.28 3.37 3.30 3.17 2.75 PLLuM-8x7B-nc-chat † 46.7 3.03 3.44 3.76 3.48 3.08 1.80 Meta-Llama-3.1-8B-Instruct 8.0 3.01 3.31 3.97 3.38 2.58 2.11 PLLuM-8x7B-chat 46.7 3.01 3.41 3.44 3.45 3.35 1.78 Meta-Llama-3-8B-Instruct 8.0 3.00 3.17 3.33 3.15 3.04 2.48 Llama-PLLuM-8B-chat 8.0 2.92 3.14 3.13 2.93 3.36 2.25 Bielik-7B-Instruct-v0.1 7.2 2.88 3.13 3.59 3.48 2.32 2.16 
+
+> †
+
+Models with a non-commercial license. 
+
+Table 7: Complex Polish Text Understanding Benchmark (CPTUB) results across different evaluation categories Results achieved by Bielik-Minitron-7B-v3.0-Instruct show robust multilingual performance and its leading position in the Polish language category. Achieving a Polish-specific score of 59.3 , the student model matches the performance of the Bielik-11B-v2.6-Instruct (59.3) while utilizing roughly 35% fewer parameters. With an average score of 57.4 , the 7.35B student model outperforms several larger international competitors, including 
+
+Llama-3.1-8B-Instruct (55.3), EuroLLM-9B-Instruct (55.1), and Mistral-Nemo-Instruct-2407 (53.2, 12B). In the Polish specific column, Bielik-Minitron-7B exhibits a commanding lead over global models of similar or larger scale, such as Qwen2.5-7B-Instruct (52.2) and Llama-3.1-8B (53.8). It also significantly exceeds the previous 
+
+Bielik-11B-v2 (53.5), confirming the superiority of the v3.0 base model and distillation process. The model maintains expected lead over the Bielik-4.5B-v3.0 variant (+21.5 points on average), establishing itself as a high-fidelity mid-sized alternative that preserves the core reasoning capabilities of the 11B teacher. 
+
+6.6 Belebele Reading Comprehension 
+
+The Belebele benchmark (Table 10) serves as a rigorous test of multilingual reading comprehension. While the full version covers 122 languages [ 28 ], the results presented here were obtained from a subset of 28 European languages. This focus aligns with the core development philosophy of Bielik-11B-v3.0, which prioritizes performance within the European linguistic landscape. 
+
+Bielik-Minitron-7B-v3.0-Instruct achieved a competitive score of 78.03 , demonstrating that structured pruning successfully preserved the complex logic and context-retrieval capabilities required for advanced comprehension tasks. 14 Bielik-Minitron-7B: Compressing LLMs for the Polish Language                                                               
+
+> Model Parameters (B) Average (%)
+> Meta-Llama-3.1-405B-Instruct-FP8 405.0 69.20 Mistral-Large-Instruct-2407 †123.0 64.28 Qwen2.5-72B-Instruct 72.7 63.89 Meta-Llama-3.1-70B-Instruct 70.6 61.75 Qwen2-72B-Instruct 72.7 61.35 Meta-Llama-3-70B-Instruct 70.6 57.51 Qwen2.5-32B 32.8 55.69 Qwen2.5-32B-Instruct 32.8 54.52
+> Bielik-11B-v3.0-Instruct 11.2 50.21
+> Qwen2.5-14B-Instruct 14.8 49.60
+> Bielik-11B-v3-Base-20250730 11.2 45.86
+> Bielik-11B-v2.6-Instruct 11.2 44.88 Bielik-11B-v2.5-Instruct 11.2 44.85 GLM-4-9b-chat 9.0 44.54
+> Bielik-Minitron-7B-v3.0-Instruct 7.35 44.36
+> Mistral-Small-Instruct-2409 22.2 43.60 Bielik-4.5B-v3.0-Instruct 4.8 43.55 Bielik-11B-v2.3-Instruct 11.2 43.26 Bielik-11B-v2.1-Instruct 11.2 43.16 Bielik-11B-v2.2-Instruct 11.2 43.05 Qwen2.5-7B-Instruct 7.6 42.69 Bielik-11B-v2.0-Instruct 11.2 41.53 Meta-Llama-3.1-8B-Instruct 8.0 40.60 Mistral-Nemo-Instruct-2407 12.2 40.36 Bielik-11B-v2 11.2 39.98 PLLuM-12B-nc-chat-250715 †12.2 38.53 PLLuM-12B-chat 12.2 36.51 EuroLLM-9B-Instruct 9.0 35.96 Mistral-7B-Instruct-v0.3 7.0 31.24 Bielik-7B-Instruct-v0.1 7.2 29.74
+> †Models with a non-commercial license.
+
+Table 8: Polish Medical Leaderboard results (5-shot setting) showing model performance on Polish Board Certification Examinations. The 7B student model retains more than 94% of the performance of the Bielik-11B-v3.0-Instruct teacher (82.98). More importantly, it significantly outperforms previous full-sized variants, such as Bielik-11B-v2.6-Instruct (68.67), illustrating the superior quality of the v3.0 training and inclusion of multilingual data. Within its size class, Bielik-Minitron-7B holds a commanding lead over direct competitors, outperforming the Qwen2.5-7B base model (74.60), 
+
+GaMS-9B-Instruct (72.40), and EuroLLM-9B-Instruct (69.05). The model also surpasses the Mistral-Nemo-Instruct-2407 (74.14), a model with nearly double the parameters (12B), further proving that a specialized distillation of an optimized teacher can yield better reasoning outcomes than larger general-purpose training runs. These results confirm that Bielik-Minitron-7B is an efficient reader, capable of sophisticated text analysis and information extraction while remaining small enough for edge-device deployment. 
+
+6.7 FLORES Machine Translation 
+
+The FLORES benchmark (Table 11) provides a standardized evaluation of translation quality using BLEU scores, specifically focusing on the symmetry between translating to and from Polish. While the full version of this benchmark supports evaluation across 101 languages [ 29 ], the scope of this study is restricted to a subset of 20 languages. This shift aligns with the current focus on transferring model capabilities to European languages. 
+
+Bielik-Minitron-7B-v3.0-Instruct achieves an Average BLEU of 15.53 , demonstrating translation capabilities that rival much larger and more complex architectures. The student model excels in translating to Polish with a score of 
+
+15.74 , notably outperforming larger models like phi-4 (14.55), Qwen3-14B (14.18), and Mistral-Nemo-12B (13.37). This suggests that the knowledge recovery phase effectively prioritized the linguistic nuances of the Polish target language. 15 Bielik-Minitron-7B: Compressing LLMs for the Polish Language                                                                      
+
+> Model Params (B) AVG Polish Bielik-11B-v3-Instruct 11 64.8 69.0
+> Qwen2.5-14B-Instruct 14 61.7 58.9
+> Bielik-11B-v3.0 11 60.6 63.9
+> phi-4 15 58.8 49.6 Apertus-8B-Instruct-2509 857.9 49.6
+> Bielik-Minitron-7B-v3.0-Instruct 757.4 59.3
+> Llama-3.1-8B-Instruct 855.3 53.8 EuroLLM-9B-Instruct 955.1 52.0 Qwen2.5-7B-Instruct 754.4 52.2 Mistral-Nemo-Instruct-2407 12 53.2 48.4 Bielik-11B-v2.6-Instruct 11 51.5 59.3 Mistral-Nemo-Base-2407 12 51.2 44.9 EuroLLM-9B 949.2 45.6 aya-expanse-8b 845.3 46.4 Mistral-7B-Instruct-v0.2 745.3 44.7 Bielik-11B-v2 11 44.8 53.5 pllum-12b-nc-chat-250715 12 44.2 60.6 Mistral-7B-v0.2 741.8 37.2 pllum-12b-nc-base-250715 12 37.8 52.7 Bielik-4.5B-v3.0 4.5 35.9 48.7 PLLuM-12B-base-250801 12 35.5 44.5 Llama-PLLuM-8B-base-250801 830.0 37.2
+
+Table 9: INCLUDE-base-44 benchmark results showing average performance across European languages (20 language subset) and Polish-specific scores.                         
+
+> Model Params (B) Score
+> Qwen2.5-14B-Instruct 14 85.91
+> Bielik-11B-v3.0-Instruct 11 82.98
+> phi-4 15 81.71
+> Bielik-Minitron-7B-v3.0-Instruct 778.03
+> Qwen2.5-7B 774.60 Mistral-Nemo-Instruct-2407 12 74.14 cjvt/GaMS-9B-Instruct 972.40 Apertus-8B-Instruct-2509 869.58 EuroLLM-9B-Instruct 969.05 Bielik-11B-v2.6-Instruct 11 68.67 Apertus-8B-2509 859.04
+
+Table 10: Belebele benchmark results showing model performance on reading comprehension across European languages (28 language subset). 
+
+Bielik-Minitron-7B shows a massive improvement over the previous Bielik-11B-v2 generation, which struggled with translation from Polish (7.64 vs. 15.32 for the student). Although the model trails EuroLLM-9B-Instruct (which was explicitly trained on the FLORES dataset), it matches the performance of phi-4 (15B) despite having less than half the parameters. 
+
+6.8 EuroEval 
+
+To further quantify the effectiveness of Minitron-based compression, we performed a detailed delta analysis comparing 
+
+Bielik-Minitron-7B against Bielik-11B-v3.0 on the EuroEval benchmark (Table 12) covering a diverse set of linguistic and reasoning tasks. The student model achieves an overall knowledge recovery rate of 91.38% , signaling that the vast majority of the teacher’s expertise was successfully distilled into the smaller architecture. The student model exhibits near-perfect recovery in complex linguistic tasks such as Summarization (99.91% BERTscore recovery) and Sentiment Classification (98.11% Macro F1 recovery). These "soft" linguistic skills appear to be the most resilient to structural pruning. In tasks measuring Named Entity Recognition (NER) , the student actually achieved a slight performance gain (101.32% recovery ), suggesting that the distillation process may have acted as a regularizer, sharpening the model’s 16 Bielik-Minitron-7B: Compressing LLMs for the Polish Language                                                  
+
+> Model Params (B) AVG to Polish from Polish
+> EuroLLM-9B-Instruct ∗920.61 19.28 21.95
+> Bielik-11B-v3.0-Instruct 11 19.22 18.54 19.91 Bielik-11B-v3.0 11 17.85 17.60 18.11
+> phi-4 (15B) 15 15.58 14.55 16.61
+> Bielik-Minitron-7B-v3.0-Instruct 715.53 15.74 15.32
+> Qwen3-14B 14 15.37 14.18 16.56 Mistral-Nemo-Instruct-2407 12 14.35 13.37 15.33 Bielik-11B-v2.6-Instruct 11 13.58 15.77 11.38 Qwen2.5-14B-Instruct 14 13.24 12.55 13.93 Bielik-11B-v2 11 11.25 14.86 7.64 Qwen2.5-7B-Instruct 711.34 10.43 12.26
+> ∗EuroLLM was trained on FLORES dataset
+
+Table 11: FLORES machine translation benchmark results showing translation performance across European languages (20 language pairs) measured by BLEU scores.                                                              
+
+> Category Metric Teacher (11B) Student (7.35B) ∆Recovery %
+> Common-sense reasoning Test MCC 48.77 36.44 -12.33 74.71% Test Accuracy 69.85 62.70 -7.15 89.75% European values Test European values 11.52 10.28 -1.24 89.24% Knowledge Test MCC 49.75 38.39 -11.35 77.18% Test Accuracy 62.30 53.81 -8.49 86.37% Linguistic acceptability Test MCC 45.10 39.83 -5.27 88.32% Test Macro F1 69.35 65.96 -3.39 95.11% Named Entity Recognition Test micro F1 52.83 53.52 +0.70 101.32% Sentiment classification Test MCC 63.01 61.62 -1.39 97.79% Test Macro F1 72.54 71.17 -1.37 98.11% Summarization Test ROUGE-L 15.00 14.82 -0.19 98.76% Test BERTscore 64.84 64.78 -0.06 99.91%
+> Overall average 91.38%
+
+Table 12: Detailed Knowledge Recovery Analysis: Bielik-Minitron-7B-v3.0-Instruct vs. Bielik-11B-v3.0-Instruct 
+
+parent model across EuroEval categories. focus on key entities. Linguistic Acceptability (95.11% F1) and European Values (89.24% recovery) also show strong resilience. The most significant deltas were observed in high-level Knowledge (-11.35 MCC) and Common-sense Reasoning 
+
+(-12.33 MCC). While the student maintains a respectable 89.75% accuracy in common sense, these results highlight that dense factual knowledge and complex logical chains are the most sensitive to parameter reduction. These results confirm that while structural pruning inevitably leads to some loss in raw factual "brain capacity," the resulting 7.35B model remains a highly potent alternative, retaining over 90% of the teacher’s capability across nearly every specialized metric. 
+
+6.9 Quantization Performance 
+
+We explore two types of quantization strategies: weight-only and weight-activation. For weight-only quantization, we focus on GGUF format [ 30 ] which applies integer quantization to the weights, while activations remain in high precision. This allows to save memory when storing the weights. At runtime, the weights are upcast to high precision since the operations take place in high precision to preserve the model quality. Conversely, the weight-activation quantization quantizes both weights and activations, leading to both memory savings and runtime speedup from low-precision matrix multiplications. For weight-activation quantization to work, the hardware needs to support the instructions to perform the matrix multiplications in low precision. Here we employ FP8 and NVFP4 formats supported in NVIDIA Blackwell GPUs [31]. 17 Bielik-Minitron-7B: Compressing LLMs for the Polish Language                     
+
+> Model Params (B) Average (%)
+> Bielik-11B-v3.0-Instruct 11.2 65.93
+> Bielik-Minitron-7B-v3.0-Instruct 7.35 62.46
+> Bielik-Minitron-7B-v3.0-Instruct.Q6_K.gguf 7.35 62.29 Bielik-Minitron-7B-v3.0-Instruct.Q8_0.gguf 7.35 62.06 Bielik-Minitron-7B-v3.0-Instruct.Q4_K_M.gguf 7.35 61.89 Bielik-Minitron-7B-v3.0-Instruct FP8 7.35 61.53 Bielik-Minitron-7B-v3.0-Instruct NVFP4 7.35 60.14 Mistral-7B-Instruct-v0.3 7.2 47.74 Bielik-7B-Instruct-v0.1 7.2 44.70
+
+Table 13: Open PL LLM benchmark results for Bielik-Minitron-7B-v3.0-Instruct across different quantization methods, compared to other models. Higher scores are better. Evaluation of the quantized versions (Table 13) examines the impact of the quantization process on the model’s performance on the Open PL LLM benchmark. Bielik-Minitron-7B-v3.0-Instruct demonstrates high resilience to bit-depth reduction, maintaining a high level of accuracy even at significant levels of quantization. For the weight-only quantization, we evaluate on the configurations Q6_K, Q8_0 and Q4_K_M, which employ 6, 8 and 4 bits on average per weight respectively (see further details in [ 30 ]). The highly compressed Q4_K_M (4-bit) variant (61.89) results in a negligible performance loss of only 0.91%.This score is still higher than the unquantized Mistral-7B-v0.3 (47.74) and the original Bielik-7B-v0.1 (44.70). The Q6_K (6-bit) and Q8_0 (8-bit) versions achieve nearly total parity with the base model, degrading only 0.27% and 0.64% respectively. This allows users with limited-memory systems to run near-lossless versions of the model with virtually no trade-off in reasoning quality. With respect to activation-weight quantization, we apply vanilla post-training quantization via NVIDIA Model Optimizer [32 ] to quantize to FP8 and NVFP4. We observe a degradation of 1.49% for FP8 and 3.71% for NVFP4 with respect to the baseline. This gap can be easily bridged by dequantizing specific layers (usually the first and last ones) or applying quantization-aware training or distillation [ 33 ](see NVIDIA Model Optimizer [ 32 ] to run these). We leave for future work the recovery of the quality with FP8 and NVFP4, as well as the speedup advantages of FP8/NVFP4 versus integer formats that require upcast during runtime. These results confirm that Bielik-Minitron-7B is an ideal candidate for local deployment with tools like llama.cpp ,LM Studio, or Ollama. By offering a 4-bit version that retains 99% of the original’s capabilities while significantly reducing RAM requirements, it makes state-of-the-art Polish language modeling accessible to a much broader range of hardware configurations. 
+
+6.10 Training Phases Performance Comparison 
+
+The performance evolution of the Bielik-Minitron-7B-v3.0 model was evaluated across all four sequential development stages: Pruning, Supervised Fine-Tuning (SFT), Direct Preference Optimization (DPO-P), and Group Relative Policy Optimization (GRPO) . As summarized in Table 14, the data illustrate the recovery and refinement process of the model in both English (EN) and Polish (PL) contexts. 
+
+Stage Open LLM EN Open LLM PL 
+
+Pruning & Distillation 60.04 50.67 SFT 66.3 62.26 DPO-P 66.54 62.5 GRPO 66.6 62.46 Table 14: Bielik-Minitron-7B-v3.0 performance across training stages. Higher scores are better. The most substantial gain in performance is observed during the transition from Pruning to SFT. For the Polish benchmarks, the score increased from 50.67 to 62.26, representing an improvement of approximately 11.59 percentage points. This indicates that while pruning significantly reduces the model’s footprint, the subsequent SFT phase is essential for restoring linguistic competence and instruction-following capabilities. Post-SFT optimization via DPO-P and GRPO yielded incremental improvements. In the English benchmarks, the model reached a peak performance of 66.6 in the GRPO stage. In contrast, the Polish benchmarks showed a slight plateau after the DPO-P phase, stabilizing around 62.5. These results suggest that the model’s multilingual capabilities 18 Bielik-Minitron-7B: Compressing LLMs for the Polish Language                                                                              
+
+> Model Params Non-Live Non-Live Non-Live Live Live Live Live Parallel (B) Multiple Parallel Parallel Simple Multiple Parallel Parallel Multiple AST AST Multiple AST AST AST AST AST
+> Bielik-4.5B-v3.0-Instruct (FC) 4.6 92.50% 82.00% 86.00% 70.16% 68.66% 50.00% 54.17%
+> Bielik-Minitron-7B 7.3 94.50% 92.00% 85.00% 71.32% 71.51% 31.25% 66.67%
+> Bielik-11B-v2.6-Instruct 11.0 94.50% 87.50% 86.00% 75.97% 76.07% 37.50% 66.67% Bielik-11B-v2.3-Instruct (Prompt) 11.0 93.50% 47.00% 50.00% 72.87% 69.71% 43.75% 54.17% Bielik-11B-v3.0-Instruct (FC) 11.0 96.00% 88.00% 82.00% 79.07% 72.36% 62.50% 75.00% Gemma-3-12b-it (Prompt) 12.0 95.00% 90.00% 73.00% 84.88% 70.85% 87.50% 62.50% Open-Mistral-Nemo-2407 12.2 93.50% 85.50% 85.00% 77.13% 69.61% 75.00% 70.83%
+
+Table 15: Berkeley Function-Calling Leaderboard (BFCL) results. Comparison of family of Bielik models against the student, Bielik-Minitron, 11B teacher Bielik-11B-v3 and industry baselines. are highly responsive to initial fine-tuning, with preference optimization providing the final marginal gains in alignment and reasoning. 
+
+6.11 Function-Calling Proficiency 
+
+Evaluation on the Berkeley Function-Calling Leaderboard (BFCL) [ 34 ] illustrates the efficacy of the pruning and distillation process in preserving tool-use capabilities. As shown in Table 15, Bielik-Minitron-7B emerges as a high-performance engine in structured, expert-curated environments. It achieves a peak accuracy of 94.50% in Non-Live Multiple AST and 92.00% in Non-Live Parallel AST, matching or exceeding the performance of significantly larger industry baselines such as Gemma-3-12b-it (95.00% and 90.00%) and Open-Mistral-Nemo-2407 (93.50% and 85.50%). These metrics suggest that the Minitron approach successfully compresses high-precision logic for complex function mapping. In the Non-Live Parallel Multiple AST category, the model maintains a robust 85.00% success rate, a critical threshold for deterministic workflows requiring reliable interfaces between natural language and complex API structures. In contrast, the "Live" dataset—comprising dynamic user-contributed prompts—highlights a divergent performance profile. While Bielik-Minitron-7B remains competitive in Live Simple AST (71.32%), its performance in Live Parallel AST drops to 31.25% , underscoring the inherent difficulty of maintaining strict tool-calling logic under the "noise" of authentic human input. 
+
+# 7 Inference Performance Benchmarks 
+
+To evaluate the practical efficiency gains of the compression process, we conducted a series of inference performance benchmarks comparing the Bielik-Minitron-7B student model against the original Bielik-11B-v3.0 teacher. 
+
+7.1 Benchmarking Environment 
+
+All tests were performed in a controlled environment to ensure reproducibility: • Hardware: NVIDIA RTX PRO 6000 Max-Q. • Configuration: –max-concurrency 1 (to measure raw single-stream latency). • Precision: bfloat16 (bf16) for all model variants. 
+
+7.2 Throughput and Latency Analysis 
+
+The results, summarized in Table 16, demonstrate the significant hardware acceleration achieved through the Minitron pruning methodology. By reducing the layer count and FFN intermediate dimension, we achieved a 49.6% increase in output token throughput .The data reveals a critical trade-off characteristic of reduced-parameter models. While the Time per Output Token (TPOT) —which governs the perceived speed of text generation—improved by approximately 32.6% (from 18.28ms to 12.32ms), the Time to First Token (TTFT) saw a marginal increase of 2.65ms. This slight increase in TTFT is often attributed to the change in memory access patterns and kernel execution overhead relative to the reduced parameter count, though it remains well within the threshold for interactive real-time applications. 19 Bielik-Minitron-7B: Compressing LLMs for the Polish Language 
+
+Model Variant Throughput Median TTFT Median TPOT (tok/s) ↑ (ms) ↓ (ms) ↓
+
+Bielik-11B-v3 (bf16) 54.42 24.64 18.28 
+
+Bielik-minitron-7B-v3 (bf16) 81.41 27.29 12.32 
+
+Table 16: Hardware Performance Comparison: Throughput (Tokens per Second), Time to First Token (TTFT), and Time per Output Token (TPOT). Ultimately, for long-form generation and batch processing, the 81.41 tok/s throughput of the 7B variant offers a transformative improvement in deployment cost-efficiency compared to the 11B baseline. 
+
+# 8 Discussion 
+
+The successful development of Bielik-Minitron-7B highlights several strategic engineering insights critical for the efficient compression of Large Language Models. First, the HBM3e memory capacity of the NVIDIA H200 was a fundamental prerequisite for high-throughput distillation. By enabling the full residency of both the teacher (11.04B) and student (7.35B) parameters within a unified VRAM pool, we bypassed the latency bottlenecks typically associated with cross-node activation offloading or intensive pipeline parallelism. Second, our systematic search confirmed that depth reduction is inherently more sensitive than width reduction. While depth pruning offers linear gains in inference speed, reducing the model below 40 layers led to a non-linear collapse in multi-step reasoning stability. The selection of EXP_010 represents a "Golden Ratio" where the model retains enough depth to support complex Polish syntax while benefiting from a narrower intermediate FFN dimension. Finally, we conclude that distillation is an indispensable recovery mechanism ; pruning alone proved insufficient to maintain the reasoning fidelity required for production. The resulting model, using approximately 14GB in FP16 precision, fits comfortably within the 16GB–24GB VRAM envelope of consumer-grade GPUs (e.g., RTX 3090/4090). This makes high-performance Polish LLM capabilities accessible to a broader ecosystem of local developers and researchers without requiring enterprise-grade infrastructure. 
+
+# 9 Conclusion 
+
+In this work, we introduced Bielik-Minitron-7B , a 7.35B-parameter model optimized for the Polish language through a "surgical" integration of structured pruning and logit-based knowledge distillation. While leveraging the NVIDIA Minitron methodology and the high-memory capacity of the H200 architecture, we successfully compressed our 11.04B flagship model and mitigated the loss typical of such reductions. Our results demonstrate that a multi-stage alignment pipeline—comprising SFT, DPO-P, and GRPO—is instrumental in bridging the performance gap between student and teacher models. The final model is 33.4% smaller and significantly faster than the Bielik-11B-v3.0 baseline, yet it preserves 90.1% of its performance across critical benchmarks. By maintaining high reasoning fidelity within a 14GB (FP16) footprint, Bielik-Minitron-7B democratizes access to state-of-the-art Polish NLP, enabling high-performance deployment on consumer-grade hardware. This work provides a scalable blueprint for developing efficient, localized language models for less-represented languages without the prohibitive costs of training from scratch. 
+
+# Acknowledgments 
+
+We extend our sincere gratitude to NVIDIA for providing access to the DGX Cloud Lepton infrastructure, which was instrumental in executing the high-throughput distillation experiments described in this paper. We also thank the NVIDIA engineering teams for their technical guidance on the NeMo Framework and Model Optimizer , specifically regarding sensitivity-based structured pruning and logit-matching strategies. Special thanks to Greg Kosiorowski , Yesika Marlen Ramirez Cardenas , Liana Mikaelyan , Igor Dmochowski 
+
+and Liron Freind-Saadon from NVIDIA for their continuous technical support, architectural insights, and dedication throughout the duration of this research. Their expertise in LLM optimization and distributed training was vital to achieving the efficiency targets for the Polish language ecosystem. 20 Bielik-Minitron-7B: Compressing LLMs for the Polish Language We gratefully acknowledge Polish high-performance computing infrastructure PLGrid (HPC Center: ACK Cyfronet AGH) for providing computer facilities and support within computational grant no. PLG/2024/016951. 
+
+# References 
+
+[1] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al. Qwen3 Technical Report. arXiv preprint arXiv:2505.09388 , 2025. URL https: //arxiv.org/abs/2505.09388 .[2] Aarti Basant, Abhijit Khairnar, Abhijit Paithankar, Abhinav Khattar, Adithya Renduchintala, Aditya Malte, Akhiad Bercovich, Akshay Hazare, Alejandra Rico, Aleksander Ficek, et al. Nvidia Nemotron Nano 2: An Accurate and Efficient Hybrid Mamba-Transformer Reasoning Model. arXiv preprint arXiv:2508.14444 , 2025. URL 
+
+https://arxiv.org/abs/2508.14444 .[3] Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Ruoyu Zhang, Runxin Xu, Qihao Zhu, Shirong Ma, Peiyi rank Wang, Xiao Bi, et al. DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning. arXiv preprint arXiv:2501.12948 , 2025. URL https://arxiv.org/abs/2501.12948 .[4] Akhiad Bercovich, Itay Levy, Izik Golan, Mohammad Dabbah, Ran El-Yaniv, Omri Puny, Ido Galil, Zach Moshe, Tomer Ronen, Najeeb Nabwani, et al. Llama-Nemotron: Efficient Reasoning Models. arXiv preprint arXiv:2505.00949 , 2025. URL https://arxiv.org/abs/2505.00949 .[5] Bielik.AI. Bielik 11B v3 Instruct: A Polish Language Model. https://huggingface.co/speakleash/ Bielik-11B-v3-Instruct , 2024. Hugging Face Model Repository. [6] Sharath Turuvekere Sreenivas, Saurav Muralidharan, Raviraj Joshi, Marcin Chochowski, Ameya Sunil Maha-baleshwarkar, Gerald Shen, Jiaqi Zeng, Zijia Chen, Yoshi Suhara, Shizhe Diao, Chenhan Yu, Wei-Chun Chen, Hayley Ross, Oluwatobi Olabiyi, Ashwath Aithal, Oleksii Kuchaiev, Daniel Korzekwa, Pavlo Molchanov, Mostofa Patwary, Mohammad Shoeybi, Jan Kautz, and Bryan Catanzaro. LLM Pruning and Distillation in Practice: The Minitron Approach, 2024. URL https://arxiv.org/abs/2408.11796 .[7] Saurav Muralidharan, Sharath Turuvekere Sreenivas, Raviraj Joshi, Marcin Chochowski, Mostofa Patwary, Mohammad Shoeybi, Bryan Catanzaro, Jan Kautz, and Pavlo Molchanov. Compact Language Models via Pruning and Knowledge Distillation, 2024. URL https://arxiv.org/abs/2407.14679 .[8] Song Han, Jeff Pool, John Tran, and William J. Dally. Learning both Weights and Con-nections for Efficient Neural Networks. In Advances in Neural Information Processing Systems , volume 28, pages 1135–1143, 2015. URL https://papers.nips.cc/paper/ 5784-learning-both-weights-and-connections-for-efficient-neural-network .[9] Elias Frantar and Dan Alistarh. SparseGPT: Massive Language Models Can Be Accurately Pruned in One-Shot. In Proceedings of the 40th International Conference on Machine Learning , volume 202/frantar23a of Proceedings of Machine Learning Research , pages 10323–10337. PMLR, 2023. URL https://proceedings.mlr.press/ v202/frantar23a.html .[10] Mingjie Sun, Zhuang Liu, Anna Bair, and J. Zico Kolter. A Simple and Effective Pruning Approach for Large Language Models. In International Conference on Learning Representations (ICLR) , 2024. URL https: //openreview.net/forum?id=PxoFut3dWW .[11] Xin Men, Mingyu Xu, Qingyu Zhang, Bingning Wang, Hongyu Lin, Yaojie Lu, Xianpei Han, and Weipeng Chen. ShortGPT: Layers in Large Language Models are More Redundant Than You Expect. In Findings of the Association for Computational Linguistics: ACL 2025 . Association for Computational Linguistics, 2025. URL 
+
+https://aclanthology.org/2025.findings-acl.1035 .[12] Xinyin Ma, Gongfan Fang, and Xinchao Wang. Llm-pruner: On the structural pruning of large lan-guage models. In A. Oh, T. Naumann, A. Globerson, K. Saenko, M. Hardt, and S. Levine, ed-itors, Advances in Neural Information Processing Systems , volume 36, pages 21702–21720. Curran Associates, Inc., 2023. URL https://proceedings.neurips.cc/paper_files/paper/2023/file/ 44956951349095f74492a5471128a7e0-Paper-Conference.pdf .[13] Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. LoRA: Low-Rank Adaptation of Large Language Models. In International Conference on Learning Representations (ICLR) , 2022. URL https://openreview.net/forum?id=nZeVKeeFYf9 .[14] Mengzhou Xia, Tianyu Gao, Zhiyuan Zeng, and Danqi Chen. Sheared LLaMA: Accelerating Language Model Pre-training via Structured Pruning, 2024. URL https://arxiv.org/abs/2310.06694 .21 Bielik-Minitron-7B: Compressing LLMs for the Polish Language [15] NVIDIA. NVIDIA Minitron Pruning in NeMo Framework. https://docs.nvidia.com/nemo-framework/ user-guide/latest/model-optimization/pruning/pruning.html , 2025. NeMo Framework Documen-tation – Minitron Pruning. [16] Jupinder Parmar, Shrimai Prabhumoye, Joseph Jennings, Mostofa Patwary, Sandeep Subramanian, Dan Su, Chen Zhu, Deepak Narayanan, Aastha Jhunjhunwala, Ayush Dattagupta, et al. Nemotron-4 15B Technical Report. 
+
+arXiv preprint arXiv:2402.16819 , 2024. URL https://arxiv.org/abs/2402.16819 .[17] Rafael Rafailov, Archit Sharma, Eric Mitchell, Stefano Ermon, Christopher D. Manning, and Chelsea Finn. Direct Preference Optimization: Your Language Model is Secretly a Reward Model. In 
+
+Advances in Neural Information Processing Systems , volume 36, pages 53728–53741. Curran As-sociates, Inc., 2023. URL https://proceedings.neurips.cc/paper_files/paper/2023/hash/ a85b405ed65c6477a4fe8302b5e06ce7-Abstract-Conference.html .[18] Krzysztof Ociepa, Łukasz Flis, Remigiusz Kinas, Krzysztof Wróbel, and Adrian Gwo´ zdziej. Bielik 11B v3: Multilingual Large Language Model for European Languages, 2025. URL https://arxiv.org/abs/2601. 11579 .[19] Krzysztof Ociepa, Łukasz Flis, Krzysztof Wróbel, Adrian Gwo´ zdziej, and Remigiusz Kinas. Bielik 11B v2 Technical Report, 2025. URL https://arxiv.org/abs/2505.02410 .[20] Krzysztof Ociepa, Łukasz Flis, Krzysztof Wróbel, Adrian Gwo´ zdziej, and Remigiusz Kinas. BIELIK 7B V0.1: Polish Language Model – Development, Insights, and Evaluation. Computer Science , 26(4), Dec 2025. doi: 10.7494/csci.2025.26.4.7689. URL https://journals.agh.edu.pl/csci/article/view/7689 .[21] NVIDIA. How to Prune and Distill Llama-3.1 8B to an NVIDIA Llama-3.1-Minitron 4B Model. https://developer.nvidia.com/blog/ how-to-prune-and-distill-llama-3-1-8b-to-an-nvidia-llama-3-1-minitron-4b-model/ ,2024. [22] NVIDIA. NVIDIA NeMo Framework. https://github.com/NVIDIA/NeMo , 2024. [23] NVIDIA. NVIDIA Model Optimizer Pruning Guidelines. https://github.com/NVIDIA/Model-Optimizer/ blob/main/examples/pruning/README.md#pruning-guidelines , 2025. GitHub Documentation – Model Optimizer (ModelOpt). [24] Arka Pal, Deep Karkhanis, Samuel Dooley, Manley Roberts, Siddartha Naidu, and Colin White. Smaug: Fixing Failure Modes of Preference Optimisation with DPO-Positive. arXiv preprint arXiv:2402.13228 , 2024. URL 
+
+https://arxiv.org/abs/2402.13228 .[25] Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song, Xiao Zhang, Yanwei Zhang, Yu Li, Y. Wu, and Daya Guo. DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models. arXiv preprint arXiv:2402.03300 , 2024. URL https://arxiv.org/abs/2402.03300 .[26] Edward Beeching, Clémentine Fourrier, Nathan Habib, Sheon Han, Nathan Lambert, Nazneen Rajani, Omar Sanseviero, Lewis Tunstall, and Thomas Wolf. Open llm leaderboard. https://huggingface.co/spaces/ open-llm-leaderboard-old/open_llm_leaderboard , 2023. [27] Angelika Romanou, Negar Foroutan, Anna Sotnikova, Zeming Chen, Sree Harsha Nelaturu, Shivalika Singh, Rishabh Maheshwary, Micol Altomare, Mohamed A Haggag, Alfonso Amayuelas, et al. Include: Evaluating multilingual language understanding with regional knowledge. arXiv preprint arXiv:2411.19799 , 2024. [28] Lucas Bandarkar, Davis Liang, Benjamin Muller, Mikel Artetxe, Satya Narayan Shukla, Donald Husa, Naman Goyal, Abhinandan Krishnan, Luke Zettlemoyer, and Madian Khabsa. The belebele benchmark: a parallel reading comprehension dataset in 122 language variants. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , page 749–775. Association for Computational Linguistics, 2024. doi: 10.18653/v1/2024.acl-long.44. URL http://dx.doi.org/10.18653/v1/2024.acl-long.44 .[29] Naman Goyal, Cynthia Gao, Vishrav Chaudhary, Peng-Jen Chen, Guillaume Wenzek, Da Ju, Sanjana Krishnan, Marc’Aurelio Ranzato, Francisco Guzman, and Angela Fan. The flores-101 evaluation benchmark for low-resource and multilingual machine translation, 2021. URL https://arxiv.org/abs/2106.03193 .[30] Hugging Face. GGUF format quantization. https://huggingface.co/docs/hub/en/gguf#gguf . Hugging Face Documentation – GGUF. [31] NVIDIA. Introducing NVFP4 for Efficient and Accurate Low-Precision Inference. https://developer. nvidia.com/blog/introducing-nvfp4-for-efficient-and-accurate-low-precision-inference/ ,2025. NVIDIA NVFP4 blog. [32] NVIDIA. NVIDIA Model Optimizer GitHub repository. https://github.com/NVIDIA/Model-Optimizer .NVIDIA Model Optimizer. 22 Bielik-Minitron-7B: Compressing LLMs for the Polish Language [33] Meng Xin, Sweta Priyadarshi, Jingyu Xin, Bilal Kartal, Aditya Vavre, Asma Kuriparambil Thekkumpate, Zijia Chen, Ameya Sunil Mahabaleshwarkar, Ido Shahaf, Akhiad Bercovich, et al. Quantization-aware distillation for nvfp4 inference accuracy recovery. arXiv preprint arXiv:2601.20088 , 2026. [34] Shishir G. Patil, Huanzhi Mao, Charlie Cheng-Jie Ji, Fanjia Yan, Vishnu Suresh, Ion Stoica, and Joseph E. Gonzalez. The berkeley function calling leaderboard (bfcl): From tool use to agentic evaluation of large language models. In 
+
+Forty-second International Conference on Machine Learning , 2025. 23
