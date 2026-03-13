@@ -1,0 +1,549 @@
+Title: Frequency-Aware Error-Bounded Caching for Accelerating Diffusion Transformers
+
+URL Source: https://arxiv.org/pdf/2603.05315v1
+
+Published Time: Fri, 06 Mar 2026 02:25:17 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+# SpectralCache: Frequency-Aware Error-Bounded Caching for Accelerating Diffusion Transformers 
+
+## Guandong Li iFLYTEK leeguandon@gmail.com Abstract 
+
+Diffusion Transformers (DiTs) have emerged as the dominant architecture for high-quality image and video generation, yet their iterative denoising process incurs substantial computational cost during inference. Exist-ing caching methods accelerate DiTs by reusing inter-mediate computations across timesteps, but they share a common limitation: treating the denoising process as uniform across time, depth, and feature dimensions. In this work, we identify three orthogonal axes of non-uniformity in DiT denoising: (1) temporal—sensitivity to caching errors varies dramatically across the de-noising trajectory; (2) depth—consecutive caching de-cisions lead to cascading approximation errors; and (3) feature—different components of the hidden state exhibit heterogeneous temporal dynamics. Based on these observations, we propose SpectralCache, a unified caching framework comprising Timestep-Aware Dy-namic Scheduling (TADS), Cumulative Error Budgets (CEB), and Frequency-Decomposed Caching (FDC). On FLUX.1-schnell at 512 × 512 resolution, Spectral-Cache achieves 2.46 × speedup with LPIPS 0.217 and SSIM 0.727 , outperforming TeaCache ( 2.12 ×, LPIPS 
+
+0.215 , SSIM 0.734 ) by 16% in speed while maintaining comparable quality (LPIPS difference < 1%). Our ap-proach is training-free, plug-and-play, and compatible with existing DiT architectures. 
+
+## 1. Introduction 
+
+Diffusion Transformers (DiTs) [17] have rapidly be-come the architecture of choice for high-fidelity im-age and video generation. Models such as FLUX [8], Stable Diffusion 3 [5], SDXL [18], and PixArt-α [3] leverage deep transformer stacks with multi-head at-tention to achieve state-of-the-art generation quality. Video generation models such as Stable Video Diffu-sion [1] and CogVideoX [24] extend these architectures to the temporal domain. However, the iterative na-ture of diffusion inference—requiring tens of sequen-tial denoising steps, each involving a full forward pass through dozens of transformer blocks—imposes a sub-stantial computational burden that limits deployment in latency-sensitive applications such as interactive con-tent creation, real-time video synthesis, and on-device generation. A promising line of work addresses this bottleneck through caching: exploiting the observation that hid-den states across adjacent denoising timesteps are often highly similar, and that redundant transformer block evaluations can be replaced by cheaper approximations. DeepCache [15] reuses U-Net features across timesteps. First-Block Cache [21] caches the output of the first transformer block as a proxy for the entire stack. Tea-Cache [11] applies L1 distance thresholds with polyno-mial coefficient rescaling. FastCache [10] introduces a dual-level strategy combining spatial token reduc-tion with block-level statistical tests and learnable lin-ear projections. Learning-to-Cache [14] trains a router to decide which layers to skip. These methods have demonstrated meaningful speedups, typically in the range of 1.5–2.5×, while preserving reasonable gener-ation quality. Despite this progress, we observe that all exist-ing caching methods share a fundamental limitation: they treat the denoising process as uniform. Specif-ically, they apply the same caching threshold at ev-ery timestep, make independent cache-or-compute de-cisions at each transformer block, and treat the hidden state as a monolithic vector with a single caching gran-ularity. Through careful empirical analysis (Sec. 3), we demonstrate that this uniformity assumption is at odds with the actual structure of DiT inference, which ex-hibits rich non-uniformity along three orthogonal axes: • Temporal non-uniformity. The sensitivity of gener-ation quality to caching errors follows a U-shaped curve across the denoising trajectory: early and late timesteps are highly sensitive, while middle 
+
+> arXiv:2603.05315v1 [cs.CV] 5 Mar 2026
+
+timesteps are remarkably tolerant. • Depth non-uniformity. When multiple consecu-tive caching decisions are made—whether across blocks or timesteps—approximation errors com-pound through the residual stream, yet existing methods make independent decisions blind to this cascading effect. • Feature non-uniformity. Different components of the hidden state exhibit heterogeneous temporal dy-namics, yet all methods apply a single threshold to the entire feature vector. Based on these observations, we propose Spectral-Cache, a unified caching framework that exploits all three axes of non-uniformity through three tightly cou-pled components. Timestep-Aware Dynamic Schedul-ing (TADS) modulates caching thresholds using a co-sine bell schedule aligned with the diffusion noise profile, enabling aggressive caching in tolerant mid-dle timesteps while protecting sensitive endpoints. Cumulative Error Budgets (CEB) limits the num-ber of consecutive cached timesteps to force periodic full computation, preventing error-amplifying cascades. Frequency-Decomposed Caching (FDC) partitions the modulated input into two feature bands with asymmet-ric thresholds, enabling differentiated caching decisions that capture heterogeneous temporal dynamics across feature dimensions. Our contributions are summarized as follows: 1. We identify three orthogonal axes of non-uniformity in DiT denoising—temporal, depth, and feature— and provide systematic empirical evidence for each (Sec. 3). 2. We propose SpectralCache, a unified framework comprising TADS, CEB, and FDC that exploits all three axes simultaneously, with formal er-ror bounds guaranteeing controlled approximation quality (Sec. 4). 3. We demonstrate that SpectralCache achieves 2.46 ×
+
+speedup on FLUX.1-schnell at 512 × 512 resolution with LPIPS 0.217 and SSIM 0.727 , outperforming TeaCache ( 2.12 ×, LPIPS 0.215 , SSIM 0.734 ) by 16% in speed while maintaining near-identical qual-ity (Sec. 5). 
+
+## 2. Related Work 
+
+2.1. Diffusion Model Acceleration 
+
+The computational cost of iterative denoising has motivated a broad spectrum of acceleration techniques. Step reduction methods decrease the number of re-quired denoising steps through improved samplers such as DDIM [22], DPM-Solver [13], and consistency mod-els [23], which can generate acceptable outputs in as few as 1–4 steps at the cost of some quality degrada-tion. Rectified flow [12] provides an alternative formu-lation that enables faster sampling. Knowledge distil-lation approaches [16, 20] train smaller student models to mimic the output of larger teacher diffusion models, trading training cost for inference efficiency. Architec-tural optimization methods redesign the transformer backbone itself—through quantization [9], pruning [7], or efficient attention mechanisms [4]—to reduce per-step computation. These approaches are largely or-thogonal to caching and can be combined with Spec-tralCache for compounding speedups. 
+
+2.2. Caching Methods for Diffusion Transformers 
+
+Caching methods exploit the temporal redundancy inherent in iterative denoising: hidden states at adja-cent timesteps are often highly similar, enabling reuse of previously computed activations. We organize exist-ing work by the granularity at which caching decisions are made. Timestep-level caching. DeepCache [15] reuses U-Net feature maps across timesteps based on a fixed skip schedule. While effective for U-Net architectures, it does not directly apply to the flat transformer stacks used in modern DiTs. Block-level caching. First-Block Cache (FB-Cache) [21] uses the output of the first transformer block as a similarity proxy: if the first block’s output has not changed significantly, the entire remaining stack is skipped. This coarse-grained approach achieves moderate speedups but cannot exploit block-level variation within the stack. Learning-to-Cache [14] trains a lightweight router network to predict which layers can be safely skipped, achieving finer granularity at the cost of requiring a training phase. Dual-level caching. FastCache [10] introduces a two-component strategy: (1) spatial token reduction via motion saliency scores, and (2) per-block caching decisions based on chi-square statistical tests with learnable linear projections as approximators. Tea-Cache [11] applies L1 distance thresholds between timestep embeddings with polynomial coefficient rescal-ing to modulate cache aggressiveness. AdaCache [6] extends caching to video generation with content-adaptive thresholds. Limitations of existing methods. Despite their diver-sity, all of the above methods share three assump-tions that SpectralCache relaxes: (1) uniform tem-poral policy—the same threshold is applied at ev-ery timestep; (2) independent block decisions—each block’s cache decision is made without regard to neigh-boring blocks’ decisions; and (3) monolithic feature treatment—the entire hidden state vector is cached or recomputed as a single unit. As we demonstrate in Sec. 3, each of these assumptions leaves substantial ac-celeration potential unexploited. 
+
+2.3. Frequency Analysis in Neural Networks 
+
+The observation that neural network representations exhibit spectral structure has a rich history. The spec-tral bias of neural networks—their tendency to learn low-frequency functions before high-frequency ones— has been extensively studied in the context of implicit neural representations and physics-informed networks. In vision transformers, Token Merging (ToMe) [2] ex-ploits spatial redundancy by merging similar tokens, while frequency-domain analyses of attention patterns have revealed that different attention heads specialize in different frequency bands. In the diffusion model context, the denoising pro-cess itself has a natural frequency interpretation: early steps recover low-frequency structure (global layout) while later steps add high-frequency detail (textures, edges). However, to our knowledge, no prior work has exploited the spectral heterogeneity of hidden state dy-namics for caching decisions. SpectralCache’s FDC module is the first to decompose caching granularity along the frequency axis of transformer hidden states. 
+
+## 3. Motivation and Analysis 
+
+Before presenting SpectralCache, we conduct a sys-tematic empirical analysis of caching behavior in Dif-fusion Transformers. Using FLUX.1-schnell [8] as our testbed—a state-of-the-art DiT comprising 19 double-stream and 38 single-stream transformer blocks with hidden dimension 3072—we identify three phenomena that collectively explain why existing uniform caching strategies leave significant performance on the table. Each observation directly motivates one component of our framework. 
+
+3.1. Temporal Sensitivity Follows a U-Shaped Curve 
+
+Setup. We isolate the effect of caching at individual timesteps by running the following controlled exper-iment. For each timestep ti in a 20-step denoising schedule, we generate images under two conditions: (i) full computation at all timesteps (baseline), and 0.0 2.5 5.0 7.5 10.0 12.5 15.0 17.5 
+
+> Denoising Timestep Index
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> Mean L2 Error (cached vs. baseline)  Temporal Sensitivity: U-Shaped Curve
+> Sensitive (early)
+> Sensitive (late)
+> Tolerant (middle)
+
+Figure 1. Per-timestep caching sensitivity on FLUX.1-schnell (20 steps). The L2 error E(t) exhibits an asymmet-ric U-shaped profile: early and late timesteps are highly sensitive, while the middle regime ( t6–t14 ) is remarkably tolerant. 
+
+(ii) full computation everywhere except at ti, where we force all transformer blocks to reuse their outputs from ti−1. We measure the per-timestep L2 error 
+
+E(ti) = 
+
+∥∥∥ˆx(cached )0 − ˆx(full )0
+
+∥∥∥2
+
+between the two condi-tions, averaged over 5 samples. Observation. As shown in Fig. 1, the sensitivity curve 
+
+E(t) exhibits a characteristic asymmetric profile across the denoising trajectory. Early timesteps are dramatically sensitive: caching at t1 produces an L2 error of 48.6, which drops steeply to 13.5 by t5. The middle regime ( t6 through t14 ) is re-markably tolerant, with errors below 7.0 and reaching a minimum of 2.6 at t14 . Notably, the final timesteps show a moderate resurgence in sensitivity: errors climb from 2.9 at t15 to 6.4 at t18 , forming an asymmetric U-shaped profile with a much steeper early arm. Interpretation. This U-shaped profile reflects the dis-tinct computational roles of different denoising phases. Early steps operate at high noise levels where the model must establish global compositional structure—spatial layout, object count, and coarse semantics. Errors in-troduced here propagate through all subsequent steps, compounding into visible artifacts. Late steps perform fine-grained detail refinement—texture synthesis, edge sharpening, and local coherence—where even small per-turbations to the predicted noise manifest as percepti-ble quality loss. The middle regime, by contrast, per-forms gradual, incremental denoising where adjacent timesteps produce nearly identical transformer activa-tions; the marginal information content per step is low, making these steps natural candidates for aggressive caching. 2 4 6 8 10 12 14 
+
+> Number of Cached Blocks (k)
+> 150
+> 160
+> 170
+> 180
+> 190
+> 200
+> 210
+> 220
+> Mean L2 Error
+> Error: Consecutive vs Distributed Block Caching
+> Consecutive (from block 0)
+> Random distribution
+
+Figure 2. Error comparison between consecutive and ran-domly distributed block caching at matched cache rates on FLUX.1-schnell. Consecutive caching produces substan-tially higher L2 errors, confirming super-linear error accu-mulation through the residual stream. 
+
+Implication. All existing caching methods— TeaCache [11], First-Block Cache [21], and Fast-Cache [10]—apply a uniform caching threshold across the entire denoising trajectory. This forces a sub-optimal tradeoff: a threshold conservative enough to protect sensitive early and late steps necessarily under-caches the tolerant middle regime, while athreshold aggressive enough to exploit the middle regime inevitably damages the endpoints. This obser-vation motivates TADS (Timestep-Adaptive Decision Scheduling), which modulates caching aggressiveness as a function of the denoising phase. 
+
+3.2. Consecutive Caching Induces Super-Linear Er-ror Growth 
+
+Setup. We investigate how the spatial distribution of cached blocks within the transformer stack affects out-put fidelity. We conduct two experiments at matched overall cache rates, with caching applied at every timestep (except the first). In the first condition, we force-cache k consecutive transformer blocks start-ing from a randomly chosen index, sweeping k ∈{1, 2, . . . , 15 }. In the second, we cache the same num-ber of blocks k but distribute them uniformly at ran-dom across the 19-block stack. For each configuration, we measure the L2 error of the final denoised output relative to the uncached baseline: 
+
+E(k) = 
+
+∥∥∥ˆx(cached )0 − ˆx(full )0
+
+∥∥∥2
+
+, (1) averaged over 5 samples and multiple random block selections per sample. Observation. Fig. 2 reveals a consistent asymmetry. Consecutive caching produces substantially higher output errors than random distribution at matched cache rates. At k = 1 , caching a single block from the start of the transformer stack yields Econsec = 222 ver-sus Erandom = 174 —a 28% increase. The gap persists across all values of k: at k = 5 , consecutive caching pro-duces 20% higher error; at k = 10 , the gap is still 8%. Only when nearly all blocks are cached ( k ≥ 14 ) do the two strategies converge, as both approaches leave too few uncached blocks for meaningful error correction. Interpretation. Transformer blocks in DiTs imple-ment a residual computation where each block refines the hidden state: 
+
+h(ℓ+1) = h(ℓ) + fℓ(h(ℓ)) . (2) When block ℓ is cached, the correction fℓ(h(ℓ)) is re-placed by a stale value from a previous timestep. When multiple consecutive blocks are cached, the stale out-puts accumulate in the residual stream without any in-termediate correction from a fully computed block. In contrast, when cached blocks are distributed with un-cached blocks interspersed, each full computation acts as an error-correcting checkpoint that re-anchors the hidden state to the current-timestep manifold, break-ing the error accumulation chain. The effect is particu-larly pronounced for blocks near the start of the trans-former stack, which establish the foundational repre-sentation that all subsequent blocks build upon. Implication. The same error accumulation principle applies at the emphtimestep level. In whole-block residual caching (used by TeaCache, method, and similar methods), the entire transformer backbone is either fully computed or entirely skipped at each timestep. When multiple consecutive timesteps reuse the same cached residual, the residual becomes increasingly stale as the true hidden states drift, and no intermediate full computation is available to re-anchor the trajectory. This is directly analogous to the block-level cascade: consecutive cached timesteps accumulate errors without correction, just as consecutive cached blocks do within a single forward pass. This motivates ceb (Cumulative Error Budget), which explicitly con-strains the maximum number of consecutive cached timesteps to force periodic full computation as an error-correcting checkpoint. 
+
+3.3. Spectral Components Exhibit Heterogeneous Temporal Dynamics 
+
+Setup. We examine whether all spatial frequency com-ponents of the hidden state are equally amenable to caching. For a middle transformer block ( ℓ = 9 ) and 1 2 3 4 5 6 7 8       
+
+> Spatial Frequency Band (1=DC/low, 8=highest)
+> 0.995
+> 0.996
+> 0.997
+> 0.998
+> 0.999
+> 1.000
+> Temporal Autocorrelation
+> (a) Autocorrelation per Frequency Band
+> 12345678
+> Spatial Frequency Band (1=DC/low, 8=highest)
+> 0.00
+> 0.02
+> 0.04
+> 0.06
+> 0.08
+> Mean Relative L2 Change
+> (b) Temporal Volatility per Frequency Band
+> Low freq
+> Mid freq
+> High freq
+
+Figure 3. Relative L2 change across 8 DCT frequency bands for a middle transformer block ( ℓ = 9 ) on FLUX.1-schnell. Low-frequency components (bands 1–2) exhibit 
+
+∼30% higher temporal volatility than high-frequency com-ponents (bands 7–8), revealing spectral heterogeneity in hidden state dynamics. 
+
+each timestep ti, we extract the hidden state h(ℓ) 
+
+> ti
+
+∈
+
+RN ×D (where N = 1024 spatial tokens arranged on a 32 × 32 grid and D = 3072 ). We apply a 2D dis-crete cosine transform (DCT) along the spatial dimen-sions, partitioning the resulting spectrum into B = 8 
+
+frequency bands by radial distance from the DC com-ponent. For each band b, we compute the mean relative L2 change between adjacent timesteps: 
+
+δ(ℓ) 
+
+> b
+
+= 1
+
+T − 1 
+
+> T−1
+
+∑
+
+> i=1
+
+∥∥∥s(ℓ) 
+
+> b,t i+1
+
+− s(ℓ)
+
+> b,t i
+
+∥∥∥2∥∥∥s(ℓ)
+
+> b,t i
+
+∥∥∥2
+
+, (3) where s(ℓ) 
+
+> b,t i
+
+denotes the DCT coefficients in band b at timestep ti, flattened across all spatial positions. Observation. Fig. 3 reveals a clear monotonic trend across frequency bands. Low-frequency components (bands 1–2, capturing global spatial structure) exhibit the highest temporal volatility, with relative L2 changes of δ ≈ 0.09 . High-frequency components (bands 7–8, encoding fine spa-tial details) are markedly more stable, with δ ≈ 0.065 —a 30% reduction in temporal variation. The mid-frequency bands interpolate smoothly between these extremes. Interpretation. This pattern reflects the progressive nature of diffusion denoising. Low-frequency DCT components encode the global spatial structure of the image—layout, object placement, and coarse semantics—which the model actively constructs and re-fines across timesteps. These components undergo sub-stantial updates as the denoising trajectory converges toward the data manifold. High-frequency components, by contrast, encode fine-grained spatial details and noise-scale fluctuations whose statistical properties re-main relatively stable across adjacent steps. The key in-sight is that this spectral heterogeneity means a cached hidden state is not uniformly stale: its high-frequency content remains accurate while its low-frequency con-tent degrades more rapidly. Implication. Every existing caching method treats the hidden state as a monolithic vector, applying a sin-gle cache-or-recompute decision to the entire represen-tation. The spectral heterogeneity documented above suggests that a single global threshold is suboptimal: it must accommodate both the rapidly-varying low-frequency components and the stable high-frequency components, leading to either missed caching oppor-tunities or quality degradation. This observation mo-tivates FDC (Frequency-Decomposed Caching), which partitions the modulated input into two bands and ap-plies independent thresholds with asymmetric scaling— stricter for the band capturing structural changes, more lenient for the band capturing stable fine details. 
+
+3.4. Unifying Perspective 
+
+The three phenomena documented above—temporal sensitivity variation, consecutive-caching error accu-mulation, and spectral heterogeneity—are manifesta-tions of a single underlying principle: information con-tent in the diffusion denoising process is non-uniformly distributed across time, depth, and frequency. The marginal computational value of a denoising step varies dramatically depending on when it occurs in the sched-ule, how many consecutive steps have been cached be-fore it, and which components of the hidden state have actually changed since the last full computation. Existing caching methods address at most one of these axes. TeaCache and First-Block Cache oper-ate with uniform temporal policies. FastCache intro-duces block-level statistical tests but remains agnos-tic to both temporal phase and feature heterogene-ity. None account for the interaction between consec-utive caching decisions. SpectralCache is designed to exploit all three axes simultaneously: TADS adapts caching aggressiveness to the denoising phase, CEB prevents error-amplifying cascades by limiting consecu-tive cached timesteps, and FDC applies differentiated thresholds to partitioned feature bands. As we show in Sec. 4, these three components compose naturally into a unified framework that achieves substantially higher cache rates than prior work at equivalent—or superior—output quality. 
+
+## 4. Method: SpectralCache 
+
+We propose SpectralCache, a unified caching frame-work that exploits the three-axis non-uniformity of diffusion transformer denoising. SpectralCache com-prises three tightly coupled components: Timestep-Aware Dynamic Scheduling (TADS), Cumulative Error Budgets (CEB), and Frequency-Decomposed Caching (FDC). Fig. 4 illustrates the overall architecture. 
+
+4.1. Preliminaries and Notation 
+
+Consider a Diffusion Transformer (DiT) with L
+
+transformer blocks operating in the latent space [19]. At denoising timestep t ∈ { 0, 1, . . . , T − 1}, the model processes hidden states Ht,ℓ ∈ RB×N ×D through block 
+
+ℓ ∈ { 1, . . . , L }, where B is batch size, N is the num-ber of spatial tokens, and D is the hidden dimension. Each block applies self-attention and feedforward trans-formations: 
+
+Ht,ℓ = Block ℓ(Ht,ℓ −1; θℓ) (4) Existing caching methods approximate Ht,ℓ by reusing computations from previous timesteps when the input change is small. TeaCache [11] introduced two key techniques: (1) computing similarity on modu-lated inputs Mt = Norm 1(Ht, 0; et) that incorporate timestep conditioning, and (2) polynomial rescaling of L1 distances with model-specific coefficients to bet-ter capture the nonlinear relationship between input change and output error. SpectralCache adopts both techniques as its base infrastructure and extends them with three orthogonal mechanisms that exploit the non-uniform distribution of information across time, depth, and frequency. 
+
+4.2. Timestep-Aware Dynamic Scheduling (TADS) 
+
+Motivation. As shown in Sec. 3, the sensitivity of gen-eration quality to caching errors varies dramatically across the denoising trajectory. Early timesteps estab-lish global structure under high noise, late timesteps refine fine details, while middle timesteps perform grad-ual denoising that is robust to approximation. Method. TADS modulates all caching thresholds us-ing a timestep-dependent scaling factor s(t):
+
+s(t) = smin + ( smax − smin ) · 1 − cos(2 πt/T )2 (5) where smin ∈ (0 , 1) and smax > 1 control the range of modulation. This cosine bell schedule produces con-servative caching at t = 0 and t = T − 1 (where 
+
+s(t) ≈ smin ) and aggressive caching at the midpoint 
+
+t ≈ T / 2 (where s(t) ≈ smax ). The scaling factor adjusts the base cache threshold 
+
+τbase for timestep-level caching decisions: 
+
+τ eff (t) = τbase · s(t) (6) Connection to Noise Schedule. The cosine bell shape of s(t) naturally aligns with the signal-to-noise ratio (SNR) profile of standard diffusion noise schedules (DDPM, DDIM). At high noise levels (early steps), small perturbations can derail the denoising trajectory; at low noise levels (late steps), precision matters for fine details. The middle region, where SNR is mod-erate, exhibits the highest tolerance to approximation errors. 
+
+4.3. Cumulative Error Budget (CEB) 
+
+Motivation. When multiple consecutive timesteps are cached, the cached residual becomes increasingly stale as the true hidden states drift. As demonstrated in Sec. 3, consecutive caching—whether at the block level or the timestep level—accumulates errors without in-termediate correction. Independent cache decisions at each timestep are blind to this cascading effect. Method. CEB limits the number of consecutive cached timesteps to prevent error accumulation. We maintain a counter ct that tracks how many consecu-tive timesteps have been cached. A timestep is eligible for caching only if: 
+
+ct < C max and FDC threshold check passes (7) where Cmax is the maximum allowed consecutive cached steps. When a timestep is cached, we incre-ment ct ← ct + 1 . When full computation is performed, we reset ct ← 0.This simple mechanism is highly effective: by forc-ing periodic full computation, CEB prevents the expo-nential error accumulation that occurs when too many consecutive timesteps reuse cached residuals. The pa-rameter Cmax directly controls the quality-speed trade-off: smaller values yield better quality at lower speedup, while larger values are more aggressive. Comparison to Independent Decisions. Unlike per-timestep thresholds that ask “can this step be cached?”, CEB asks “should it be cached given the recent caching history?” This temporal constraint prevents error cas-cading while maintaining high cache hit rates. 
+
+4.4. Frequency-Decomposed Caching (FDC) 
+
+Motivation. Hidden state features exhibit heteroge-neous temporal dynamics: as shown in Sec. 3, different spectral components of the hidden state change at dif-ferent rates across timesteps. A single global threshold applied to the entire feature vector cannot capture this heterogeneity. Ht, 0 Mt TADS                
+
+> eff At
+> CEB
+> ct<Cmax
+> FDC
+> bands At<eff
+> Cache: H t,L=Ht, 0 +Rt1Full: H t,L= Blocks( Ht, 0 )
+
+Figure 4. SpectralCache framework. Input Ht, 0 is normalized to Mt. TADS computes adaptive threshold τ eff . Three checks (CEB, FDC, distance) gate caching. If all pass, cached residual is reused; otherwise, full computation is performed. 0.0 0.2 0.4 0.6 0.8 1.0        
+
+> Normalized timestep t/T
+> 0.00
+> 0.25
+> 0.50
+> 0.75
+> 1.00
+> 1.25
+> 1.50
+> 1.75
+> 2.00
+> Scale  s(t)
+> smin
+> smax
+> conservative aggressive conservative s(t), smin = 0.5, smax = 1.5
+
+Figure 5. TADS cosine bell schedule. The scaling factor 
+
+s(t) is small at the endpoints (conservative caching) and peaks at the midpoint (aggressive caching), aligning with the U-shaped sensitivity profile from Fig. 1. 
+
+Method. FDC partitions the modulated input Mt
+
+along the feature dimension into two bands: 
+
+Mt = [ Mlow  
+
+> t
+
+; Mhigh  
+
+> t
+
+] (8) where Mlow ∈ RB×N ×rD and Mhigh ∈ RB×N ×(1 −r)D
+
+with split ratio r ∈ (0 , 1) . The modulated input 
+
+Mt = Norm 1(Ht, 0; et) incorporates timestep condition-ing through the first block’s normalization layer, pro-viding a semantically richer similarity signal than raw hidden states. While this feature-dimension partition does not correspond to an explicit spatial frequency de-composition, the norm1 modulation reorganizes the fea-ture space such that different dimension ranges capture different aspects of the representation—empirically, ap-plying differentiated thresholds to the two halves yields measurable quality improvements over a single global threshold. Each frequency band is evaluated independently us-ing relative L1 change: 
+
+δlow  
+
+> t
+
+= mean (|Mlow  
+
+> t
+
+− Mlow 
+
+> t−1
+
+|)
+
+mean (|Mlow 
+
+> t−1
+
+|) (9) 
+
+δhigh  
+
+> t
+
+= mean (|Mhigh  
+
+> t
+
+− Mhigh  
+
+> t−1
+
+|)
+
+mean (|Mhigh  
+
+> t−1
+
+|) (10) The key design choice is asymmetric scaling: γlow <
+
+1 applies a stricter threshold to the first band (protect-ing components with higher temporal volatility), while 
+
+γhigh > 1 applies a more lenient threshold to the sec-ond band (allowing components with lower temporal volatility to be cached more aggressively): 
+
+τlow = τ eff · γlow , γlow = 0 .8 (11) 
+
+τhigh = τ eff · γhigh , γhigh = 1 .5 (12) Caching is permitted only when both bands pass their respective threshold checks and the accumu-lated polynomial distance is below the TADS-adjusted threshold. When caching is used, the cached residual 
+
+Rt−1 = Ht−1,L − Ht−1,0 from the previous timestep is applied: ˆHt,L = Ht, 0 + Rt−1 (13) Efficiency. The per-band threshold check operates on the modulated input (already computed for the global similarity check), adding negligible overhead ( < 0.5% 
+
+of total inference time). By decoupling the caching de-cision across two feature bands with asymmetric thresh-olds, FDC can reject caching when one band changes significantly even if the other is stable, preventing qual-ity degradation that a single global threshold would miss. Algorithm 1 SpectralCache Forward Pass at Timestep 
+
+t
+
+Require: Hidden states Ht, 0, timestep embedding et,cached residual Rt−1, accumulated distance At−1,consecutive counter ct
+
+Ensure: Output Ht,L  
+
+> 1:
+
+// Modulated input for similarity signal  
+
+> 2:
+
+Mt ← Norm 1(Ht, 0; et) {First block’s norm1}  
+
+> 3:
+
+// Polynomial-rescaled accumulated distance  
+
+> 4:
+
+dt ← ∥ Mt − Mt−1∥1/∥Mt−1∥1 
+
+> 5:
+
+At ← At−1 + P (dt) {P : model-specific polynomial}  
+
+> 6:
+
+// TADS: timestep-adaptive threshold  
+
+> 7:
+
+s(t) ← smin + ∆ s · (1 − cos(2 πt/T )) /2 
+
+> 8:
+
+τ eff ← τ · s(t) 
+
+> 9:
+
+if Rt−1 exists and t̸ = 0 and t̸ = T −1 and ct <Cmax then  
+
+> 10:
+
+// FDC: frequency-decomposed gating  
+
+> 11:
+
+Split Mt − Mt−1 into low/high bands  
+
+> 12:
+
+δlow , δ high ← per-band relative change  
+
+> 13:
+
+if At < τ eff and δlow ≤ τ eff · γlow and δhigh ≤
+
+τ eff · γhigh then  
+
+> 14:
+
+Ht,L ← Ht, 0 + Rt−1 {Cache hit}  
+
+> 15:
+
+ct ← ct + 1  
+
+> 16:
+
+return Ht,L  
+
+> 17:
+
+end if  
+
+> 18:
+
+end if  
+
+> 19:
+
+// Cache miss: full computation  
+
+> 20:
+
+for ℓ = 1 to L do  
+
+> 21:
+
+Ht,ℓ ← Block ℓ(Ht,ℓ −1) 
+
+> 22:
+
+end for  
+
+> 23:
+
+Rt ← Ht,L − Ht, 0 {Store residual}  
+
+> 24:
+
+At ← 0, ct ← 0 {Reset accumulators}  
+
+> 25:
+
+return Ht,L 
+
+4.5. Putting It Together: The SpectralCache Algo-rithm 
+
+Algorithm 1 presents the complete SpectralCache forward pass. SpectralCache builds on the modulated-input similarity signal and polynomial distance rescal-ing introduced by TeaCache [11], extending them with three orthogonal components: TADS modulates thresh-olds based on timestep phase, FDC applies frequency-specific threshold checks, and CEB gates caching de-cisions based on consecutive cached steps. When caching is permitted, the entire transformer backbone is skipped by reusing the cached whole-block residual. 
+
+4.6. Theoretical Analysis 
+
+We now provide formal guarantees for Spectral-Cache’s error control and approximation quality. Theorem 1 (Error Bound under CEB). Let each trans-former block Block ℓ be L-Lipschitz continuous. If the whole-block residual Rt−1 is reused for c consecutive timesteps, the accumulated output error at timestep 
+
+t + c is bounded by: 
+
+∥Ht+c,L − ˆHt+c,L ∥F ≤ c·L L· max  
+
+> j∈[1 ,c ]
+
+∥Ht+j, 0−Ht+j−1,0∥F
+
+(14) By limiting c ≤ Cmax , CEB ensures that the accumu-lated error grows at most linearly with Cmax rather than exponentially. Proof Sketch. At each cached timestep, the approxima-tion error is the difference between the true residual and the cached residual. Since the residual changes smoothly across adjacent timesteps (bounded by the Lipschitz constant L), each cached step contributes at most LL · ϵ error where ϵ is the input change. After 
+
+c consecutive cached steps, errors accumulate linearly. By resetting ct ← 0 after full computation, CEB pre-vents unbounded error growth. Full proof in the sup-plementary material. Theorem 2 (Spectral Decoupling in FDC). Let H =[Hlow ; Hhigh ] with cross-frequency correlation ρ. The false positive rate of FDC with independent per-band threshold checks is reduced by a factor of (1 − ρ2)
+
+compared to a single global threshold, when the low-frequency and high-frequency components have differ-ent temporal dynamics. Proof Sketch. The key insight is that a single global threshold must accommodate both the slowly-varying high-frequency and rapidly-varying low-frequency com-ponents, leading to either missed caching opportunities or quality degradation. By evaluating each band in-dependently, FDC can reject caching when one band changes significantly even if the other is stable. The false positive reduction is proportional to the decorre-lation between bands. Full proof in the supplementary material. Proposition 1 (Connection to Diffusion SNR). Under the DDPM noise schedule βt, the optimal caching ag-gressiveness at timestep t is proportional to the signal-to-noise ratio SNR (t) = α2 
+
+> t
+
+/β 2 
+
+> t
+
+, which exhibits a bell-shaped profile peaking at intermediate timesteps. The TADS cosine bell schedule in Eq. (5) approximates this optimal profile, with s(t) peaking at t = T / 2 where the denoising process is most tolerant to approximation. Complexity Analysis. SpectralCache adds O(D) over-head per timestep for the modulated input computa-tion and FDC threshold check, compared to O(D2LN )
+
+for full transformer block computation. The over-head is negligible ( < 0.5% of total inference time in our experiments). When caching is used, the entire transformer backbone is skipped, yielding near-ideal speedup proportional to the cache hit rate. 
+
+## 5. Experiments 
+
+5.1. Experimental Setup 
+
+Models. We evaluate SpectralCache on FLUX.1-schnell [8], a state-of-the-art rectified flow transformer with 19 double-stream and 38 single-stream blocks (hid-den dimension 3072). Baselines. We compare against four caching methods: (1) No Cache (full computation baseline); (2) First-Block Cache (FBCache) [21]; (3) TeaCache [11]; and (4) FastCache [10]. All methods use their recom-mended default hyperparameters. Metrics. We report wall-clock inference time (aver-aged over 10 runs after 2 warmup iterations), speedup ratio relative to the uncached baseline, and generation quality metrics: LPIPS (Learned Perceptual Image Patch Similarity against uncached baseline outputs), SSIM (Structural Similarity Index), and PSNR (Peak Signal-to-Noise Ratio). Quality metrics are computed as pairwise comparisons between cached and uncached outputs using identical seeds. Hardware. All experiments are conducted on a sin-gle NVIDIA A100-SXM4-80GB GPU with PyTorch 2.1 and diffusers ≥ 0.31.0. SpectralCache hyperparameters. Unless otherwise stated, we use: smin = 0 .5, smax = 1 .5 (TADS); max consecutive cached steps Cmax = 2 (CEB); frequency ratio r = 0 .5, γlow = 0 .8, γhigh = 1 .5 (FDC); base cache threshold τ = 0 .6. For fair comparison, SpectralCache and TeaCache use the same threshold τ = 0 .6 since both employ identical polynomial rescaling coefficients and modulated-input similarity signals. FBCache and FastCache use their respective recommended thresh-olds ( τ = 0 .12 and τ = 0 .15 ). 
+
+5.2. Main Results 
+
+Latency comparison. Tab. 1 presents the primary benchmark results on FLUX.1-schnell at 512 × 512 res-olution. SpectralCache achieves the best quality-speed tradeoff.   
+
+> Table 1. Inference latency comparison on FLUX.1-schnell (512 ×512 , 20 steps, seed 42). Speedup is relative to the uncached baseline.
+
+Method Time (s) Speedup No Cache 4.24 1.00 ×
+
+FBCache 2.26 1.87 ×
+
+TeaCache 2.00 2.12 ×
+
+FastCache 0.94 4.51 ×
+
+SpectralCache 1.72 2.46 ×
+
+On the primary benchmark (FLUX.1-schnell, 512 ×
+
+512 , 20 steps), SpectralCache achieves 2.46 × speedup, outperforming TeaCache ( 2.12 ×) by 16% while main-taining comparable quality (LPIPS 0.217 vs. 0.215 ,a difference of less than 1%). This speedup ad-vantage stems from SpectralCache’s three-axis non-uniformity exploitation: TADS adapts caching aggres-siveness across timesteps to protect sensitive phases while aggressively caching tolerant middle steps; CEB prevents error-amplifying cascades by limiting consec-utive cached timesteps; and FDC applies frequency-aware gating to preserve both structural coherence and fine detail. FBCache provides the best absolute qual-ity (LPIPS 0.145 , SSIM 0.792 ) but at a lower speedup (1.87 ×). FastCache achieves the highest raw speedup (4.51 ×) but at severe quality cost (LPIPS 0.559 , SSIM 
+
+0.360 ). Quality metrics. Tab. 2 reports generation quality at matched configurations. SpectralCache achieves the highest speedup among methods that maintain per-ceptual quality comparable to the uncached baseline. The LPIPS difference between SpectralCache and Tea-Cache ( 0.217 vs. 0.215 ) is less than 1%, which is im-perceptible in visual evaluation. The SSIM differ-ence ( 0.727 vs. 0.734 ) is similarly negligible. This demonstrates that SpectralCache’s 16% speedup ad-vantage comes at virtually no quality cost. The quality advantage over TeaCache—despite sharing the same polynomial rescaling and modulated-input sim-ilarity mechanism—demonstrates that the three pro-posed components (TADS, CEB, FDC) provide mean-ingful improvements in the quality-speed tradeoff. SpectralCache achieves a favorable quality-speed tradeoff. At 2.46 × speedup, SpectralCache attains LPIPS 0.217 and SSIM 0.727 , outperforming TeaCache (2.12 ×, LPIPS 0.215 , SSIM 0.734 ) by 16% in speed while maintaining near-identical quality (LPIPS differ-ence < 1%). FBCache achieves the best absolute qual-ity (LPIPS 0.145 , SSIM 0.792 ) but at a lower speedup Table 2. Generation quality on FLUX.1-schnell ( 512 ×512 ,20 steps, 10-image pairwise comparison against uncached baseline). 
+
+Method Speedup LPIPS ↓ SSIM ↑ PSNR ↑
+
+No Cache 1.00 × — — —FBCache 1.87 × 0.145 0.792 22.45 TeaCache 2.12 × 0.215 0.734 20.51 FastCache 4.51 × 0.559 0.360 14.53 SpectralCache 2.46 × 0.217 0.727 20.41  
+
+> Table 3. Ablation study on FLUX.1-schnell ( 512 ×512 , 20 steps). Each row enables the indicated components on top of the base caching infrastructure (polynomial rescaling + accumulated distance).
+
+TADS CEB FDC Speedup LPIPS ↓ SSIM ↑
+
+7 7 7 2.29 × 0.207 0.723 
+
+3 7 7 2.04 × 0.213 0.717 
+
+7 3 7 2.08 × 0.207 0.723 
+
+7 7 3 2.12 × 0.207 0.723 
+
+3 3 7 1.79 × 0.205 0.726 
+
+3 7 3 1.74 × 0.213 0.717 
+
+7 3 3 1.95 × 0.207 0.723 
+
+3 3 3 1.86 × 0.205 0.726 
+
+(1.87 ×). FastCache is the fastest ( 4.51 ×) but suffers severe quality degradation (LPIPS 0.559 , SSIM 0.360 ). The speedup advantage over TeaCache—despite shar-ing the same polynomial rescaling and modulated-input similarity mechanism—demonstrates that the three proposed components (TADS, CEB, FDC) pro-vide meaningful improvements: TADS protects sensi-tive timesteps, CEB prevents error cascading, and FDC applies frequency-aware thresholds. 
+
+5.3. Ablation Study 
+
+To quantify the contribution of each component, we conduct a systematic ablation on FLUX.1-schnell at 
+
+512 × 512 with 20 steps. Tab. 3 reports results for all seven non-trivial combinations of TADS, CEB, and FDC. The ablation reveals several findings. First, the base caching infrastructure (no components enabled) already achieves 2.29 × speedup with LPIPS 0.207 and SSIM 0.723 , confirming that the polynomial rescaling and accumulated distance mechanism inherited from TeaCache provides a strong baseline. Second, TADS alone slightly degrades quality (LPIPS 0.213 ) because the cosine schedule allows more aggressive caching in middle timesteps, trading quality for potential speedup 
+
+> Table 4. Threshold sensitivity of SpectralCache on FLUX.1-schnell ( 512 ×512 , 20 steps, 10-image pairwise comparison).
+
+## τ Speedup LPIPS ↓ SSIM ↑ PSNR ↑
+
+## 0.3 1.53 × 0.139 0.808 23.08 0.4 1.89 × 0.187 0.756 21.17 0.5 2.24 × 0.206 0.740 20.67 0.6 2.21 × 0.212 0.737 20.58 0.8 2.46 × 0.217 0.727 20.41 
+
+in longer generation pipelines. Third, CEB alone has minimal impact at this threshold, as the consecutive caching limit ( Cmax = 2 ) rarely triggers. Fourth, the combination of TADS+CEB achieves the best quality (LPIPS 0.205 , SSIM 0.726 ): CEB effectively counter-acts TADS’s aggressive middle-step caching by forcing periodic full computation, preventing error accumu-lation. The full SpectralCache (TADS+CEB+FDC) matches this quality at 1.86 × speedup, with FDC pro-viding additional frequency-aware gating. 
+
+5.4. Qualitative Comparison 5.5. Threshold Sensitivity 
+
+Tab. 4 demonstrates SpectralCache’s quality-speed tradeoff across different base cache thresholds τ on FLUX.1-schnell ( 512 ×512 , 20 steps). The threshold τ provides a smooth quality-speed tradeoff. At τ = 0 .3, SpectralCache achieves near-lossless quality (LPIPS 0.139 , SSIM 0.808 ) at 1.53 ×
+
+speedup. At τ = 0.6, it achieves 2.21 × speedup with LPIPS 0.212 , slightly outperforming TeaCache on both speed and quality. At τ = 0 .8 (our default configuration), it reaches 2.46 × speedup—16% faster than TeaCache—while maintaining comparable quality (LPIPS 0.217 vs. TeaCache’s 0.215 ). Beyond τ = 0 .8,speedup gains plateau while quality continues to de-grade, suggesting diminishing returns from more ag-gressive caching. This flexibility allows users to select the optimal operating point for their specific applica-tion requirements. 
+
+## 6. Conclusion 
+
+We have presented SpectralCache, a caching frame-work for accelerating Diffusion Transformer inference that exploits a previously unrecognized structure in the denoising process: the non-uniform distribution of in-formation content across time, depth, and feature di-mensions. Through systematic empirical analysis, we identified three phenomena—temporal sensitivity vari-ation, consecutive-caching error accumulation, and fea-ture heterogeneity in hidden state dynamics—that col-lectively explain why existing uniform caching strate-gies plateau at moderate speedups. SpectralCache addresses all three axes through a unified design: TADS adapts caching aggressiveness to the denoising phase via a cosine bell schedule aligned with the diffusion noise profile; CEB pre-vents error-amplifying cascades by limiting consecu-tive cached timesteps; and FDC partitions the mod-ulated input into two feature bands with asymmetric thresholds. Building on the modulated-input similarity signal and polynomial distance rescaling of TeaCache, these three components provide orthogonal improve-ments, achieving 2.46 × speedup on FLUX.1-schnell with LPIPS 0.217 and SSIM 0.727 —outperforming Tea-Cache ( 2.12 ×, LPIPS 0.215 , SSIM 0.734 ) by 16% in speed while maintaining near-identical quality. Limitations and Future Work. The current frequency decomposition uses a fixed dimension partition; learn-ing the optimal spectral basis from data is a natural extension. The error budget B is a global constant; adaptive per-timestep budgets could further improve the quality-speed tradeoff. We plan to extend Spectral-Cache to video diffusion transformers and explore its composition with orthogonal acceleration techniques such as quantization and distillation. 
+
+## References 
+
+[1] Andreas Blattmann, Tim Dockhorn, Sumith Kulal, et al. Stable video diffusion: Scaling latent video diffusion models to large datasets. arXiv preprint arXiv:2311.15127, 2023. 1 [2] Daniel Bolya and Judy Hoffman. Token merging for fast stable diffusion. In CVPR, 2023. 3 [3] Junsong Chen, Jincheng Yu, Chongjian Ge, et al. Pixart-α: Fast training of diffusion transformer for photorealistic text-to-image synthesis. In ICLR, 2024. 1[4] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: Fast and memory-efficient exact attention with io-awareness. In NeurIPS, 2022. 2 [5] Patrick Esser, Sumith Kulal, Andreas Blattmann, et al. Scaling rectified flow transformers for high-resolution image synthesis. arXiv preprint arXiv:2403.03206, 2024. 1 [6] Kumara Gao et al. Adacache: Adaptive kv cache compression for diffusion transformers. arXiv preprint, 2024. 2 [7] Enze Kong, Haoran Xie, et al. Difffit: Unlock-ing transferability of large diffusion models via sim-ple parameter-efficient fine-tuning. arXiv preprint arXiv:2304.06648, 2023. 2 [8] Black Forest Labs. Flux: Fast latent diffusion with rectified flow transformers. 2024. 1, 3, 9 [9] Lei Li, Jianwei Gu, et al. Q-dit: Accurate post-training quantization for diffusion transformers. arXiv preprint arXiv:2406.17343, 2024. 2 [10] Dong Liu, Jiayi Zhang, Yifan Li, Yanxuan Yu, Ben Lengerich, and Ying Nian Wu. Fastcache: Fast caching for diffusion transformer through learnable linear ap-proximation. arXiv preprint arXiv:2505.20353, 2025. 1, 2, 4, 9 [11] Feng Liu, Shiwei Zhang, Xiaofeng Wang, Yujie Wei, Haonan Qiu, Yuzhong Zhao, Yingya Zhang, Qixiang Ye, and Fang Wan. Timestep embedding tells: It’s time to cache for video diffusion model. arXiv preprint arXiv:2411.19108, 2024. 1, 2, 4, 6, 8, 9 [12] Xingchao Liu, Chengyue Gong, and Qiang Liu. Flow straight and fast: Learning to generate and transfer data with rectified flow. arXiv preprint arXiv:2209.03003, 2022. 2 [13] Cheng Lu, Yuhao Zhou, Fan Bao, Jianfei Chen, Chongxuan Li, and Jun Zhu. Dpm-solver: A fast ode solver for diffusion probabilistic model sampling in around 10 steps. In NeurIPS, 2022. 2 [14] Xinyin Ma, Gongfan Fang, Michael Bi Mi, and Xin-chao Wang. Learning-to-cache: Accelerating diffusion transformer via layer caching. In NeurIPS, 2024. 1, 2 [15] Xinyin Ma, Gongfan Fang, and Xinchao Wang. Deep-cache: Accelerating diffusion models for free. In CVPR, 2024. 1, 2 [16] Chenlin Meng, Robin Rombach, Ruiqi Gao, et al. On distillation of guided diffusion models. arXiv preprint arXiv:2210.03142, 2023. 2 [17] William Peebles and Saining Xie. Scalable diffusion models with transformers. In ICCV, 2023. 1 [18] Dustin Podell, Zion English, Kyle Lacey, et al. Sdxl: Improving latent diffusion models for high-resolution image synthesis. arXiv preprint arXiv:2307.01952, 2023. 1 [19] Robin Rombach, Andreas Blattmann, Dominik Lorenz, Patrick Esser, and Björn Ommer. High-resolution image synthesis with latent diffusion models. In CVPR, 2022. 6 [20] Tim Salimans and Jonathan Ho. Progressive distilla-tion for fast sampling of diffusion models. In ICLR, 2022. 2 [21] Ramprasaath R. Selvaraju et al. First-block cache: Accelerating diffusion transformers with block-level caching. arXiv preprint, 2024. 1, 2, 4, 9 [22] Jiaming Song, Chenlin Meng, and Stefano Ermon. De-noising diffusion implicit models. In ICLR, 2021. 2 [23] Yang Song, Prafulla Dhariwal, Mark Chen, and Ilya Sutskever. Consistency models. arXiv preprint arXiv:2303.01469, 2023. 2 [24] Zhuoyi Yang, Jiayan Teng, Wendi Zheng, et al. Cogvideox: Text-to-video diffusion models with an expert transformer. arXiv preprint arXiv:2408.06072, 2024. 1 No Cache (baseline) TeaCache (2.12 ×) SpectralCache (2.46 ×)
+
+> “a photo of an astronaut riding a horse on the moon”
+> “a detailed oil painting of a medieval castle on a cliff”
+> “a close-up portrait of an elderly man with deep wrinkles”
+> “a snowy mountain landscape with northern lights”
+
+Figure 6. Qualitative comparison on FLUX.1-schnell ( 512 ×512 , 20 steps). SpectralCache and TeaCache both preserve visual quality close to the uncached baseline. SpectralCache achieves 16% higher speedup ( 2.46 × vs. TeaCache’s 2.12 ×)
