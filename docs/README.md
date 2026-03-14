@@ -6,127 +6,88 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-03-13
-- 运行时间：2026-03-13 19:29:06 UTC
+- 最新运行日期：2026-03-14
+- 运行时间：2026-03-14 19:20:27 UTC
 - 运行状态：成功
-- 本次总论文数：35
-- 精读区：24
+- 本次总论文数：22
+- 精读区：11
 - 速读区：11
 
 ### 今日简报（AI）
-今日精选 35 篇前沿论文，重点突破多模态 Token 压缩与视频理解蒸馏技术。
-UniCompress 实现了视觉语言理解与生成的统一压缩，而多样本蒸馏显著提升了视频理解的可靠性。
-建议关注 1.7B 小参数模型 VisionPangu 及 VLA 模型的自适应推理，探索轻量化与智能决策的平衡。
-- 详情：[/202603/13/README](/202603/13/README)
+今日深度复盘 22 篇前沿论文，聚焦 PACED 蒸馏新范式与 Diffusion Transformer 的动态加速突破。
+重点关注 PACED 如何在学生模型能力边界实现极致蒸馏，以及 SODA 与 FastSTAR 为高效视频合成提供的加速方案。
+建议优先研读满分论文 PACED 的蒸馏框架，并关注 MoE 在新型芯片架构上的训练优化。
+- 详情：[/202603/14/README](/202603/14/README)
 
 ### 精读区论文标签
-1. [UniCompress: Token Compression for Unified Vision-Language Understanding and Generation](/202603/13/2603.11320v1-unicompress-token-compression-for-unified-vision-language-understanding-and-generation)  
+1. [PACED: Distillation at the Frontier of Student Competence](/202603/14/2603.11178v1-paced-distillation-at-the-frontier-of-student-competence)  
    标签：评分：10.0/10、query:mc
-   evidence：统一视觉语言模型的令牌压缩
-2. [Beyond Single-Sample: Reliable Multi-Sample Distillation for Video Understanding](/202603/13/2603.11423v1-beyond-single-sample-reliable-multi-sample-distillation-for-video-understanding)  
-   标签：评分：10.0/10、query:mc
-   evidence：针对大型视觉语言模型的多样本蒸馏
-3. [LongFlow: Efficient KV Cache Compression for Reasoning M](/202603/13/2603.11504v1-longflow-efficient-kv-cache-compression-for-reasoning-m)  
-   标签：评分：10.0/10、query:mc
-   evidence：推理模型的KV缓存压缩
-4. [MedPruner: Training-Free Hierarchical Token Pruning for Efficient 3D Medical Image Understanding in Vision-Language Models](/202603/13/2603.11625v1-medpruner-training-free-hierarchical-token-pruning-for-efficient-3d-medical-image-understanding-in-vision-language-models)  
-   标签：评分：10.0/10、query:mc
-   evidence：用于VLM高效部署的免训练Token剪枝
-5. [Bielik-Minitron-7B: Compressing Large Language Models via Structured Pruning and Knowledge Distillation for the Polish Language](/202603/13/2603.11881v1-bielik-minitron-7b-compressing-large-language-models-via-structured-pruning-and-knowledge-distillation-for-the-polish-language)  
-   标签：评分：10.0/10、query:mc
-   evidence：通过结构化剪枝和知识蒸馏压缩LLM
-6. [ForensicZip: More Tokens are Better but Not Necessary in Forensic Vision-Language Models](/202603/13/2603.12208v1-forensiczip-more-tokens-are-better-but-not-necessary-in-forensic-vision-language-models)  
-   标签：评分：10.0/10、query:mc
-   evidence：取证视觉语言模型的视觉令牌剪枝
-7. [Attend Before Attention: Efficient and Scalable Video Understanding via Autoregressive Gazing](/202603/13/2603.12254v1-attend-before-attention-efficient-and-scalable-video-understanding-via-autoregressive-gazing)  
-   标签：评分：10.0/10、query:mc
-   evidence：通过Patch剪枝实现MLLM高效视频理解
-8. [VLN-Cache: Enabling Token Caching for VLN Models with Visual/Semantic Dynamics Awareness](/202603/13/2603.07080v2-vln-cache-enabling-token-caching-for-vln-models-with-visualsemantic-dynamics-awareness)  
+   evidence：大语言模型蒸馏的原则性框架
+2. [SODA: Sensitivity-Oriented Dynamic Acceleration for Diffusion Transformer](/202603/14/2603.07057v2-soda-sensitivity-oriented-dynamic-acceleration-for-diffusion-transformer)  
    标签：评分：9.0/10、query:mc
-   evidence：视觉语言导航模型的令牌缓存以降低推理成本
-9. [Shorter Thoughts, Same Answers: Difficulty-Scaled Segment-Wise RL for CoT Compression](/202603/13/2603.07598v1-shorter-thoughts-same-answers-difficulty-scaled-segment-wise-rl-for-cot-compression)  
+   evidence：结合缓存与剪枝以加速扩散Transformer
+3. [ArcLight: A Lightweight LLM Inference Architecture for Many-Core CPUs](/202603/14/2603.07770v1-arclight-a-lightweight-llm-inference-architecture-for-many-core-cpus)  
    标签：评分：9.0/10、query:mc
-   evidence：大语言模型推理链的训练后压缩
-10. [Scaling Test-Time Robustness of Vision-Language Models via Self-Critical Inference Framework](/202603/13/2603.07659v1-scaling-test-time-robustness-of-vision-language-models-via-self-critical-inference-framework)  
+   evidence：针对多核 CPU 的轻量级 LLM 推理架构
+4. [WaDi: Weight Direction-aware Distillation for One-step Image Synthesis](/202603/14/2603.08258v1-wadi-weight-direction-aware-distillation-for-one-step-image-synthesis)  
    标签：评分：9.0/10、query:mc
-   evidence：大型视觉语言模型（LVLM）的鲁棒性挑战
-11. [DyLLM: Efficient Diffusion LLM Inference via Saliency-based Token Selection and Partial Attention](/202603/13/2603.08026v1-dyllm-efficient-diffusion-llm-inference-via-saliency-based-token-selection-and-partial-attention)  
+   evidence：将多步扩散模型蒸馏为单步生成器
+5. [MM-Zero: Self-Evolving Multi-Model Vision Language Models From Zero Data](/202603/14/2603.09206v1-mm-zero-self-evolving-multi-model-vision-language-models-from-zero-data)  
    标签：评分：9.0/10、query:mc
-   evidence：利用时间稀疏性和标记选择实现高效LLM推理
-12. [Evolution Strategy-Based Calibration for Low-Bit Quantization of Speech Models](/202603/13/2603.08173v1-evolution-strategy-based-calibration-for-low-bit-quantization-of-speech-models)  
+   evidence：自我进化的多模态视觉语言模型
+6. [Streaming Autoregressive Video Generation via Diagonal Distillation](/202603/14/2603.09488v2-streaming-autoregressive-video-generation-via-diagonal-distillation)  
    标签：评分：9.0/10、query:mc
-   evidence：语音模型的低比特量化
-13. [FVG-PT: Adaptive Foreground View-Guided Prompt Tuning for Vision-Language Models](/202603/13/2603.08708v1-fvg-pt-adaptive-foreground-view-guided-prompt-tuning-for-vision-language-models)  
+   evidence：通过扩散蒸馏压缩视频生成模型
+7. [Efficiently Aligning Draft Models via Parameter- and Data-Efficient Adaptation](/202603/14/2603.09527v1-efficiently-aligning-draft-models-via-parameter--and-data-efficient-adaptation)  
    标签：评分：9.0/10、query:mc
-   evidence：用于高效VLM提示微调的蒸馏补偿
-14. [Evolving Prompt Adaptation for Vision-Language Models](/202603/13/2603.09493v1-evolving-prompt-adaptation-for-vision-language-models)  
+   evidence：用于投机采样加速的高效自适应
+8. [Decoder-Free Distillation for Quantized Image Restoration](/202603/14/2603.09624v1-decoder-free-distillation-for-quantized-image-restoration)  
    标签：评分：9.0/10、query:mc
-   evidence：大规模视觉语言模型（VLM）的适配
-15. [GLM-OCR Technical Report](/202603/13/2603.10910v1-glm-ocr-technical-report)  
+   evidence：用于模型压缩的量化感知训练与蒸馏
+9. [UniCom: Unified Multimodal Modeling via Compressed Continuous Semantic Representations](/202603/14/2603.10702v1-unicom-unified-multimodal-modeling-via-compressed-continuous-semantic-representations)  
    标签：评分：9.0/10、query:mc
-   evidence：具有多标记预测的高效紧凑多模态模型
-16. [Scaling Reasoning Efficiently via Relaxed On-Policy Distillation](/202603/13/2603.11137v1-scaling-reasoning-efficiently-via-relaxed-on-policy-distillation)  
+   evidence：多模态模型的压缩连续语义表示
+10. [Enhancing Lightweight Vision Language Models through Group Competitive Learning for Socially Compliant Navigation](/202603/14/2603.11447v1-enhancing-lightweight-vision-language-models-through-group-competitive-learning-for-socially-compliant-navigation)  
    标签：评分：9.0/10、query:mc
-   evidence：用于转移推理能力的在线策略蒸馏
-17. [Frequency-Modulated Visual Restoration for Matryoshka Large Multimodal Models](/202603/13/2603.11220v1-frequency-modulated-visual-restoration-for-matryoshka-large-multimodal-models)  
+   evidence：增强轻量级视觉语言模型
+11. [PicoSAM3: Real-Time In-Sensor Region-of-Interest Segmentation](/202603/14/2603.11917v1-picosam3-real-time-in-sensor-region-of-interest-segmentation)  
    标签：评分：9.0/10、query:mc
-   evidence：多模态大模型的视觉Token缩减
-18. [ReHARK: Refined Hybrid Adaptive RBF Kernels for Robust One-Shot Vision-Language Adaptation](/202603/13/2603.11542v1-rehark-refined-hybrid-adaptive-rbf-kernels-for-robust-one-shot-vision-language-adaptation)  
-   标签：评分：9.0/10、query:mc
-   evidence：大规模视觉语言模型（VLM）的适配
-19. [Where Matters More Than What: Decoding-aligned KV Cache Compression via Position-aware Pseudo Queries](/202603/13/2603.11564v1-where-matters-more-than-what-decoding-aligned-kv-cache-compression-via-position-aware-pseudo-queries)  
-   标签：评分：9.0/10、query:mc
-   evidence：用于大语言模型高效推理的KV缓存压缩
-20. [ZeroSense:How Vision matters in Long Context Compression](/202603/13/2603.11846v1-zerosensehow-vision-matters-in-long-context-compression)  
-   标签：评分：9.0/10、query:mc
-   evidence：多模态大模型视觉文本压缩的评估框架
-21. [Slow-Fast Inference: Training-Free Inference Acceleration via Within-Sentence Support Stability](/202603/13/2603.12038v1-slow-fast-inference-training-free-inference-acceleration-via-within-sentence-support-stability)  
-   标签：评分：9.0/10、query:mc
-   evidence：通过稀疏内存实现免训练推理加速
-22. [Long-Context Encoder Models for Polish Language Understanding](/202603/13/2603.12191v1-long-context-encoder-models-for-polish-language-understanding)  
-   标签：评分：9.0/10、query:mc
-   evidence：通过知识蒸馏训练的压缩模型变体
-23. [IndexCache: Accelerating Sparse Attention via Cross-Layer Index Reuse](/202603/13/2603.12201v1-indexcache-accelerating-sparse-attention-via-cross-layer-index-reuse)  
-   标签：评分：9.0/10、query:mc
-   evidence：加速LLM中的稀疏注意力
-24. [HiAP: A Multi-Granular Stochastic Auto-Pruning Framework for Vision Transformers](/202603/13/2603.12222v1-hiap-a-multi-granular-stochastic-auto-pruning-framework-for-vision-transformers)  
-   标签：评分：9.0/10、query:mc
-   evidence：视觉 Transformer 的多粒度随机自动剪枝
+   evidence：用于轻量化分割模型的知识蒸馏和INT8量化
 
 ### 速读区论文标签
-1. [Underrepresented in Foundation Model Pretraining Data? A One-Shot Probe](/202603/13/2603.04346v1-underrepresented-in-foundation-model-pretraining-data-a-one-shot-probe)  
+1. [Observing and Controlling Features in Vision-Language-Action Models](/202603/14/2603.05487v1-observing-and-controlling-features-in-vision-language-action-models)  
    标签：评分：8.0/10、query:mc
-   evidence：评估视觉语言基础模型
-2. [VisionPangu: A Compact and Fine-Grained Multimodal Assistant with 1.7B Parameters](/202603/13/2603.04957v1-visionpangu-a-compact-and-fine-grained-multimodal-assistant-with-17b-parameters)  
+   evidence：视觉-语言-动作模型 (VLA) 分析
+2. [Mozart: Modularized and Efficient MoE Training on 3.5D Wafer-Scale Chiplet Architectures](/202603/14/2603.07006v1-mozart-modularized-and-efficient-moe-training-on-35d-wafer-scale-chiplet-architectures)  
    标签：评分：8.0/10、query:mc
-   evidence：具有高效对齐的紧凑型1.7B参数多模态模型
-3. [Act, Think or Abstain: Complexity-Aware Adaptive Inference for Vision-Language-Action Models](/202603/13/2603.05147v1-act-think-or-abstain-complexity-aware-adaptive-inference-for-vision-language-action-models)  
+   evidence：MoE架构LLM中的稀疏性
+3. [FastSTAR: Spatiotemporal Token Pruning for Efficient Autoregressive Video Synthesis](/202603/14/2603.07192v1-faststar-spatiotemporal-token-pruning-for-efficient-autoregressive-video-synthesis)  
    标签：评分：8.0/10、query:mc
-   evidence：视觉-语言-动作模型的自适应推理以降低延迟
-4. [InfoFlow KV: Information-Flow-Aware KV Recomputation for Long Context](/202603/13/2603.05353v1-infoflow-kv-information-flow-aware-kv-recomputation-for-long-context)  
+   evidence：时空Token剪枝以提升效率
+4. [A Unified Framework for Knowledge Transfer in Bidirectional Model Scaling](/202603/14/2603.07506v1-a-unified-framework-for-knowledge-transfer-in-bidirectional-model-scaling)  
    标签：评分：8.0/10、query:mc
-   evidence：长文本LLM的KV缓存压缩
-5. [An LLM-Guided Query-Aware Inference System for GNN Models on Large Knowledge Graphs](/202603/13/2603.04545v1-an-llm-guided-query-aware-inference-system-for-gnn-models-on-large-knowledge-graphs)  
+   evidence：双向模型缩放与知识迁移的统一框架
+5. [VisualScratchpad: Inference-time Visual Concepts Analysis in Vision Language Models](/202603/14/2603.07335v1-visualscratchpad-inference-time-visual-concepts-analysis-in-vision-language-models)  
    标签：评分：7.0/10、query:mc
-   evidence：利用剪枝、量化和蒸馏的LLM引导推理
-6. [WavSLM: Single-Stream Speech Language Modeling via WavLM Distillation](/202603/13/2603.05299v1-wavslm-single-stream-speech-language-modeling-via-wavlm-distillation)  
+   evidence：在视觉编码器上应用稀疏自编码器
+6. [Reverse Distillation: Consistently Scaling Protein Language Model Representations](/202603/14/2603.07710v1-reverse-distillation-consistently-scaling-protein-language-model-representations)  
    标签：评分：7.0/10、query:mc
-   evidence：语音语言模型的蒸馏与量化
-7. [POET-X: Memory-efficient LLM Training by Scaling Orthogonal Transformation](/202603/13/2603.05500v1-poet-x-memory-efficient-llm-training-by-scaling-orthogonal-transformation)  
+   evidence：蛋白质语言模型的反向蒸馏框架
+7. [SmartThinker: Progressive Chain-of-Thought Length Calibration for Efficient Large Language Model Reasoning](/202603/14/2603.08000v1-smartthinker-progressive-chain-of-thought-length-calibration-for-efficient-large-language-model-reasoning)  
    标签：评分：7.0/10、query:mc
-   evidence：内存高效的大语言模型训练
-8. [SODA: Sensitivity-Oriented Dynamic Acceleration for Diffusion Transformer](/202603/13/2603.07057v1-soda-sensitivity-oriented-dynamic-acceleration-for-diffusion-transformer)  
+   evidence：大语言模型的高效推理
+8. [Rethinking Attention Output Projection: Structured Hadamard Transforms for Efficient Transformers](/202603/14/2603.08343v1-rethinking-attention-output-projection-structured-hadamard-transforms-for-efficient-transformers)  
    标签：评分：7.0/10、query:mc
-   evidence：扩散Transformer加速的动态剪枝技术
-9. [PromptTuner: SLO-Aware Elastic System for LLM Prompt Tuning](/202603/13/2603.05087v1-prompttuner-slo-aware-elastic-system-for-llm-prompt-tuning)  
+   evidence：注意力模块中的参数减少
+9. [SageSched: Efficient LLM Scheduling Confronting Demand Uncertainty and Hybridity](/202603/14/2603.07917v1-sagesched-efficient-llm-scheduling-confronting-demand-uncertainty-and-hybridity)  
    标签：评分：6.0/10、query:mc
-   evidence：优化LLM提示词微调资源成本的系统
-10. [Frequency-Aware Error-Bounded Caching for Accelerating Diffusion Transformers](/202603/13/2603.05315v1-frequency-aware-error-bounded-caching-for-accelerating-diffusion-transformers)  
+   evidence：高效的LLM推理调度
+10. [Capacity-Aware Mixture Law Enables Efficient LLM Data Optimization](/202603/14/2603.08022v1-capacity-aware-mixture-law-enables-efficient-llm-data-optimization)  
    标签：评分：6.0/10、query:mc
-   evidence：通过缓存加速扩散Transformer
-11. [Compression as Adaptation: Implicit Visual Representation with Diffusion Foundation Models](/202603/13/2603.07615v1-compression-as-adaptation-implicit-visual-representation-with-diffusion-foundation-models)  
+   evidence：高效的大语言模型数据优化与缩放
+11. [Benchmarking Language Modeling for Lossless Compression of Full-Fidelity Audio](/202603/14/2603.08683v1-benchmarking-language-modeling-for-lossless-compression-of-full-fidelity-audio)  
    标签：评分：6.0/10、query:mc
-   evidence：利用扩散基础模型进行感知视频压缩
+   evidence：用于无损压缩的语言模型
 
 
 <div class="dpr-home-promo-card">
