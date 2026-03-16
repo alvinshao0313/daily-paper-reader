@@ -7,78 +7,72 @@
 
 ## 每次日报
 - 最新运行日期：2026-03-07 ~ 2026-03-16
-- 运行时间：2026-03-16 06:29:06 UTC
+- 运行时间：2026-03-16 06:48:06 UTC
 - 运行状态：成功
-- 本次总论文数：19
-- 精读区：8
+- 本次总论文数：17
+- 精读区：6
 - 速读区：11
 
 ### 今日简报（AI）
-本期日报精选 19 篇论文，深度解析如何将 2B 视觉语言模型蒸馏至 70M 极小规模的极致压缩技术。
-重点推荐满分论文 NanoVDR 的文档检索轻量化方案与 MoEKD 的代码模型压缩突破，展现了高效能小模型的巨大潜力。
-建议关注边缘端推理加速与混合专家蒸馏方向，探索在低算力环境下实现高性能视觉与代码任务的落地路径。
+今日深度解析 17 篇 AI 论文，聚焦联邦学习剪枝与 MoE 架构优化，产出两篇满分重磅研究。
+重点关注 CA-HFP 如何利用曲率感知重构异构模型，以及 LightMoE 通过专家替换技术实现的极致去冗余。
+推荐开发者深入探索模型压缩与边缘云协同推理，这是解决大模型落地算力瓶颈的关键路径。
 - 详情：[/20260307-20260316/README](/20260307-20260316/README)
 
 ### 精读区论文标签
-1. [NanoVDR: Distilling a 2B Vision-Language Retriever into a 70M Text-Only Encoder for Visual Document Retrieval](/20260307-20260316/2603.12824v1-nanovdr-distilling-a-2b-vision-language-retriever-into-a-70m-text-only-encoder-for-visual-document-retrieval)  
+1. [CA-HFP: Curvature-Aware Heterogeneous Federated Pruning with Model Reconstruction](/20260307-20260316/2603.12591v1-ca-hfp-curvature-aware-heterogeneous-federated-pruning-with-model-reconstruction)  
    标签：评分：10.0/10、query:mc
-   evidence：将VLM蒸馏为小型纯文本学生模型
-2. [MoEKD: Mixture-of-Experts Knowledge Distillation for Robust and High-Performing Compressed Code Models](/20260307-20260316/2603.13213v1-moekd-mixture-of-experts-knowledge-distillation-for-robust-and-high-performing-compressed-code-models)  
+   evidence：针对边缘设备联邦学习的结构化剪枝
+2. [LightMoE: Reducing Mixture-of-Experts Redundancy through Expert Replacing](/20260307-20260316/2603.12645v1-lightmoe-reducing-mixture-of-experts-redundancy-through-expert-replacing)  
    标签：评分：10.0/10、query:mc
-   evidence：用于压缩模型的混合专家知识蒸馏
-3. [AdaFuse: Accelerating Dynamic Adapter Inference via Token-Level Pre-Gating and Fused Kernel Optimization](/20260307-20260316/2603.11873v1-adafuse-accelerating-dynamic-adapter-inference-via-token-level-pre-gating-and-fused-kernel-optimization)  
+   evidence：专家替换作为MoE架构LLM的压缩范式
+3. [Cost-Efficient Multimodal LLM Inference via Cross-Tier GPU Heterogeneity](/20260307-20260316/2603.12707v1-cost-efficient-multimodal-llm-inference-via-cross-tier-gpu-heterogeneity)  
+   标签：评分：10.0/10、query:mc
+   evidence：通过硬件分区实现高效 MLLM 推理
+4. [When Drafts Evolve: Speculative Decoding Meets Online Learning](/20260307-20260316/2603.12617v1-when-drafts-evolve-speculative-decoding-meets-online-learning)  
    标签：评分：9.0/10、query:mc
-   evidence：加速 LLM 的动态适配器推理
-4. [CA-HFP: Curvature-Aware Heterogeneous Federated Pruning with Model Reconstruction](/20260307-20260316/2603.12591v1-ca-hfp-curvature-aware-heterogeneous-federated-pruning-with-model-reconstruction)  
+   evidence：通过投机采样加速 LLM 推理
+5. [NanoVDR: Distilling a 2B Vision-Language Retriever into a 70M Text-Only Encoder for Visual Document Retrieval](/20260307-20260316/2603.12824v1-nanovdr-distilling-a-2b-vision-language-retriever-into-a-70m-text-only-encoder-for-visual-document-retrieval)  
    标签：评分：9.0/10、query:mc
-   evidence：异构联邦剪枝
-5. [LightMoE: Reducing Mixture-of-Experts Redundancy through Expert Replacing](/20260307-20260316/2603.12645v1-lightmoe-reducing-mixture-of-experts-redundancy-through-expert-replacing)  
+   evidence：将2B VLM蒸馏为70M学生模型以实现高效检索
+6. [MoEKD: Mixture-of-Experts Knowledge Distillation for Robust and High-Performing Compressed Code Models](/20260307-20260316/2603.13213v1-moekd-mixture-of-experts-knowledge-distillation-for-robust-and-high-performing-compressed-code-models)  
    标签：评分：9.0/10、query:mc
-   evidence：MoE架构LLM中的专家压缩与剪枝
-6. [98$\times$ Faster LLM Routing Without a Dedicated GPU: Flash Attention, Prompt Compression, and Near-Streaming for the vLLM Semantic Router](/20260307-20260316/2603.12646v1-98times-faster-llm-routing-without-a-dedicated-gpu-flash-attention-prompt-compression-and-near-streaming-for-the-vllm-semantic-router)  
-   标签：评分：9.0/10、query:mc
-   evidence：用于 LLM 路由的提示词压缩与 Flash Attention
-7. [Vision Verification Enhanced Fusion of VLMs for Efficient Visual Reasoning](/20260307-20260316/2603.12669v1-vision-verification-enhanced-fusion-of-vlms-for-efficient-visual-reasoning)  
-   标签：评分：9.0/10、query:mc
-   evidence：剪枝组件 VLM 以实现高效融合
-8. [Cost-Efficient Multimodal LLM Inference via Cross-Tier GPU Heterogeneity](/20260307-20260316/2603.12707v1-cost-efficient-multimodal-llm-inference-via-cross-tier-gpu-heterogeneity)  
-   标签：评分：9.0/10、query:mc
-   evidence：通过分区实现高效MLLM推理
+   evidence：压缩代码模型的知识蒸馏
 
 ### 速读区论文标签
-1. [SODA: Sensitivity-Oriented Dynamic Acceleration for Diffusion Transformer](/20260307-20260316/2603.07057v3-soda-sensitivity-oriented-dynamic-acceleration-for-diffusion-transformer)  
+1. [RAPID: Redundancy-Aware and Compatibility-Optimal Edge-Cloud Partitioned Inference for Diverse VLA Models](/20260307-20260316/2603.07949v2-rapid-redundancy-aware-and-compatibility-optimal-edge-cloud-partitioned-inference-for-diverse-vla-models)  
    标签：评分：8.0/10、query:mc
+   evidence：VLA模型的冗余感知推理
+2. [Reasoning as Compression: Unifying Budget Forcing via the Conditional Information Bottleneck](/20260307-20260316/2603.08462v1-reasoning-as-compression-unifying-budget-forcing-via-the-conditional-information-bottleneck)  
+   标签：评分：8.0/10、query:mc
+   evidence：LLM推理链的有损压缩
+3. [Uncovering a Winning Lottery Ticket with Continuously Relaxed Bernoulli Gates](/20260307-20260316/2603.08914v1-uncovering-a-winning-lottery-ticket-with-continuously-relaxed-bernoulli-gates)  
+   标签：评分：8.0/10、query:mc
+   evidence：通过伯努利门发现稀疏子网络
+4. [The Missing Memory Hierarchy: Demand Paging for LLM Context Windows](/20260307-20260316/2603.09023v1-the-missing-memory-hierarchy-demand-paging-for-llm-context-windows)  
+   标签：评分：8.0/10、query:mc
+   evidence：LLM 上下文窗口的需求分页系统
+5. [SODA: Sensitivity-Oriented Dynamic Acceleration for Diffusion Transformer](/20260307-20260316/2603.07057v3-soda-sensitivity-oriented-dynamic-acceleration-for-diffusion-transformer)  
+   标签：评分：7.0/10、query:mc
    evidence：结合缓存与剪枝以加速扩散Transformer
-2. [RAPID: Redundancy-Aware and Compatibility-Optimal Edge-Cloud Partitioned Inference for Diverse VLA models](/20260307-20260316/2603.07949v1-rapid-redundancy-aware-and-compatibility-optimal-edge-cloud-partitioned-inference-for-diverse-vla-models)  
-   标签：评分：8.0/10、query:mc
-   evidence：针对VLA模型的冗余感知边云分区推理
-3. [RAPID: Redundancy-Aware and Compatibility-Optimal Edge-Cloud Partitioned Inference for Diverse VLA Models](/20260307-20260316/2603.07949v2-rapid-redundancy-aware-and-compatibility-optimal-edge-cloud-partitioned-inference-for-diverse-vla-models)  
-   标签：评分：8.0/10、query:mc
-   evidence：VLA 模型的高效推理
-4. [LycheeCluster: Efficient Long-Context Inference with Structure-Aware Chunking and Hierarchical KV Indexing](/20260307-20260316/2603.08453v1-lycheecluster-efficient-long-context-inference-with-structure-aware-chunking-and-hierarchical-kv-indexing)  
-   标签：评分：8.0/10、query:mc
-   evidence：大语言模型的高效 KV 缓存管理
-5. [The Missing Memory Hierarchy: Demand Paging for LLM Context Windows](/20260307-20260316/2603.09023v1-the-missing-memory-hierarchy-demand-paging-for-llm-context-windows)  
+6. [MWM: Mobile World Models for Action-Conditioned Consistent Prediction](/20260307-20260316/2603.07799v1-mwm-mobile-world-models-for-action-conditioned-consistent-prediction)  
    标签：评分：7.0/10、query:mc
-   evidence：针对大语言模型上下文窗口效率的需求分页系统
-6. [Speech-Omni-Lite: Portable Speech Interfaces for Vision-Language Models](/20260307-20260316/2603.09627v1-speech-omni-lite-portable-speech-interfaces-for-vision-language-models)  
+   evidence：用于高效扩散推理的蒸馏方法
+7. [SageSched: Efficient LLM Scheduling Confronting Demand Uncertainty and Hybridity](/20260307-20260316/2603.07917v2-sagesched-efficient-llm-scheduling-confronting-demand-uncertainty-and-hybridity)  
    标签：评分：7.0/10、query:mc
-   evidence：扩展预训练视觉语言骨干的高效框架
-7. [Ego: Embedding-Guided Personalization of Vision-Language Models](/20260307-20260316/2603.09771v2-ego-embedding-guided-personalization-of-vision-language-models)  
+   evidence：高效LLM推理调度
+8. [RAPID: Redundancy-Aware and Compatibility-Optimal Edge-Cloud Partitioned Inference for Diverse VLA models](/20260307-20260316/2603.07949v1-rapid-redundancy-aware-and-compatibility-optimal-edge-cloud-partitioned-inference-for-diverse-vla-models)  
    标签：评分：7.0/10、query:mc
-   evidence：视觉语言模型的高效个性化
-8. [A Voronoi Cell Formulation for Principled Token Pruning in Late-Interaction Retrieval Models](/20260307-20260316/2603.09933v1-a-voronoi-cell-formulation-for-principled-token-pruning-in-late-interaction-retrieval-models)  
-   标签：评分：7.0/10、query:mc
-   evidence：检索模型的原则性Token剪枝
-9. [MWM: Mobile World Models for Action-Conditioned Consistent Prediction](/20260307-20260316/2603.07799v1-mwm-mobile-world-models-for-action-conditioned-consistent-prediction)  
+   evidence：VLA模型的高效推理
+9. [Just-in-Time: Training-Free Spatial Acceleration for Diffusion Transformers](/20260307-20260316/2603.10744v1-just-in-time-training-free-spatial-acceleration-for-diffusion-transformers)  
    标签：评分：6.0/10、query:mc
-   evidence：用于世界模型高效部署的蒸馏方法
-10. [Model Merging in the Era of Large Language Models: Methods, Applications, and Future Directions](/20260307-20260316/2603.09938v1-model-merging-in-the-era-of-large-language-models-methods-applications-and-future-directions)  
+   evidence：扩散Transformer的空间加速
+10. [Quantized Inference for OneRec-V2](/20260307-20260316/2603.11486v1-quantized-inference-for-onerec-v2)  
    标签：评分：6.0/10、query:mc
-   evidence：大语言模型重训练的高效替代方案
-11. [Pooling Engram Conditional Memory in Large Language Models using CXL](/20260307-20260316/2603.10087v1-pooling-engram-conditional-memory-in-large-language-models-using-cxl)  
+   evidence：推荐系统的量化推理
+11. [As Language Models Scale, Low-order Linear Depth Dynamics Emerge](/20260307-20260316/2603.12541v1-as-language-models-scale-low-order-linear-depth-dynamics-emerge)  
    标签：评分：6.0/10、query:mc
-   evidence：用于LLM存储和推理性能的CXL内存池
+   evidence：大语言模型中的逐层敏感度
 
 
 <div class="dpr-home-promo-card">
