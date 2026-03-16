@@ -1,0 +1,682 @@
+Title: LycheeCluster: Efficient Long-Context Inference with Structure-Aware Chunking and Hierarchical KV Indexing
+
+URL Source: https://arxiv.org/pdf/2603.08453v1
+
+Published Time: Tue, 10 Mar 2026 02:25:50 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# LycheeCluster: Efficient Long-Context Inference with Structure-Aware Chunking and Hierarchical KV Indexing 
+
+Dongfang Li 1, Zixuan Liu 2, Gang Lin 1, Baotian Hu 1, and Min Zhang 1
+
+1Harbin Institute of Technology 
+
+2University of Electronic Science and Technology of China 
+
+lidongfang@hit.edu.cn , liuzx@std.uestc.edu.cn 
+
+Abstract 
+
+The quadratic complexity of the attention mech-anism and the substantial memory footprint of the Key-Value (KV) cache present severe com-putational and memory challenges for Large Language Models (LLMs) processing long con-texts. Existing retrieval-based methods of-ten compromise semantic integrity through fixed-size chunking and suffer from inefficient linear scanning. In this paper, we propose 
+
+LycheeCluster , a novel method for efficient KV cache management. LycheeCluster pre-serves local semantic coherence via boundary-aware chunking and constructs a recursive hier-archical index rooted in the triangle inequal-ity. This design transforms cache retrieval from a linear scan into a theoretically bounded, logarithmic-time pruning process, while a lazy update strategy supports efficient streaming generation. Experiments demonstrate that Ly-cheeCluster achieves up to a 3.6 × end-to-end inference speedup with negligible degradation in model performance, outperforming state-of-the-art KV cache management methods (e.g., Quest, ClusterKV). 1
+
+1 Introduction 
+
+The context window of Large Language Models (LLMs) has expanded dramatically, evolving from 4K to over 2M tokens (Yang et al., 2025a; Comanici et al., 2025; Anthropic, 2025), enabling transfor-mative applications in long-document understand-ing and complex reasoning. However, utilizing this massive context introduces a critical latency bottleneck. During the autoregressive decoding phase, the attention mechanism requires scanning the entire Key-Value (KV) cache history for ev-ery generated token (Tang et al., 2024; Yang et al., 2025b; Tang et al., 2025). As the sequence length grows, the overhead of loading these massive KV tensors from memory consumes substantial band-width, causing the decoding speed to deteriorate 
+
+> 1
+
+We will release our code and kernels after publication. Query : What is the price of Milk?   
+
+> [{"item": "Milk", "price": "5$"}, {"item": "Bread", "price": "3$"}]
+> Quest ClusterKV LycheeCluster
+> [{"item": "Milk", " price
+> ": "5$"}, {"item": "B
+> read", "price": "3$"}]
+> Page 1
+> Page 2
+> Page 3
+> [{"item": "Milk",
+> "price": "5$"},
+> {"item": "Bread",
+> "price": " 3$"}]
+> Chunk 1
+> Chunk 2
+> Cluster A
+> item
+> price
+> item
+> price
+> {
+> ,
+> :"
+> [
+> Cluster B
+> M
+> read
+> ilk
+> B
+> 5$
+> 3$
+
+Figure 1: Impact of retrieval granularity on seman-tic integrity. We illustrate the limitations of existing methods using a JSON retrieval query. (Left) Quest 
+
+employs fixed-size pages that arbitrarily sever semantic boundaries. (Middle) ClusterKV uses token-level clus-tering that scatters locally coherent tokens into disjoint clusters based on vector variance. (Right) LycheeClus-ter (Ours) preserves the complete semantic unit via structure-aware chunking, ensuring precise retrieval. 
+
+significantly despite the availability of powerful GPUs (Liu et al., 2025b). To address this memory bandwidth bottle-neck without permanently discarding information, 
+
+Retrieval-based methods have emerged as a promis-ing direction (Li et al., 2024a; Liu et al., 2024). Unlike Eviction-based methods (e.g., H2O (Zhang et al., 2023), StreamingLLM (Xiao et al., 2024)) that permanently delete tokens, which often leads to irreversible information loss, retrieval-based ap-proaches preserve the full history and dynamically fetch only a small subset of relevant KV pairs for the attention computation. This paradigm aims to accelerate decoding by transforming the linear-complexity attention mechanism into a sparse op-eration bounded by a fixed token budget. However, existing retrieval methods struggle with the granularity of their selection strategies, as conceptually illustrated in Figure 1. Page-based 
+
+methods like Quest (Tang et al., 2024) manage KV pairs in fixed-size blocks (e.g., 64 tokens). This rigid segmentation leads to internal fragmentation, 
+
+> arXiv:2603.08453v1 [cs.LG] 9 Mar 2026
+
+where an entire page is retrieved for a single rele-vant token, wasting the limited retrieval budget. Conversely, token-level clustering methods like ClusterKV (Liu et al., 2025a) aggregate tokens based on global semantic similarity. While this reduces fragmentation, treating tokens as isolated vectors disrupts the local structural integrity of the text. For instance, semantically coupled sequences such as code blocks or reasoning steps are scattered across different clusters, preventing the attention head from retrieving the contiguous context neces-sary for precise reasoning. Furthermore, relying on global clustering algorithms incurs a high update overhead, often forcing the system to rely on stale indices during streaming generation. In contrast, we hypothesize that the optimal unit for efficient retrieval is neither the arbitrary fixed-size page nor the isolated token, but the seman-tically coherent chunk . To validate this, we con-ducted a pilot study (§3) on the StrucText-Eval (Gu et al., 2025). By simply using boundary-aware chunks instead of fixed-size pages, we observed a substantial accuracy improvement (e.g., +15.0%). This finding suggests that preserving the semantic integrity of retrieval units is the key to maximizing the utility of the sparse attention budget. Inspired by this, we propose LycheeCluster ,a novel retrieval-based KV cache management method designed to accelerate long-context decod-ing through structure-aware indexing. Unlike previ-ous works, LycheeCluster actively segments the context into variable-length chunks based on nat-ural semantic boundaries (e.g., punctuation, line breaks). To enable sub-linear retrieval complex-ity, we organize these chunks into the hierarchical indices ( coarse units → fine clusters → chunks ), allowing the model to rapidly prune irrelevant branches using a mathematical upper bound of at-tention scores. Furthermore, to adapt to the stream-ing nature of decoding, we further introduce a lazy incremental update strategy. During decoding, new chunks are dynamically grafted onto the nearest existing clusters, maintaining index freshness with negligible runtime overhead. Extensive experiments on long-context under-standing and complex reasoning tasks demon-strate that LycheeCluster effectively breaks the latency bottleneck without compromising the ca-pability. Specifically, our method achieves up to 
+
+3.6× decoding speedup compared to full atten-tion, significantly reducing inference latency for long sequences. Crucially, this efficiency does not come at the cost of precision; LycheeCluster 
+
+maintains performance comparable to full at-tention even under aggressive compression bud-gets. LycheeCluster exhibits exceptional robust-ness in RULER (Hsieh et al., 2024) and struc-tured data tasks of L ONG BENCH V2 (Bai et al., 2025), outperforming token-clustering baselines (e.g., ClusterKV) that often disrupt semantic bound-aries. Furthermore, in reasoning-intensive sce-narios of MATH500 (Lightman et al., 2023), 
+
+LycheeCluster successfully supports the dynamic retrieval needs of chain-of-thought generation, pre-serving logical coherence where heuristic-based baselines often fall. Our contributions are summarized as follows: • We identify that structural disruption is a key limitation in existing sparse attention methods and validate structure-aware chunking as a critical solution. • We propose LycheeCluster, a method featur-ing hierarchical KV indexing and lazy up-dates, designed to accelerate inference with-out compromising semantic integrity. • We achieve state-of-the-art performance with lower latency among retrieval-based methods, offering a robust solution for deploying long-context and reasoning-intensive LLMs. 
+
+2 Related Work 
+
+Eviction-based Sparse Attention. To address the memory bottleneck of the KV cache, eviction-based methods reduce memory footprint by perma-nently discarding tokens based on accumulation metrics or positional heuristics (Zhang et al., 2023; Xiao et al., 2024; Li et al., 2024b). While these methods lower latency, the irreversible deletion of tokens leads to information loss, degrading per-formance in long-context tasks such as multi-step complex reasoning that require full historical re-call (Li et al., 2025; Kim et al., 2025). 
+
+Retrieval-based Sparse Attention. Retrieval-based approaches preserve the complete KV his-tory and dynamically fetch only relevant subsets for computation (Liu et al., 2024; Tang et al., 2025; Sun et al., 2025a). For example, Quest (Tang et al., 2024) employs a page-based retrieval strategy, uti-lizing min-max key statistics of fixed-size blocks to estimate importance. ClusterKV (Liu et al., 2025a) adopts a global perspective, grouping tokens into JSON XML Tree YAML Markdown Average  
+
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> Accuracy (%)
+> 27.9
+> 22.2
+> 25.9
+> 17.6
+> 6.4
+> 20.0
+> 42.9
+> 29.6 29.6
+> 24.8
+> 17.4
+> 28.9
+> Quest (Fixed Page)
+> Quest + Struct-Aware (Ours)
+
+Figure 2: Pilot Study on StrucText-Eval. We compare the standard Quest (fixed page) with a modified version using structure-aware chunks while keeping the scoring metric identical. The significant accuracy gain (e.g., 
+
++15.0% on JSON) confirms that preserving semantic integrity is a prerequisite for effective retrieval. 
+
+clusters based on vector similarity to accelerate retrieval. RazorAttention (Tang et al., 2025) fur-ther compresses KV cache by selectively caching tokens in different attention heads. 
+
+Semantic Granularity and Integrity. A critical limitation in existing sparse attention mechanisms is the disruption of semantic units (Fountas et al., 2025; Zhu et al., 2025). Fixed-size paging arbitrar-ily severs syntactic boundaries, while token-level clustering fragments locally coherent sequences, such as reasoning steps, into disjoint groups (Chen et al., 2025). Recently, SentenceKV (Zhu et al., 2025) proposed utilizing natural sentences as the atomic unit for caching. However, their rigid punctuation-based segmentation struggles with structured data (e.g., code, JSON) lacking clear sen-tence delimiters and suffers from length variance. In contrast, we employ a robust structure-aware chunking strategy that respects semantic bound-aries while enforcing size constraints, ensuring sta-ble retrieval efficiency across diverse domains. 
+
+3 Motivation 
+
+Current research on sparse attention primarily fo-cuses on optimizing importance estimation , i.e., developing better metrics to decide which tokens to keep, such as attention accumulation or min-max statistics. However, a fundamental question remains largely unexplored: what is the optimal granularity for the atomic unit of scoring? 
+
+Most existing methods adopt rigid segmentation strategies. Quest (Tang et al., 2024) uses fixed-size pages for hardware efficiency, effectively treating the context as a contiguous tape cut at arbitrary in-tervals. Conversely, ClusterKV (Liu et al., 2025a) operates on individual tokens grouped by vector similarity, treating the context as a “bag-of-words”. As conceptually illustrated in Figure 1, we hypoth-esize that both approaches compromise semantic integrity: fixed pages sever context at physical boundaries, while token clustering shatters local coherence. 
+
+3.1 A Pilot Study on StrucText-Eval 
+
+To validate the hypothesis that granularity matters as much as scoring, we conduct a controlled pi-lot study using the StrucText-Eval benchmark (Gu et al., 2025). This dataset evaluates LLMs on struc-tured data (e.g., JSON parsing, code completion) where preserving syntactic boundaries is crucial for correctness. We utilize Quest as our experimen-tal baseline due to its representative page-based retrieval mechanism. To isolate the impact of gran-ularity, we kept Quest’s importance estimation al-gorithm (min-max key approximation) unchanged and modified only the segmentation strategy: • Baseline (fixed granularity): standard imple-mentation using fixed pages of size S = 16 .• Variant (structure-aware granularity): we replace fixed pages with variable-length chunks defined by natural delimiters (e.g., line breaks, see Table 4). The average chunk size matched baseline to ensure a fair comparison. 
+
+Observations. The results are summarized in Figure 2. Notably, merely aligning the retrieval units with semantic boundaries yielded a substan-tial performance boost. On the StrucText-Eval suite, the structure-aware variant outperformed the original Quest by 10.6% in average accuracy, with gains as high as 15.0% on strictly formatted tasks like JSON extraction. 
+
+3.2 Implication 
+
+This finding highlights a critical insight: the bottle-neck in long-context retrieval is often not the failure to identify important regions , but the fragmentation of those regions . When a fixed page cuts a logical unit (e.g., a function definition) in half, or when clustering scatters a KV cache pair, the attention head fails to attend to the complete information even if the retrieval score is high. This semantic misalignment problem renders the retrieved KV cache pairs partially useless. Therefore, simply patching existing methods is insufficient. We need a retrieval framework de-signed natively around the structure-aware chunk 𝑠 1 𝑠 2 𝑠 3 𝑠 4 𝑠 𝑀             
+
+> 𝑋 (Input Context)
+> ത𝑘 1ത𝑘 2ത𝑘 3ത𝑘 4ത𝑘 𝑀
+> 𝑠 5𝑠 6𝑠 7
+> ത𝑘 5ത𝑘 6ത𝑘 7
+> 𝑞 𝑡
+> 𝑔 𝑠𝑒𝑙𝑒𝑐𝑡𝑒𝑑 𝑔 𝑝𝑟𝑢𝑛 e𝑑
+> 𝑐 𝑠𝑒𝑙𝑒𝑐𝑡𝑒𝑑
+> 𝑠 𝑖 𝑠 𝑗 𝑥 𝑡
+> …
+> …
+> …Coarse
+> Level
+> Fine
+> Level
+> Chunk
+> Level
+
+Prefill Phase  Decode  Phase    
+
+> Query
+> Buffer
+> New Token
+> Update
+> 𝐾 active ,𝑉 active
+> 𝑈𝐵 (𝑞 𝑡 ,𝑔 𝑝 )
+> …Attention
+> 𝑔 𝑝𝑟𝑢𝑛 e𝑑
+> …
+> 𝑟 𝑔
+> 𝜇 𝑔
+
+𝑐 1
+
+> 𝑟 𝑐
+> 𝜇 c
+
+𝑐 2
+
+> 𝑟 𝑐
+> 𝜇 c
+
+𝑐 3
+
+> 𝑟 𝑐
+> 𝜇 c
+
+𝑐 L       
+
+> 𝑟 𝑐
+> 𝜇 c
+> 𝑔 1
+> 𝑟 𝑔
+> 𝜇 𝑔 𝑔 P
+> Chunk Chunk Representation Fine Cluster Coarse Unit Query /New Token Pruned / Inactive
+
+Figure 3: The overall pipeline of LycheeCluster . The left panel illustrates the bottom-up index construction during the prefill phase, where variable-length chunks are hierarchically clustered. The right panel demonstrates the top-down retrieval and incremental update during the decoding phase. 
+
+as the atomic unit. This motivation drives the de-sign of LycheeCluster , which we formally intro-duce in the next section. By enforcing semantic atomicity at the indexing level, we ensure that ev-ery retrieved unit provides a complete, actionable context for the attention mechanism. 
+
+4 Method 
+
+In this section, we describe LycheeCluster in de-tail, a retrieval-based approach designed to acceler-ate long-context LLM inference. 
+
+4.1 Formulation 
+
+Given a Transformer model M and an input se-quence X = {x1, . . . , x t−1}, the model generates the next token at step t via the attention mechanism. Let qt ∈ Rd be the query vector; the output is a weighted sum of historical KV pairs: Attn (qt, K <t , V <t ) = 
+
+> t−1
+
+X
+
+> i=1
+
+exp( q⊤ 
+
+> t
+
+ki/√d)
+
+Z vi (1) where Z is the normalization factor. Naively com-puting q⊤ 
+
+> t
+
+ki for all historical tokens leads to linear complexity O(t). Our objective is to approximate this process by retrieving only the most relevant subset of KV pairs. As a step towards this, we construct a recursive hierarchical abstraction. Rather than index indi-vidual tokens, we organize the KV cache into a tree structure T . First, we partition the token se-quence into a set of semantically coherent chunks 
+
+S = {s1, . . . , s M }. For each chunk sj , we define its representative key ¯kj by performing mean pool-ing over its constituent token keys and projecting the result onto the unit sphere ( ∥¯kj ∥2 = 1 ). The premise is that the strong local coherence of se-mantic information in sequences, the relevance of a chunk can be effectively approximated by the rel-evance of its aggregated representation (Lu et al., 2025). Second, to facilitate efficient search, we build a multi-level index on top of S. We define a parent node u (e.g., a cluster centroid) that covers a set of child nodes Vu (e.g., chunks or sub-clusters). For each node u, we maintain its centroid μu and a covering radius ru = max v∈V u ∥v − μu∥2. Third, leveraging the triangle inequality and the Cauchy-Schwarz inequality, we derive a strict upper bound for the relevance score. For any query qt and any child node v within the parent node u, the dot prod-uct similarity satisfies: 
+
+q⊤ 
+
+> t
+
+v = q⊤ 
+
+> t
+
+(μu + ( v − μu)) 
+
+≤ q⊤ 
+
+> t
+
+μu + ∥qt∥2 · ru.
+
+| {z }
+
+> Score Upper Bound (UB)
+
+(2) Hence, Eqn. 2 serves as the theoretical founda-tion for our pruning strategy: the similarity be-tween the query and a centroid, plus a slack term determined by the radius, strictly bounds the max-imum possible similarity for any element within Algorithm 1 Inference Process with LycheeCluster                                                                                        
+
+> Input: Prompt X, Model M, Retrieval budgets kg, k c
+> Output: Generated sequence Y
+> 1: // Phase 1: Index Construction (Prefill)
+> 2: S ← StructureAwareChunking (X)
+> 3: I ← HierarchicalIndexing (S)▷Build Coarse G& Fine
+> C
+> 4: B← ∅ ▷Initialize token buffer 5: // Phase 2: Decoding & Retrieval
+> 6: for t= 1 , . . . , T do
+> 7: qt← M .GetQuery (xt)
+> 8: // Step 1: Coarse-Level Pruning (Top-kg)9: Scores g← { q⊤
+> tμg+∥qt∥ · rg|g∈ G} ▷Eqn. 2 10: Gtop ←TopK (Scores g, k g)
+> 11: // Step 2: Fine-Level Pruning (Top-kc)12: Ccand ←S
+> g∈G top g. children 13: Scores c← { q⊤
+> tμc+∥qt∥ · rc|c∈ C cand }
+> 14: Ctop ←TopK (Scores c, k c)
+> 15: // Step 3: Exact Attention 16: KV active ←S
+> c∈C top c. chunks .KV 17: xt+1 ←Attention (qt, KV active )
+> 18: // Step 4: Incremental Update 19: B. append (M.GetKV (xt))
+> 20: if |B| ≥ ChunkSize then
+> 21: snew ←Pack (B); B← ∅
+> 22: LazyUpdate (I, s new )▷Assign & expand radius 23: end if
+> 24: end for
+
+that cluster. This allows us to safely discard en-tire branches of the index tree if their upper bound is sufficiently low, without inspecting individual chunks or tokens. 
+
+4.2 Overall Framework 
+
+As illustrated in Figure 3, the LycheeCluster 
+
+framework operates in two distinct phases: (1) in-dex construction (prefill phase). When receiving long-context inputs, we do not store a flat KV cache. Instead, we employ a structure-aware algorithm to segment the context, organizing it into a three-level index: coarse units → fine clusters → chunks. (2) retrieval & update (decoding phase). During to-ken generation, the query qt traverses the index tree top-down. By calculating the upper bound by Eqn. 2, the system rapidly identifies the most rel-evant KV chunks. Concurrently, newly generated tokens are managed via a lightweight incremental mechanism to maintain index freshness without in-curring heavy re-clustering overheads. We provide the details of LycheeCluster in Algorithm 1. 
+
+4.3 Prefill Phase 
+
+In the prefill phase, we process the full prompt context to build the retrieval-ready structure. This involves two key components: structure-aware chunking and hierarchical KV indexing. 
+
+Structure-Aware Chunking. Standard fixed size window approaches often disrupt semantic depen-dencies or syntactic structures, degrading repre-sentation quality. To mitigate this, we propose a boundary-aware segmentation algorithm. The al-gorithm accumulates tokens greedily and, upon reaching a minimum length threshold, looks ahead for high-priority natural delimiters (e.g., paragraph breaks, sentence endings, punctuation). If the max-imum threshold is reached without a natural break, a forced split is applied. This process maps the context into a sequence of variable-length, semanti-cally self-contained chunks S = {s1, s 2, ..., s M }.
+
+Hierarchical KV Indexing. To enable logarith-mic time retrieval, we organize the chunks into a pyramid structure. The process begins at the chunk level, where we compute the representation ¯ki for each chunk si by performing mean pooling on its internal token keys followed by L2 normalization. Building upon these representations, we further proceed to the fine cluster level by applying spher-ical k-means clustering (Hornik et al., 2012) to partition {¯ki} into L fine-grained clusters. Each cluster cj is characterized by its centroid μcj and a covering radius rcj , defined as the maximum Eu-clidean distance from the centroid to any member chunk. Finally, to address scenarios with extremely long contexts where L remains prohibitively large, we construct a coarse unit level. We employ the same logic to aggregate the L cluster centroids into 
+
+P coarse units ( P ≪ L). This three-tier architec-ture ( coarse → fine → chunk ) drastically reduces the search space for the subsequent decoding phase. 
+
+4.4 Decoding Phase 
+
+During decoding, the system must locate high-relevance caches with sub-linear complexity while accommodating the growing context. 
+
+Top-Down Pruning. For a query qt at each step, we perform a hierarchical search. We first evaluate the upper bound (Eqn. 2) against the top-level coarse units. Specifically, we compute UB (qt, g p) = q⊤ 
+
+> t
+
+μgp + ∥qt∥2 · rgp and retain only the top-kg units. Within these selected units, we apply the same logic to rank and select the top-kc
+
+fine clusters. Finally, all KV chunks belonging to the selected fine clusters are loaded as the active set (Kactive , V active ) for exact attention computation. This prune-and-refine strategy ensures that the com-putational cost remains nearly constant regardless of total context length. Incremental Update. As new tokens are gener-ated, their corresponding KV cache pairs must be indexed. To avoid the prohibitive cost of global re-clustering, LycheeCluster adopts a lazy update strategy. During decoding, new tokens are tem-porarily stored in a buffer. Once enough tokens have accumulated in the buffer to form a full dy-namic chunk , the chunk is assigned to the nearest existing fine cluster and coarse unit based on cen-troid proximity. The centroids of the affected nodes are updated via moving averages, while the radii undergo monotonic expansion to encompass the new chunk. This design allows the model to handle infinite streaming generation while maintaining the integrity of the retrieval index. 
+
+5 Experiments 
+
+5.1 Experimental Settings Benchmarks and Models. To evaluate the per-formance over different scenarios, we conduct experiments across models of varying architec-tures and sizes. For long-context understanding, we benchmark the Llama-3.1-8B-Instruct (Team, 2024) model on the L ONG BENCH V2 (Bai et al., 2025) dataset. It contains complex real world long-context questions across diverse tasks such as long in-context learning, long structured data analysis, and code repository understanding. With context lengths ranging from 8K to 2M, L ONG -BENCH V2 emphasizes deep reasoning and noise resistance, distinguishing it from LongBench (Bai et al., 2024) which focuses on simple retrieval. This allows for rigorous testing of semantic understand-ing over extremely long sequences. For complex reasoning scenarios, we employ the Deepseek-R1-Distill-Llama-8B and Deepseek-R1-Distill-Qwen-14B (DeepSeek-AI, 2025) models, evaluating them on the MATH500 (Hendrycks et al., 2021a) dataset. It consists of challenging mathematics competition problems and is widely used to as-sess long chain-of-thought reasoning performance. Due to space limitations, results of RULER bench-mark (Hsieh et al., 2024) on Appendix H. 
+
+Baseline. We compare LycheeCluster against full attention and several state-of-the-art KV man-agement and sparse attention methods including Quest (Tang et al., 2024), ClusterKV (Liu et al., 2025a), ArkVale (Chen et al., 2024), RaaS (Hu et al., 2025), ShadowKV (Sun et al., 2025a), and RazorAttention (Tang et al., 2025). Since Clus-terKV is equivalent to full attention when context length does not exceed the budget, and the context lengths in MATH500 are relatively short, we ex-clude it from complex reasoning experiments. The implementation details are in Appendix A. 
+
+5.2 Performance Evaluation Performance on Long-Context Understanding. 
+
+As shown in Table 1, the results indicate that on the LongBench V2 benchmark, LycheeCluster 
+
+achieves an overall accuracy of 30.8% with a 1024 token budget. The margin compared with other methods validates that preserving semantic integrity via structure-aware chunking is superior to rigid paging or token-level clustering, which often fragment context. Furthermore, the slight improvement over full attention suggests that our hierarchical pruning effectively acts as a noise filter, enabling the model to focus on critical information within noisy long contexts. 
+
+Performance on Complex Reasoning. We eval-uate the reasoning capability of LycheeCluster on the MATH500, results shown in Table 2. Complex mathematical reasoning typically involves long chains of thought, where recalling early premises is crucial. LycheeCluster keeps performance loss within 2% on Deepseek-R1-Distill-Llama-8B, and surpasses the full attention on Deepseek-R1-Distill-Qwen-14B. This demonstrates that our method ef-fectively adapts to the dynamic KV cache distribu-tion; even after generating thousands of tokens, it can rapidly retrieve key information from the prob-lem statement and reasoning process, effectively overcoming the bottlenecks of traditional sparse attention in complex reasoning. 
+
+5.3 Efficiency Evaluation End-to-End Decoding Speedup. We use Time Per Output Token (TPOT) as the primary metric to evaluate the decoding latency of LycheeCluster ,comparing it with ClusterKV and full attention based on FlashAttention-2 (Dao, 2024)) under vary-ing context lengths and token budgets. As illus-trated in Figure 4, the decoding latency of full atten-tion grows linearly with context length. In compari-son, LycheeCluster consistently maintains low latency. At a 32K context length, we achieve a 2.6 × speedup relative to full attention; when the context extends to 64K, this speedup reaches 3.6 ×. This result confirms the high efficiency of 
+
+LycheeCluster when processing long contexts. Method Overall Short Medium Long                                 
+
+> Full Attention 30.02 35.56 27.91 25.00 RazorAttention (Tang et al., 2025) 27.44 33.89 25.12 21.30 RaaS (Hu et al., 2025) 28.23 33.89 26.51 22.02 ArkVale (Chen et al., 2024) 28.63 33.89 26.98 23.15 ShadowKV (Sun et al., 2025a) 25.45 32.78 22.79 18.52 Quest (Tang et al., 2024) 20.68 22.78 19.07 20.37 ClusterKV (Liu et al., 2025a) 26.64 30.56 24.65 24.07 LycheeCluster 30.82 37.22 28.84 24.07
+
+Table 1: Performance comparison on LongBench V2 using Llama-3.1-8B-Instruct. Bold denotes the best sparse method; Blue highlights cases where LycheeCluster outperforms Full Attention.                  
+
+> Method DeepSeek-R1-Distill DeepSeek-R1-Distill Llama-8B Qwen-14B
+> Full Attention 78.40 74.00 RazorAttention 72.00 70.00 RaaS 74.00 68.00 ArkVale 72.00 72.00 ShadowKV 76.00 76.00 Quest 72.00 76.00
+> LycheeCluster 77.00 74.80
+
+Table 2: Accuracy on MATH500. LycheeCluster 
+
+demonstrates consistent improvements over sparse base-lines across different model architectures on DeepSeek-R1-Distill-Llama-8B. 4k 8k 16k 32k 64k 
+
+> Context Length
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> Latency (ms)
+> Full Attention
+> ClusterKV
+> LycheeCluster
+
+Figure 4: End-to-end decoding latency (TPOT) compari-son on a single H20 GPU across varying context lengths. While full attention exhibits linear latency growth, our method maintains consistently low latency. 
+
+Kernel-Level Analysis. To gain deeper insights into the sources of efficiency improvements and justify the overhead of clustering and retrieval, we decompose the runtime into four components: (1) index construction (prefill only), (2) hierarchical retrieval, (3) index update and (4) sparse attention. Figure 5(a) shows the time breakdown during the prefill phase. Although constructing the hier-archical index introduces additional computation, measurements indicate that this process accounts for only 10% - 15% of the total prefill time. Con-sidering that prefill is a one-time operation and subsequent decoding typically involves generating thousands of tokens, its amortized cost is almost negligible. In contrast, Figure 5(b) breaks down the latency of a single decoding step at a 72K con-text length, with the total time divided into hierar-chical retrieval, index update and sparse attention. Because of the logarithmic complexity of hierar-chical retrieval, the retrieval operation occupies only a minimal fraction of the single-step decod-ing time; this overhead is far outweighed by the benefits of reduced attention computation. Further-more, the cost of index maintenance is negligible. Our lazy update strategy consumes less than 1% of the decoding time. These results indicate that 
+
+LycheeCluster achieves high-precision retrieval without disrupting generation fluency. 
+
+5.4 Ablation Study Impact of Structure-Aware Chunking. To as-sess the impact of our structure-aware chunking design, we replace the structure-aware chunking with fixed-size chunking (chunk size = 16) while keeping the rest of the method unchanged. As illustrated in Figure 6, this results in a 3.03% per-formance drop for LycheeCluster on the Long Structured Data Understanding task of LongBench V2, along with a degradation in Code Repository Understanding. This confirms that for semantic re-trieval to function effectively, the fundamental unit of retrieval (chunk) must be semantically complete. 
+
+Pooling Strategy for Chunk Representation. 
+
+We investigate the impact of the aggregation func-tion used to generate the representative key ¯kj for each chunk. We compare our mean pooling strat-egy against max pooling. The results are illustrated in Table 3, mean pooling consistently outperforms max pooling across all subsets. We attribute this to the geometric nature of the self-attention mecha-nism. Since attention scores are derived from dot products (measuring alignment between Query and 8k 16k 32k 64k 
+
+> Context Length
+> 0
+> 5
+> 10
+> 15
+> 20
+> Prefill Latency (s)
+
+(a)  
+
+> Full Attention
+> ClusterKV
+> LycheeCluster
+> Index Construction
+> Full Attention LycheeCluster
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> Total Decoding Latency (s)
+> Lazy Update < 3%
+
+(b) 
+
+> Dense Attention
+> Sparse Attention
+> Hierarchical Retrieval
+> Lazy Update
+
+Figure 5: Kernel-level latency breakdown. (a) Prefill Phase: Latency comparison across varying context lengths. The colored top sections represent the index construction overhead. While LycheeCluster incurs a slightly higher construction cost (10–15%) than ClusterKV, it remains a minor fraction of the total prefill time. (b) Decoding Phase: Breakdown of total latency for generating 1,024 tokens at 72k context. The combined overhead of retrieval and lazy updates in LycheeCluster is minimal compared to the massive computation reduction. Code Repo  
+
+> Struct. Data
+> In-Context
+> Dialogue
+> 0
+> 5
+> 10
+> 15
+> 20
+> 25
+> 30
+> 35
+> 40
+> 45
+> Accuracy
+> 34.0
+> 9.1
+> 24.7
+> 33.3
+> 36.0
+> 12.1
+> 28.4
+> 35.9
+> Fixed-Size Chunking Structure-Aware (Ours)
+
+Figure 6: Ablation study on the impact of segmentation strategies. We compare the accuracy of LycheeCluster 
+
+using our structure-aware chunking against a fixed-size chunking baseline across four task categories. The re-sults demonstrate that preserving semantic boundaries consistently improves performance.                
+
+> Strategy Overall Short Medium Long Recall Rate
+> Max 28.83 35.56 26.98 21.3 33.60%
+> Mean 30.82 37.22 28.84 24.07 40.37%
+
+Table 3: Ablation study on representative key pooling strategies. We compare mean pooling (Ours) against max pooling on the LongBench V2 (Llama-3.1-8B-Instruct). Recall Rate denotes the retrieval recall rate. It is defined as the percentage of the top-k tokens with the highest ground-truth attention scores (computed by full attention) that are successfully retrieved by the strategy within the same token budget. 
+
+Key vectors), preserving the directionality of the feature space is crucial. Max pooling constructs a synthetic vector composed of extreme values from each dimension, which often distorts the original semantic direction and is sensitive to outliers. In contrast, mean pooling followed by L2 normaliza-tion effectively computes the geometric centroid of the token embeddings of the chunk. This provides a faithful representation of the average semantic po-sition of the chunk, mathematically aligning with 256 512 1024 2048 
+
+> Token Budget
+> 25
+> 26
+> 27
+> 28
+> 29
+> 30
+> 31
+> Accuracy
+> Full Attention
+> LycheeCluster
+
+Figure 7: Impact of token budget on LongBench V2 performance. The accuracy improves as the budget increases from 256 to 1024. 
+
+our spherical k-means objective to maximize the retrieval recall of relevant semantic information. 
+
+Impact of Token Budget. We analyze the impact of the token budget on performance. As shown in Figure 7, overall accuracy in LongBench V2 im-proves significantly as the budget increases from 256 to 1024, but then saturates, showing limited gains with larger budgets. This demonstrates that 
+
+LycheeCluster can effectively utilize a small bud-get to precisely capture the critical tokens within extremely long contexts that are essential for gen-eration, thereby maintaining model performance. 
+
+6 Conclusion 
+
+We proposed LycheeCluster that harmonizes memory efficiency with semantic integrity. By em-ploying structure-aware chunking and hierarchical index, we achieve bounded, sub-linear retrieval without disrupting local context. Our approach outperforms state-of-the-art methods, delivering comparable accuracy to full attention with lower la-tency. It offers a scalable solution for long-context LLMs inference in resource-constrained scenarios. Limitations 
+
+First, one limitation of our method is that we fo-cus on speeding up generation, and the proposed method does not accelerate attention during the prefill phase. However, prefill overhead is a one-time cost. In long-context scenarios (e.g., RAG, agentic workflows), the decoding phase (genera-tion) typically dominates the total latency. The 3.6x speedup in decoding quickly offsets the prefill cost. One promising direction for future research would be to extend our method to support accel-erating prefill. Second, integrating our proposed method into established LLM serving frameworks (e.g., vLLM (Kwon et al., 2023), SGLang (Zheng et al., 2024)) necessitates additional engineering effort. Furthermore, more adaptive strategies can further enhance the generalization ability of this method. As part of ongoing and future work, we are actively investigating the relationship between input features (e.g., sentence length distribution and semantic diversity) and the optimal semantic-aware chunking factor. Preliminary observations suggest that dynamically adjusting this factor based on these input statistics can further improve effi-ciency and accuracy. Finally, while our technique incurs a memory overhead for storing centroids al-though this cost is negligible when compared to the total size of the KV cache. 
+
+Ethical Considerations 
+
+Our work primarily contributes to Green AI by re-ducing the inference energy consumption of LLMs through sub-linear retrieval complexity. This ef-ficiency enables the deployment of long-context models on resource-constrained hardware, democ-ratizing access to advanced AI. However, as an approximate attention mechanism, there is a the-oretical risk of information loss in safety-critical domains (e.g., medical or legal analysis), necessitat-ing careful verification in high-stakes applications. Finally, while efficient inference lowers barriers for beneficial use, it could also facilitate large-scale misuse by malicious actors; we advocate for re-sponsible deployment to mitigate these risks. 
+
+References 
+
+Anthropic. 2025. Claude 3.7 sonnet system card. Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. 2024. Longbench: A bilingual, multi-task benchmark for long context understanding. In 
+
+Proceedings of the 62nd Annual Meeting of the As-sociation for Computational Linguistics (Volume 1: Long Papers), ACL 2024, Bangkok, Thailand, Au-gust 11-16, 2024 , pages 3119–3137. Association for Computational Linguistics. Yushi Bai, Shangqing Tu, Jiajie Zhang, Hao Peng, Xi-aozhi Wang, Xin Lv, Shulin Cao, Jiazheng Xu, Lei Hou, Yuxiao Dong, and 1 others. 2025. Longbench v2: Towards deeper understanding and reasoning on realistic long-context multitasks. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) ,pages 3639–3664. Jinhan Chen, Jianchun Liu, Hongli Xu, Xianjun Gao, and Shilong Wang. 2025. Sablock: Semantic-aware kv cache eviction with adaptive compression block size. arXiv preprint arXiv:2510.22556 .Renze Chen, Zhuofeng Wang, Beiquan Cao, Tong Wu, Size Zheng, Xiuhong Li, Xuechao Wei, Shengen Yan, Meng Li, and Yun Liang. 2024. Arkvale: Efficient generative LLM inference with recallable key-value eviction. In Advances in Neural Information Pro-cessing Systems 38: Annual Conference on Neural Information Processing Systems 2024, NeurIPS 2024, Vancouver, BC, Canada, December 10 - 15, 2024 .Gheorghe Comanici, Eric Bieber, Mike Schaekermann, Ice Pasupat, Noveen Sachdeva, Inderjit Dhillon, Mar-cel Blistein, Ori Ram, Dan Zhang, Evan Rosen, and 1 others. 2025. Gemini 2.5: Pushing the frontier with advanced reasoning, multimodality, long context, and next generation agentic capabilities. arXiv preprint arXiv:2507.06261 .Tri Dao. 2024. Flashattention-2: Faster attention with better parallelism and work partitioning. In The Twelfth International Conference on Learning Rep-resentations, ICLR 2024, Vienna, Austria, May 7-11, 2024 .DeepSeek-AI. 2025. Deepseek-r1: Incentivizing rea-soning capability in llms via reinforcement learning. 
+
+CoRR , abs/2501.12948. Zafeirios Fountas, Martin Benfeghoul, Adnan Oomer-jee, Fenia Christopoulou, Gerasimos Lampouras, Haitham Bou Ammar, and Jun Wang. 2025. Human-inspired episodic memory for infinite context llms. In 
+
+The Thirteenth International Conference on Learning Representations .Zhouhong Gu, Haoning Ye, Xingzhou Chen, Zeyang Zhou, Hongwei Feng, and Yanghua Xiao. 2025. Structext-eval: Evaluating large language model’s reasoning ability in structure-rich text. In Proceed-ings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Pa-pers) , pages 223–244. Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. 2021a. Measuring mathematical problem solving with the MATH dataset. In Pro-ceedings of the Neural Information Processing Sys-tems Track on Datasets and Benchmarks 1, NeurIPS Datasets and Benchmarks 2021, December 2021, vir-tual .Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. 2021b. Measuring mathematical problem solving with the math dataset. NeurIPS .Kurt Hornik, Ingo Feinerer, Martin Kober, and Christian Buchta. 2012. Spherical k-means clustering. Journal of statistical software , 50:1–22. Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shan-tanu Acharya, Dima Rekesh, Fei Jia, and Boris Gins-burg. 2024. RULER: What’s the real context size of your long-context language models? In First Confer-ence on Language Modeling .Junhao Hu, Wenrui Huang, Weidong Wang, Zhenwen Li, Tiancheng Hu, Zhixia Liu, Xusheng Chen, Tao Xie, and Yizhou Shan. 2025. Raas: Reasoning-aware attention sparsity for efficient LLM reasoning. In 
+
+Findings of the Association for Computational Lin-guistics, ACL 2025, Vienna, Austria, July 27 - August 1, 2025 , pages 2577–2590. Jang-Hyun Kim, Jinuk Kim, Sangwoo Kwon, Jae W. Lee, Sangdoo Yun, and Hyun Oh Song. 2025. Kvzip: Query-agnostic KV cache compression with context reconstruction. CoRR , abs/2505.23416. Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gon-zalez, Ion Stoica, and Zhanghao Wu. 2023. Efficient memory management for large language model serv-ing with pagedattention. In Proceedings of the 29th Symposium on Operating Systems Principles , pages 611–626. Haoyang Li, Yiming Li, Anxin Tian, Tianhao Tang, Zhanchao Xu, Xuejia Chen, Nicole Hu, Wei Dong, Qing Li, and Lei Chen. 2024a. A survey on large language model acceleration based on kv cache man-agement. arXiv preprint arXiv:2412.19442 .Yucheng Li, Huiqiang Jiang, Qianhui Wu, Xufang Luo, Surin Ahn, Chengruidong Zhang, Amir H Abdi, Dongsheng Li, Jianfeng Gao, Yuqing Yang, and 1 others. 2025. Scbench: A kv cache-centric analysis of long-context methods. In The Thirteenth Interna-tional Conference on Learning Representations .Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024b. Snapkv: LLM knows what you are looking for before genera-tion. In Advances in Neural Information Processing Systems 38: Annual Conference on Neural Informa-tion Processing Systems 2024, NeurIPS 2024, Van-couver, BC, Canada, December 10 - 15, 2024 .Hunter Lightman, Vineet Kosaraju, Yuri Burda, Harri-son Edwards, Bowen Baker, Teddy Lee, Jan Leike, John Schulman, Ilya Sutskever, and Karl Cobbe. 2023. Let’s verify step by step. In The Twelfth Inter-national Conference on Learning Representations .Di Liu, Meng Chen, Baotong Lu, Huiqiang Jiang, Zhenhua Han, Qianxi Zhang, Qi Chen, Chen-gruidong Zhang, Bailu Ding, Kai Zhang, and 1 others. 2024. Retrievalattention: Accelerating long-context llm inference via vector retrieval. arXiv preprint arXiv:2409.10516 .Guangda Liu, Chengwei Li, Jieru Zhao, Chenqi Zhang, and Minyi Guo. 2025a. Clusterkv: Manipulating LLM KV cache in semantic space for recallable com-pression. In 62nd ACM/IEEE Design Automation Conference, DAC 2025, San Francisco, CA, USA, June 22-25, 2025 , pages 1–7. IEEE. Jiaheng Liu, Dawei Zhu, Zhiqi Bai, Yancheng He, Huanxuan Liao, Haoran Que, Zekun Wang, Chenchen Zhang, Ge Zhang, Jiebin Zhang, and 1 others. 2025b. A comprehensive survey on long context language modeling. arXiv preprint arXiv:2503.17407 .Enzhe Lu, Zhejun Jiang, Jingyuan Liu, Yulun Du, Tao Jiang, Chao Hong, Shaowei Liu, Weiran He, Enming Yuan, Yuzhi Wang, Zhiqi Huang, Huan Yuan, Suting Xu, Xinran Xu, Guokun Lai, Yanru Chen, Huabin Zheng, Junjie Yan, Jianlin Su, and 6 others. 2025. MoBA: Mixture of block attention for long-context LLMs. In The Thirty-ninth Annual Conference on Neural Information Processing Systems .Hanshi Sun, Li-Wen Chang, Wenlei Bao, Size Zheng, Ningxin Zheng, Xin Liu, Harry Dong, Yuejie Chi, and Beidi Chen. 2025a. ShadowKV: KV cache in shadows for high-throughput long-context LLM in-ference. In Forty-second International Conference on Machine Learning .Yutao Sun, Tianzhu Ye, Li Dong, Yuqing Xia, Jian Chen, Yizhao Gao, Shijie Cao, Jianyong Wang, and Furu Wei. 2025b. Rectified sparse attention. arXiv preprint arXiv:2506.04108 .Hanlin Tang, Yang Lin, Jing Lin, Qingsen Han, Danning Ke, Shikuan Hong, Yiwu Yao, and Gongyi Wang. 2025. Razorattention: Efficient kv cache compres-sion through retrieval heads. In The Thirteenth Inter-national Conference on Learning Representations .Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao, Baris Kasikci, and Song Han. 2024. QUEST: query-aware sparsity for efficient long-context LLM infer-ence. In Forty-first International Conference on Ma-chine Learning, ICML 2024, Vienna, Austria, July 21-27, 2024 . OpenReview.net. Llama Team. 2024. The llama 3 herd of models. CoRR ,abs/2407.21783. Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient streaming lan-guage models with attention sinks. In The Twelfth International Conference on Learning Representa-tions, ICLR 2024, Vienna, Austria, May 7-11, 2024 .OpenReview.net. An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, and 1 others. 2025a. Qwen3 technical report. arXiv preprint arXiv:2505.09388 .Lijie Yang, Zhihao Zhang, Zhuofu Chen, Zikun Li, and Zhihao Jia. 2025b. Tidaldecode: Fast and accurate LLM decoding with position persistent sparse atten-tion. In The Thirteenth International Conference on Learning Representations, ICLR 2025, Singapore, April 24-28, 2025 . OpenReview.net. Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark W. Barrett, Zhangyang Wang, and Beidi Chen. 2023. H2O: heavy-hitter oracle for efficient generative inference of large language models. In Advances in Neural Information Processing Systems 36: Annual Confer-ence on Neural Information Processing Systems 2023, NeurIPS 2023, New Orleans, LA, USA, December 10 - 16, 2023 .Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Livia Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E Gonza-lez, and 1 others. 2024. Sglang: Efficient execution of structured language model programs. Advances in neural information processing systems , 37:62557– 62583. Yuxuan Zhu, Ali Falahati, David H. Yang, and Mo-hammad Mohammadi Amiri. 2025. SentenceKV: Efficient LLM inference via sentence-level semantic KV caching. In Second Conference on Language Modeling .A Implementation Details 
+
+All experiments are conducted on NVIDIA H20 GPUs. We implement a series of high-performance kernels based on CUDA C++ to maximize hard-ware utilization and memory access efficiency. Building upon ClusterKV (Liu et al., 2025a), we specifically redesigned the logic for index construc-tion and token selection (retrieval). We further de-sign and write custom kernels for variable-length chunk parallel pooling, label assignment, centroid updates, and radius calculations. Regarding the hyperparameters of LycheeCluster , we set the default token budget to 1024. For the chunking strategy, we set the minimum and maximum chunk length thresholds to 8 and 16 tokens, respectively, with a buffer size of 128 tokens. This range is de-rived from the average information density of natu-ral language sentences and code statements, gener-ally covering a complete semantic unit across most LLMs tokenizers. Unlike rigid fixed-size chunk-ing methods that mechanically cut data and po-tentially split critical entities (e.g., variable names), our method ensures that atomic components remain intact. Moreover, the algorithm actively searches for the best syntactic breakpoints (e.g., commas or operators) within the effective window to ensure syntactically safe segmentation (Appendix §B). For the clustering mechanism, we employ spherical 
+
+k-means using the inner product as the distance metric, with the number of iterations fixed at 10. We observe that the initialization and the number of convergence iterations have a negligible impact on the final performance. Specifically, setting the iteration count to 10-20 yields similar results. To determine the initial number of cluster centers, we set the average fine cluster size to 2 chunks, while limiting the maximum number of coarse units to 64. To ensure stability and align with settings in previ-ous work, we retain full key-value pairs for the first 2 layers and set the attention sink size to 16. All baselines were reproduced based on their official open-source code and recommended parameters. 
+
+B Details of Natural Delimiters 
+
+We define a hierarchical set of separators to guide the recursive splitting process, as detailed in Ta-ble 4. The separators are categorized into four prior-ity levels based on their semantic strength. Level 1 identifies major structural boundaries, such as para-graph breaks and syntax-specific delimiters found in Markdown or code. Level 2 preserves sentence 8K 16K 32K 64K 
+
+> Context Length (tokens)
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> Memory Usage (GB)
+> Full KV Cache
+> Index Overhead
+> 0
+> 200
+> 400
+> 600
+> 800
+> 1000
+> Index Overhead (MB)
+> 1.1%
+> 1.3%
+> 1.0%
+> 1.0%
+
+Figure 8: Memory usage comparison between the full KV cache (left axis, GB) and index overhead of 
+
+LycheeCluster (right axis, MB). The percentages an-notate the relative size of the index compared to the full KV cache, showing a consistent ∼1% overhead. 
+
+integrity through terminal punctuation and single newlines. Level 3 addresses intra-sentence pauses using phrasal punctuation, while Level 4 serves as a fine-grained fallback based on whitespace. This prioritization ensures that the text is always split at the most logically significant points available before resorting to finer granularity. While our method utilizes natural language separators, it is de-signed to be domain-agnostic and robust. First, our hierarchy explicitly prioritizes structural markers common in technical data, such as Markdown code fences and JSON delimiters (Level 1). Second, the chunking algorithm employs a greedy accu-mulation strategy with a minimum size constraint, ensuring that code snippets with frequent punctu-ation are not over-segmented but grouped into co-herent logical units (e.g., function bodies). Finally, for unstructured or minified inputs where separa-tors are absent, the method degrades to fixed-size chunking, ensuring it performs no worse than tra-ditional baselines (e.g., Quest (Tang et al., 2024)) even in adversarial scenarios. Additionally, while SentenceKV (Zhu et al., 2025) focuses on sentence-level retrieval, its reliance on explicit punctuation limits its applicability to structured data (e.g., code, JSON), which is a core capability of our domain-agnostic LycheeCluster . Therefore, we prioritize comparisons with general-purpose methods like Quest and ClusterKV. 
+
+C Memory Overhead Analysis of the Indexing Structure 
+
+A critical concern regarding indexing-based sparse attention is whether the auxiliary storage required Priority Level Category Details & Examples Level-1 Structural Separators Paragraphs ( \n\n ), Markdown ( —, *** , “‘ ), Structural Language ( }, ], >)       
+
+> Level-2 Grammatical & Semantic Sentence Terminators (., ?, !, 。？！ ), Single Newline ( \n )
+> Level-3 Phrasal Separators English Punctuation („ ;, :), Chinese Punctuation ( ，；： 、)
+> Level-4 Whitespace Spaces, Tabs
+> Table 4: Hierarchical classification of text separators for recursive chunking, ordered by semantic priority from structural delimiters to whitespace.
+
+for the index structure itself becomes a bottle-neck in ultra-long context scenarios (e.g., 1M tokens). If the index grows disproportionately, it could potentially negate the memory savings achieved by KV cache compression, particularly on memory-constrained edge devices. To address this, we evaluated the memory footprint of the 
+
+LycheeCluster index compared to the full KV cache on the Llama3.1-8B-Instruct model across increasing context lengths. As shown in Figure 8, the index overhead is negligible. • Minimal Storage Footprint: While the Full KV Cache (blue line, left axis) rapidly con-sumes gigabytes of memory as context length increases, the index overhead (red line, right axis) remains in the megabyte range. • Consistent ∼1% Ratio: Crucially, the ratio of index size to full KV cache size remains sta-ble at approximately 1% (ranging from 1.0% to 1.3%) across all tested lengths up to 64K. This linear scaling behavior implies that the in-dex structure remains lightweight relative to the massive KV tensors. Consequently, the memory cost of the index is orders of magnitude smaller than the memory reclaimed through sparsification, ensuring that our method remains highly efficient even on hardware with strict memory limitations. 
+
+D Stability Analysis in Ultra-Long Generation 
+
+To address concerns regarding index quality de-cay during extended generation scenarios, we con-ducted a dedicated stability analysis. We define St
+
+as the set of active clusters (or indices) retrieved at decoding step t. To quantify the consistency of the retrieval process over time, we introduce two stability metrics: • Jaccard Similarity: This metric measures the immediate temporal consistency by cal-culating the overlap between cluster sets at adjacent steps. A higher value indicates a sta-ble focus without abrupt context shifting. 
+
+J(St, S t−1) = |St ∩ St−1||St ∪ St−1| (3) • Window Hit Rate: This metric assesses the locality of the retrieval by calculating the proportion of currently retrieved clusters that have appeared within a recent history window 
+
+w (where w = 32 ). High values imply that the model consistently attends to a relevant working set of information. WindowHit (St) = |St ∩ (Swi=1 St−i)||St| (4) As shown in Figure 9, our method demonstrates strong robustness throughout the generation pro-cess. First, the window hit rate (green line) consis-tently remains close to 1.0 throughout the genera-tion trajectory. This indicates that the model main-tains a highly coherent working memory, effec-tively focusing on relevant historical context with-out experiencing context loss or generating irrele-vant content, even with extremely long sequence lengths. Second, the Jaccard similarity (blue line) maintains a high baseline level. Although there are some fluctuations, especially after 6k-8k steps, this does not represent model failure. On the contrary, it reflects the dynamic adaptability of chain-of-thought generation: as the generation topic continu-ously evolves in long sequences, the retrieved clus-ters naturally change to adapt to the new semantic content. Importantly, LycheeCluster avoids catas-trophic collapse, maintaining effective retrieval ca-pabilities even in the later stages of generation where previous methods typically experience degra-dation. Considering that drift of cluster centroids, future work could also perform global re-clustering when necessary (Sun et al., 2025b). 
+
+E Sensitivity Analysis on Clustering Granularity 
+
+A critical hyperparameter in LycheeCluster is the granularity of the hierarchical index, specifically the number of fine-grained clusters L. Since L
+
+naturally scales with the context length, we ana-lyze the impact of the average cluster size (i.e., the average number of chunks assigned to each fine cluster) on both retrieval performance and system efficiency. We conducted this sensitivity analysis on the gov_report subset of LongBench V2. Fig-ure 10 illustrates the trade-off between the recall rate and prefill latency as the average cluster size increases from 1 to 8. The results highlight a clear tension between semantic precision and construc-tion cost: (1) When the average cluster size is small (e.g., 1 chunk per cluster), the centroid provides a highly accurate representation of the underly-ing data, resulting in the highest recall ( ∼50%). However, as we aggregate more chunks into a sin-gle cluster (increasing the x-axis), the centroid be-comes a coarser approximation of its constituents. This increased variance within clusters leads to a monotonic decrease in recall, dropping below 40% when averaging 8 chunks per cluster. (2) Con-versely, the latency of the prefill phase—dominated by the k-means clustering overhead—is inversely proportional to the cluster size. Smaller cluster sizes imply a larger number of centroids ( L) to compute and update, resulting in higher latency (∼0.68s at size 1). Increasing the chunks per clus-ter reduces L, significantly accelerating the index construction process. Based on these observations, an average of 2 chunks per cluster seems to the optimal setting for our experiments. This configuration strikes a bal-ance, achieving a significant reduction in prefill latency compared to the baseline (size 1) while sac-rificing minimal retrieval accuracy ( ∼3% drop in recall), whereas larger cluster sizes result in unac-ceptable performance degradation. 
+
+F Extended Analysis and Discussions 
+
+In this section, we address specific behaviors of 
+
+LycheeCluster regarding budget sensitivity and provide a theoretical discussion on the time com-plexity of our hierarchical retrieval. 
+
+F.1 Behavior in Budget-Sufficient Scenarios 
+
+We analyze the behavior of LycheeCluster 
+
+when the context length does not strictly exceed the retrieval budget, particularly in reasoning-intensive tasks. A critical design principle of 
+
+LycheeCluster is its adaptive nature: the sparse retrieval mechanism is only triggered when the total sequence length (input context + generated chain-of-thought) exceeds the pre-defined token budget. In scenarios where the sum of the input prompt and the generated chain-of-thought remains within the budget, LycheeCluster (and ClusterKV) nat-urally degenerates to full attention. No tokens are pruned, and no approximation error is introduced. This explains the exclusion of ClusterKV in Table 2 comparisons. Since the average context length in MATH-500 is relatively short, simple paging or clustering methods often operate in a regime iden-tical to full attention unless an extremely small budget is forced. Consequently, we assert that in short-context tasks without budget constraints, 
+
+LycheeCluster incurs zero degradation compared to full attention. It does not suffer from the unnec-essary precision loss that affects methods which enforce static sparsity patterns regardless of buffer availability. However, once the generation extends beyond budget, LycheeCluster seamlessly transi-tions to hierarchical retrieval, preserving the criti-cal semantic chunks while strictly adhering to the memory bound. 
+
+F.2 Complexity Analysis: Sub-linear vs. Logarithmic 
+
+A key question regarding hierarchical indexing is the theoretical bound of the retrieval complexity. Currently, LycheeCluster employs a fixed three-tier structure (coarse unit → fine cluster →
+
+chunk). This design yields a sub-linear time com-plexity, approximately O(√N ) depending on the branching factor configuration, rather than strict logarithmic complexity O(log N ).
+
+Why not dynamic depth for O(log N )? While it is theoretically feasible to implement a dynamic tree where the height grows with context length 0 1000 2000 3000 4000 5000 6000 7000 8000 
+
+Decode Step 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0  
+
+> Metric Value
+> Jaccard Similarity Window Hit
+
+Figure 9: Stability analysis during long-context generation. The blue represents the step-to-step Jaccard Similarity, and the green represents the Window Hit rate ( w = 32 ). Stability remains robust initially but shows signs of decay after 6k decode steps. 1 2 4 6 8 
+
+> Avg. Chunks in Fine Clusters
+> 35.0
+> 37.5
+> 40.0
+> 42.5
+> 45.0
+> 47.5
+> 50.0
+> 52.5
+> 55.0
+> Recall Rate (%)
+> Recall Rate Prefill Latency
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Prefill Latency (s)
+
+Figure 10: Sensitivity analysis on clustering granularity. We investigate the impact of the average number of chunks per fine cluster on retrieval Recall Rate (blue, left axis) and Prefill Latency (orange, right axis) using the gov_report subset. 
+
+(e.g., a B-tree or hierarchical k-means with dy-namic depth) to achieve O(log N ) retrieval, we chose a fixed-depth approach for practical effi-ciency: • Overhead Trade-off: For context windows currently relevant to LLMs (e.g., up to 1M to-kens), the constant factors and pointer-chasing overheads introduced by maintaining and traversing a deep, dynamic tree outweigh the theoretical gains of logarithmic complexity. • Parallelism: A flatter, fixed-depth hierarchy maps more efficiently to GPU parallelization (e.g., computing distances to all coarse cen-troids in parallel) compared to the sequential dependency inherent in traversing a deep tree. 6 4 2 0 2 
+
+> t-SNE Dimension 1
+> 12
+> 10
+> 8
+> 6
+> 4
+> t-SNE Dimension 2
+> Chunk
+> Unit 0
+> Unit 1
+> Unit 2
+> Cluster 0
+> Cluster 1
+> Cluster 2
+> Cluster 3
+> Cluster 4 Cluster 5
+
+Figure 11: Each point represents a chunk. Colors de-note coarse units, while shaded polygons indicate fine clusters. 
+
+Therefore, our current design represents an engi-neering optimum prioritizing wall-clock speedup over asymptotic optimality. 
+
+F.3 Visualization of Hierarchical KV Indexing 
+
+To intuitively understand how LycheeCluster or-ganizes the KV cache in the semantic space, we employ t-Distributed Stochastic Neighbor Embed-ding (t-SNE) to visualize the hierarchical structure of the indexed chunks. We randomly sampled a sequence from the Long In-context Learning task of LongBench V2, extracting the representative key vectors ¯kj of all chunks constructed during the prefill phase. <32k 32k~128k 128k~256k 256k~512k >512k  
+
+> 0
+> 25
+> 50
+> 75
+> 100
+> 125
+> 150
+> 175
+> 200
+> 23.5%
+> 40.4%
+> 17.3%
+> 9.3% 9.5%
+> Code Repository Understanding
+> Long In-context Learning
+> Long Structured Data Understanding
+> Long-dialogue History Understanding
+> Multi-Document QA
+> Single-Document QA
+
+Figure 12: Statistical distribution of data length ranges in the L ONG BENCH V2 dataset, using the Llama3.1-8B-instruct tokenizer. 
+
+As illustrated in Figure 11, we project these high-dimensional vectors into a 2D space. In this visual-ization: • Each point represents an atomic chunk ( sj ). • The shaded polygons encompass chunks be-longing to the same fine cluster (cj ). • The colors distinguish different Coarse Units 
+
+(gp, e.g., Unit 0 in blue, Unit 1 in orange). The visualization reveals a clear and well-structured semantic topology. First, chunks within the same fine cluster (e.g., Cluster 5 in Unit 0) are tightly grouped, validating our assumption that structure-aware chunks preserve local semantic co-herence. Second, the fine clusters themselves are spatially aggregated into distinct coarse units. For instance, the orange region (Unit 1) effectively cov-ers a broad semantic area containing Clusters 3 and 4, while being clearly separated from the green region (Unit 2). This strong spatial locality confirms the effec-tiveness of our pruning strategy: a query vector falling near the orange centroid can safely discard the blue and green branches, as their constituent chunks lie far outside the relevant semantic radius. This hierarchical separation is the cornerstone of 
+
+LycheeCluster ’s ability to maintain high recall with sub-linear retrieval complexity. 
+
+G Dataset 
+
+G.1 LongBench V2 
+
+LONG BENCH V2 (Bai et al., 2025) is a bench-mark designed to evaluate the deep understand-ing and reasoning capabilities of LLMs on long contexts in real-world multi-task scenarios. The dataset consists of 503 highly challenging multiple-choice questions with context lengths ranging from 8k to 2M words (most are below 128k), covering six major task categories: single-document ques-tion answering, multi-document question answer-ing, long-context learning, long dialogue history understanding, code repository understanding, and long structured data understanding. To ensure the breadth and practicality of the data, the questions were constructed by nearly a hundred highly edu-cated individuals with diverse professional back-grounds and underwent rigorous review. The diffi-culty is extremely high; even human experts using search tools only achieved a 53.7% accuracy rate within 15 minutes. Tables 5 show the specific sta-tistical information for the six task categories, and Figures 12 shows the distribution of the dataset across different length ranges. As shown in the fig-ures, L ONG BENCH V2 is extremely challenging, with its core evaluation range concentrated in the medium-to-long text range of 32k to 128k (40.4%), while also retaining a considerable proportion of ultra-long text (>512k) test cases, with a maximum text length of up to 4M. To provide a comprehensive assessment of model performance under varying memory and computational constraints, L ONG BENCH V2 cate-gorizes its test instances into three distinct length groups based on the input context size: Short (0– 32k tokens), Medium (32k–128k tokens), and Long 
+
+(exceeding 128k tokens, up to 2M). The Overall 
+
+score represents the macro-average across all in-stances. This stratified evaluation is crucial for identifying the performance degradation of LLMs, as many models exhibit significant degradation when the context exceeds their effective attention window or fine-tuned limits. By isolating these cat-egories, we can distinguish between the basic rea-soning capabilities and its robustness in handling extreme-scale information retrieval and synthesis. 
+
+G.2 MATH500 
+
+To evaluate the advanced mathematical reasoning capabilities of LLMs, we utilize the MATH500 benchmark (Lightman et al., 2023). This dataset is a high-quality subset of the original MATH bench-mark (Hendrycks et al., 2021b), consisting of 500 problems curated to represent a broad spectrum of difficulty levels and mathematical topics. The prob-lems are sourced from elite mathematics competi-tions, including the American Mathematics Com-Task # Samples Avg. Length Max Length Expert Acc. Expert Time Code Repository Understanding 50 1M 4M 44% 6.4 min Long In-context Learning 81 259k 1.5M 63% 8.3 min Long Structured Data Understanding 33 390k 3M 73% 6.4 min Long-dialogue History Understanding 39 74k 120k 79% 8.2 min Multi-Document QA 125 127k 1.7M 36% 6.1 min Single-Document QA 175 110k 860k 55% 8.9 min 
+
+Table 5: Data statistics and expert performance across tasks of L ONG BENCH V2.                                                                                  
+
+> Context / Task single multikey multivalue multiquery vt fwe qa1 qa2 Avg. Full Attention 4k 100.0 100.0 100.0 100.0 82.5 84.4 89.8 59.2 89.5 8k 91.8 100.0 100.0 99.0 79.6 87.1 81.6 59.2 87.3 16k 63.3 100.0 98.5 98.5 82.0 93.9 79.6 51.0 83.3 32k 95.9 95.9 97.5 97.5 76.3 76.9 79.6 59.2 84.8 LycheeCluster 4k 100.0 100.0 100.0 99.5 81.2 80.3 89.8 59.2 88.8 8k 100.0 100.0 96.4 100.0 78.0 83.7 81.6 59.2 87.4
+> 16k 93.9 100.0 94.9 94.9 73.1 89.8 77.6 51.0 84.4
+> 32k 95.9 98.0 92.9 93.9 85.7 76.2 75.5 59.2 84.7
+
+Table 6: Performance comparison on RULER benchmark. Note that LycheeCluster achieves comparable or even superior average performance compared to Full Attention, especially at 16k length. 
+
+petitions (AMC 10/12) and the American Invita-tional Mathematics Examination (AIME). MATH-500 spans seven core subjects: Algebra, Geometry, Number Theory, Counting & Probability, Prealge-bra, Intermediate Algebra, and Precalculus. Due to its requirement for multi-step logical deduction and precise symbolic manipulation, MATH-500 has be-come a standard metric for assessing the chain-of-thought reasoning performance of state-of-the-art models. 
+
+H More Experiment Results on RULER Benchmark 
+
+To assess the long-context capabilities, we evaluate our method on the RULER benchmark (Hsieh et al., 2024). RULER serves as a comprehensive testbed for long-context language models, expanding be-yond simple retrieval to include complex aggrega-tion and reasoning tasks. We report results on a diverse set of tasks: single , multikey , multivalue ,
+
+multiquery , vt , fwe , qa1 , and qa2 . We compare 
+
+LycheeCluster against the Full Attention baseline across sequence lengths from 4k to 32k. The experimental results are presented in Ta-ble 6. Our method demonstrates remarkable sta-bility and robustness across all context lengths. In the 4k setting, LycheeCluster achieves an average score of 88.8, comparable to the Full Attention baseline. Notably, as the sequence length extends, LycheeCluster exhibits superior stability in specific scenarios. At 16k length, our method outperforms the full attention model, primarily because the full attention baseline suffers a significant performance drop in the single task (dropping to 63.3), whereas LycheeCluster maintains a high score of 93.9. Even at the extreme length of 32k, our approach main-tains parity with the full attention mechanism, prov-ing that LycheeCluster can effectively handle exten-sive contexts without compromising performance.

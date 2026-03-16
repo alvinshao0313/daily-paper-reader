@@ -1,0 +1,497 @@
+Title: Cost-Efficient Multimodal LLM Inference via Cross-Tier GPU Heterogeneity
+
+URL Source: https://arxiv.org/pdf/2603.12707v1
+
+Published Time: Mon, 16 Mar 2026 00:44:32 GMT
+
+Number of Pages: 11
+
+Markdown Content:
+# Cost-Efficient Multimodal LLM Inference via Cross-Tier GPU Heterogeneity 
+
+Donglin Yu donglin5@illinois.edu 
+
+# Abstract 
+
+Multimodal large language model (MLLM) inference splits into two phases with opposing hardware demands: vision encoding is compute-bound, while language generation is memory-bandwidth-bound. We show that under standard transformer KV caching, the modality boundary (between vision encoder and language model) minimizes cross-device transfer among all partition points that preserve standard stage-based execution. Partitioning here reduces transfer complexity from O(L · sctx ) bytes (GB-scale KV caches under stage-level disaggregation) to O(Nv · d) bytes (MB-scale embeddings), an O(L) reduction where L is the transformer depth. The result holds across attention mechanisms (MHA/GQA), dynamic vision resolutions, and model scales, and the advantage grows as models deepen. A direct implication is that existing stage-level disaggregation systems are constrained to high-bandwidth interconnects (e.g., NVLink), whereas modality-level disaggregation enables cross-tier heterogeneous serving over commodity PCIe. A closed-form cost model shows that heterogeneous deployment is cost-optimal under phase-separable workloads (predicts 31.4% savings; observed 40.6%). We build HeteroServe, a phase-aware runtime with modality-level partitioning and cross-tier scheduling, and evaluate it on LLaVA-1.5-7B and Qwen2.5-VL against vLLM v0.3.0. On identical 4 ×A100 hardware, engine optimizations raise throughput by up to 54%. Under a fixed budget, a heterogeneous cluster ($38k) improves Tokens/$ by 37% over a homogeneous baseline ($64k) without degrading latency. 
+
+# 1 Introduction 
+
+Multimodal large language model (MLLM) inference ex-hibits an architectural mismatch: vision encoding and language decoding have different hardware optimality regimes. Vision encoding is compute-bound, saturating FP16 tensor cores with negligible memory bandwidth de-mand. Language decoding is memory-bandwidth-bound, streaming model weights and KV caches from HBM with minimal arithmetic intensity. These two phases stress completely different GPU resources, yet all deployed MLLM serving systems execute both on homogeneous 
+
+datacenter hardware, paying a well-documented “HBM tax” [Zhang et al., 2025, Mo et al., 2025]: the compute-bound phase wastes expensive high-bandwidth memory, while the bandwidth-bound phase underutilizes tensor cores. In practice, providers must overpay for HBM even when the current workload is encoder-heavy, because the entire pipeline is locked to a single GPU tier. Existing disaggregation systems attempt to address in-ference efficiency by partitioning at pipeline stage bound-aries , i.e., separating prefill from decode (EPD [Singh et al., 2025], Cauchy [Zhang et al., 2025]). However, stage-level partition incurs KV cache transfer cost pro-portional to model depth: O(L · sctx ) bytes (hundreds of megabytes to gigabytes per request). This GB-scale transfer limits scalability across heterogeneous GPU tiers, because it demands NVLink or InfiniBand and confines all prior disaggregated serving to homogeneous datacenter en-vironments. Intra-node scheduling (SpaceServe [Li et al., 2025], UnifiedServe [Zhao et al., 2025]) improves utiliza-tion through kernel co-location but does not change the cross-device communication structure and therefore cannot unlock cross-tier deployment. The bottleneck is not dis-aggregation itself but where the graph is cut . No existing system exploits the modality boundary for heterogeneous serving. Why has stage-level partitioning gone unquestioned? We argue that it reflects a language-only assumption : in text-only LLMs, the KV cache is the dominant intermedi-ate state and stage boundaries are the only meaningful parti-tion points. Multimodal inference violates this assumption: the vision encoder produces a compact embedding of size 
+
+O(Nv · d) (MB-scale), independent of transformer depth 
+
+L. Yet no prior system has exploited this separation for cross-device serving. We formalize this observation as Theorem 1: under standard transformer KV caching (i.e., without activation recomputation or KV offloading), the modality boundary (between vision encoder and language decoder) minimizes cross-device transfer complexity among partition points that preserve standard stage-based execution semantics. 1
+
+> arXiv:2603.12707v1 [cs.LG] 13 Mar 2026
+
+The transfer ratio between stage-level and modality-level disaggregation scales as Θ( L), corresponding to 12 ×–
+
+196 × across current MLLMs. The result holds indepen-dent of hidden dimension, attention mechanism (MHA or GQA), vision token count, and model scale, and the advantage grows with model depth. In practice, this reduces cross-device transfer from GB-scale to MB-scale, making cross-tier heterogeneous serv-ing over commodity PCIe feasible. Consumer GPUs (RTX 4090, $3k, 330 TFLOPS) can handle vision encod-ing while datacenter GPUs (A100, $16k, 2 TB/s HBM) handle language decoding, a 3× FLOPs-per-dollar advan-tage that is inaccessible under stage-level disaggregation. A closed-form cost model further shows that heteroge-neous deployment is cost-optimal under phase-separable workloads (predicts 31.4% savings; we observe 40.6%). We build HeteroServe, a phase-aware runtime with embedding-only transfer, cross-type work stealing for idle-capacity recovery, and standard engine optimizations. We make the following contributions: • Transfer Optimality Analysis (§2–§4.2). We char-acterize the phase separation in MLLM inference (§2) and prove (Theorem 1) that, under standard KV caching, the modality boundary minimizes cross-device transfer under standard stage-based execution, reducing communication by O(L) compared to stage-level disaggregation, with empirical ratios of 12 ×–
+
+196 × across five architectures. We further derive a closed-form cost model (§4.3) showing that het-erogeneous deployment is cost-optimal under phase-separable workloads (predicts 31.4% savings; we ob-serve 40.6%). • System Validation: HeteroServe (§5). We build HeteroServe, a phase-aware runtime that validates the analysis on real hardware, with embedding-only trans-fer over PCIe, cross-type work stealing for utilization recovery, and CUDA-Graph-accelerated decoding. • Empirical Validation (§6). On LLaVA-1.5-7B (MHA) and Qwen2.5-VL (GQA, tensor-parallel) with vLLM v0.3.0 baseline: on identical 4 ×A100 hard-ware, engine optimizations raise throughput by up to 54% (§6.6); under a fixed budget, modality-level heterogeneous deployment ($38k) improves Tokens/$ by 37% over a homogeneous baseline ($64k) without degrading latency. Engine optimizations (CUDA Graph, packed prefill, lazy KV allocation) serve as implementation hygiene to avoid confounding the architectural evaluation; they are not claimed as contributions. 
+
+# 2 Multimodal Inference Phase Char-acterization 
+
+We begin by characterizing the computational phases of MLLM inference and their hardware implications. The end-to-end latency of a single multimodal request decomposes as Te2e = Tvision +Txfer +Tprefill +Tdecode . Each phase has a distinct resource bottleneck. Vision encoding 
+
+(Tvision ) is compute-bound : on an RTX 4090, batched en-coding achieves >85% FP16 TFLOPS utilization ( ∼280 
+
+of 330 TFLOPS) while consuming <5% of memory band-width. The compute cost is fixed per image and indepen-dent of language model depth L. Language decoding 
+
+(Tdecode ) is memory-bandwidth-bound : autoregressive gen-eration streams weights and KV caches from HBM with minimal arithmetic reuse, achieving >80% HBM utiliza-tion on A100 ( ∼1.6 of 2 TB/s) while using <10% of FP16 compute. Language prefill (Tprefill ) is compute-bound but operates on language model weights. These bottlenecks map to orthogonal hardware opti-mality regimes . Vision encoding maximizes performance on high-TFLOPS, low-cost GPUs: an RTX 4090 ($3k, 330 TFLOPS) matches an A100 ($16k, 312 TFLOPS) at 3.3× better FLOPs/$. Language decoding requires high-bandwidth GPUs: A100 provides 2 TB/s HBM with 80 GB; RTX 4090 has only 1 TB/s with 24 GB. Homoge-neous deployments cannot resolve this mismatch, motivat-ing a formal analysis of where to partition the pipeline. 
+
+# 3 Related Work 
+
+We organize prior work along two axes that jointly de-fine the design space of disaggregated multimodal serving: (1) partition granularity , i.e., where the inference graph is cut (stage boundary, modality boundary, or kernel co-location); and (2) deployment regime , i.e., whether the sys-tem supports cross-device, cross-tier (PCIe), or only intra-node (NVLink/IB) execution. As Table 1 summarizes, no existing system simultaneously achieves modality-level partitioning, cross-tier heterogeneous support, and formal transfer analysis. 
+
+LLM serving and memory optimization. Systems such as vLLM [Kwon et al., 2023, 2024] have advanced memory management and continuous batching for autoregressive decoding on homogeneous hardware. These optimizations are complementary to ours; HeteroServe builds on similar batching and KV-cache management techniques. However, these systems are designed for text-only models and ho-mogeneous execution pipelines: they do not exploit the resource heterogeneity intrinsic to multimodal inference, do not analyze partition point optimality, and do not con-sider cross-tier GPU deployment. We use vLLM v0.3.0 2as our primary baseline under identical hardware and par-allelism configurations; the throughput difference we ob-serve (§6.6) arises from architectural disaggregation and engine optimizations, not from baseline misconfiguration. 
+
+Stage-level disaggregation. A growing line of work dis-aggregates LLM inference at pipeline stage boundaries .EPD [Singh et al., 2025] separates multimodal inference into encoding, prefill, and decode stages across devices, introducing dynamic role switching to rebalance capacity. Cauchy [Zhang et al., 2025] optimizes cost-efficiency by selecting heterogeneous GPU “combos” for prefill-decode disaggregation. However, all stage-level approaches re-quire transferring full KV caches ( O(L · sctx ) bytes, GB-scale) between stages, demanding NVLink or InfiniBand interconnects. This transfer bottleneck confines these sys-tems to datacenter-grade links and precludes participation of consumer GPUs connected via PCIe. Consequently, their conclusions do not extend to cross-tier heterogeneous deployments. Our work shows that this limitation is not inherent to disaggregation itself, but rather a consequence of partitioning at the wrong boundary .
+
+Multimodal serving systems. ModServe [Qiu et al., 2025] separates vision and language into independent instance pools to mitigate head-of-line blocking, and CornServe [Ma et al., 2025] generalizes this via offline deployment planning across monolithic and disaggregated execution graphs. Both partition at or near the modality boundary, but assume homogeneous datacenter GPUs for all pools, forgoing the cost advantage of consumer hard-ware. Neither identifies modality boundary optimality nor analyzes transfer complexity scaling, the theoretical foun-dation that enables cross-tier deployment. SpaceServe [Li et al., 2025] improves intra-GPU utilization through spa-tial multiplexing of complementary compute-bound and memory-bound kernels, reducing TPOT when encoder and decoder workloads are co-located. UnifiedServe [Zhao et al., 2025] achieves similar goals via MPS-based re-source sharing. In particular, SpaceServe’s optimization target is single-machine SM/bandwidth utilization; it does not attempt, and structurally cannot, solve the KV cache cross-device migration problem, and therefore cannot un-lock consumer-GPU participation via PCIe. These systems optimize intra-node scheduling (axis 2: NVLink/IB only) under fixed hardware topologies but do not address cross-device partition optimality or cross-tier deployment, the orthogonal axis that our work targets. 
+
+Heterogeneous GPU serving. Hetis [Mo et al., 2025] manages heterogeneous clusters through head-level KV cache partitioning for text-only LLMs, but does not address the multimodal pipeline or exploit the compute-bound na-ture of vision encoding. Cauchy considers GPU hetero-geneity but inherits stage-level KV transfers ( O(L · sctx )), requiring high-bandwidth interconnects. Neither system exploits the observation that multimodal inference con-tains a compute-bound, bandwidth-agnostic phase (vision encoding) that can be offloaded to consumer GPUs with only PCIe connectivity. Our work identifies this asymme-try and provides the first formal cost model for cross-tier multimodal serving. Table 1: Comparison of disaggregated MLLM serving systems. Our work is the only system combining modality-level partitioning with cross-tier support and formal cost modeling.                                
+
+> System Partition Transfer Deploy Cost Transfer bound. size regime model analysis
+> EPD Stage GB (KV) NVLink ✗✗
+> ModServe Modality MB (emb) NVLink ✗✗
+> SpaceServe Co-loc. —Intra ✗✗
+> Cauchy Stage GB (KV) NVLink Heuristic ✗
+> Ours Modal. MB PCIe Formal ✓
+
+# 4 Modality-Level Transfer Optimal-ity 
+
+The phase characterization in Section 2 showed that vision encoding and language decoding have different hardware optimality regimes. The question is how this affects the choice of partition point for cross-device execution. A transformer decoder accumulates one key-value pair per layer, so the KV cache grows as O(L · sctx ). The vision encoder produces a single embedding of size O(Nv · d),independent of model depth L. Any system that partitions at stage boundaries must pay the O(L) communication cost; any system that partitions at the modality boundary avoids it entirely. Section 4.1 quantifies the transfer gap with concrete numbers, Section 4.2 formalizes the scaling behavior (The-orem 1), and Section 4.3 derives a cost model for heteroge-neous deployment. 
+
+4.1 Why Stage-Level Disaggregation Is Sub-optimal 
+
+The central question for any disaggregated serving sys-tem is where to partition the inference pipeline. We com-pare three candidate partition points with different transfer costs: 
+
+Stage-level disaggregation (e.g., Prefill-Decode or EPD) partitions at pipeline stage boundaries, the default choice in all prior work. After prefill completes, the accu-mulated KV cache must be migrated to the decode instance. 3Table 2: Transfer size per request under different disaggre-gation granularities for a 7B model with 576 vision tokens and 128 output tokens. 
+
+Partition Point Data Transferred Size 
+
+Stage-level (PD) KV cache ∼350 MB Stage-level (EPD) KV cache + tokens ∼350 MB 
+
+Modality-level (Ours) Visual embeddings ∼ 4.5 MB 
+
+In general, the KV cache for a single request with context length sctx requires: 
+
+DKV = 2 · L · nkv · dh · sctx · b (1) where nkv is the number of KV heads, dh is the head dimension, and b = 2 bytes for FP16. For a 7B model with MHA ( nkv =nh=32 , dh=128 , L=32 ) and sctx =704 (576 vision + 128 text): DKV = 2 × 32 × 32 × 128 × 704 ×
+
+2 ≈ 350 MB. For a typical prefill batch of 8 requests, this grows to ∼2.8 GB. This GB-scale transfer demands NVLink or InfiniBand bandwidth, effectively excluding consumer GPUs from participation. 
+
+Modality-level disaggregation partitions at the modal-ity boundary, between the vision encoder output and the language model input. The transferred data is the projected visual embedding: Emb. size = Nv ×d×2 B = 576 ×4096 ×2 = 4 .5 MB This represents a ∼78 × reduction per request compared to KV cache transfer, growing to ∼600 × for a batch of 8. At PCIe Gen4 x16 bandwidth ( ∼25 GB/s), a 4.5 MB transfer completes in ∼0.18 ms, negligible compared to the vision encoding time of ∼6.8 s (batch=128). Even for a batch of 128 images, the total transfer is ∼576 MB, completing in 
+
+∼23 ms. This ∼78 × gap reduces the interconnect requirement from NVLink to PCIe, opening a design space for cross-tier heterogeneous serving that stage-level methods cannot access. 
+
+4.2 Formal Analysis: Transfer Ratio Scaling Law 
+
+The preceding analysis uses concrete parameters from our 7B experimental setup. The transfer advantage of modality-level disaggregation holds across all current MLLM archi-tectures, and improves as models scale. 
+
+Theorem 1 (Transfer Optimality of the Modality Bound-ary) . For any transformer-based MLLM with L layers, nkv 
+
+KV heads of dimension dh, hidden dimension d = nh · dh,visual token count Nv , and text context stext , under stan-dard KV caching semantics (i.e., no activation recompu-tation, KV offloading, or speculative decoding that alters intermediate state sizes), the ratio of stage-level transfer (KV cache) to modality-level transfer (visual embedding) per request is: 
+
+R = DKV 
+
+Demb 
+
+= 2L · nkv · dh
+
+d · sctx 
+
+Nv
+
+(2) 
+
+where sctx = Nv + stext . Under MHA ( nkv = nh), this simplifies to: 
+
+RMHA = 2 L
+
+
+
+1 + stext 
+
+Nv
+
+
+
+(3) 
+
+Under GQA ( nkv < n h), the ratio is reduced by a fac-tor of nkv /n h but remains ≫ 1 for all practical architec-tures. Among partition points that preserve standard KV caching semantics, the modality boundary therefore mini-mizes cross-device transfer complexity asymptotically in 
+
+L.Proof. From Equation 1, stage-level disaggregation trans-fers: DKV = 2 L · nkv · dh · sctx · b. Modality-level disaggre-gation transfers the visual embedding: Demb = Nv · d · b.The byte width b cancels, giving R = (2 L · nkv · dh ·
+
+sctx )/(Nv · d). Under MHA, nkv = nh and d = nh · dh,so nkv · dh/d = 1 , yielding R = 2 L · sctx /N v .
+
+Remark. Theorem 1 assumes standard KV caching. Full activation recomputation would eliminate KV transfer but at substantial compute cost; standard KV caching is the dominant deployment configuration. For the MHA case (GQA preserves the same trends at reduced magnitude), the ratio is independent of hidden dimension d: both KV cache and embedding scale linearly with d, so the dimension cancels. A 7B model ( d=4096 )and a 70B model ( d=8192 ) yield the same MHA transfer ratio. The ratio also grows linearly with model depth L,since deeper models accumulate proportionally more KV state while the embedding remains a single projection, so the advantage widens with scale. Even in the worst case (stext = 0 , aggressive GQA with nkv /n h = 0 .125 ), the ratio is lower-bounded by 2L · nkv /n h ≥ 3 for L≥12 , so 
+
+R ≫ 1 for all current MLLMs. Table 3: Transfer ratio R across representative MLLM architectures ( stext =128 ). For fixed-resolution models, 
+
+Nv =576 ; for dynamic-resolution models (Qwen2.5-VL), 
+
+Nv =1024 .                                          
+
+> Model NvLnkv
+> nhDKV Demb RMHA RGQA
+> LLaVA-7B 576 32 32/32 352 M 4.5 M 78 ×78 ×
+> LLaVA-13B 576 40 40/40 550 M 5.6 M 98 ×98 ×
+> LLaVA-34B 576 60 8/56 150 M 7.3 M 147 ×21 ×
+> Qwen2.5-VL-7B 1024 28 4/28 83 M 7.0 M 64 ×12 ×
+> Qwen-VL-72B 576 80 8/64 215 M 9.0 M 196 ×24 ×
+
+Even under aggressive GQA ( nkv /n h = 0 .125 ), the transfer ratio remains R ≥ 21 ×, still an order of mag-nitude advantage for modality-level disaggregation. The 4embedding size is unaffected by GQA since it depends on 
+
+d, not on nkv .
+
+Feasibility condition for PCIe. Modality-level disag-gregation is practical over PCIe whenever the embedding transfer time is small relative to the vision encoding time: 
+
+Txfer 
+
+Tvision 
+
+= Nv · d · 2
+
+BW PCIe · Tvision 
+
+≪ 1 (4) For all models in Table 3, this ratio is < 0.003 (less than 0.3% overhead), confirming that PCIe is sufficient. 
+
+Handling dynamic visual token counts. Some modern MLLMs (e.g., Qwen2.5-VL) employ dynamic-resolution vision encoders that produce a variable number of vi-sual tokens per image depending on the input resolution. This does not change the analysis: even when Nv varies from a few hundred to over 2000 tokens, the embedding transfer remains MB-scale (the result holds as long as 
+
+Nv ≪ L · sctx , which is satisfied by all current vision tokenization schemes). For instance, with Nv =2048 and 
+
+d=3584 (Qwen2.5-VL-7B), the embedding is ∼14 MB, still ∼6× smaller than the corresponding KV cache for the same request. A system exploiting modality-level disag-gregation can accommodate variable-length embeddings through dynamic buffer allocation (§5.2). 
+
+Generality beyond the RTX 4090 / A100 pairing. The 
+
+O(L) transfer reduction is a model-side property, not a hardware-side one: it follows from the transformer ar-chitecture’s accumulation of per-layer KV state versus a single-layer embedding projection. 
+
+(a) Future GPU generations. The insight applies when-ever a compute-dense accelerator (any consumer or edge GPU) is paired with a bandwidth-rich accelerator (any datacenter GPU) over any interconnect whose bandwidth exceeds the MB-scale embedding rate. As future consumer GPUs increase compute density faster than interconnect bandwidth grows, the advantage of modality-level disag-gregation increases .
+
+(b) Beyond vision–language models. The same ar-gument applies to any MLLM whose encoder produces a compact intermediate representation: audio encoders (e.g., Whisper), video encoders, and multimodal models with multiple encoder branches. Whenever the encoder output is O(1) per layer while the decoder state is O(L),modality-level disaggregation yields the same asymptotic advantage. 
+
+(c) Scaling trend. As models deepen ( L increases for frontier MLLMs), the O(L) transfer ratio grows propor-tionally, making stage-level disaggregation increasingly expensive and modality-level disaggregation increasingly dominant. The gain therefore compounds as models deepen. 
+
+4.3 Economic Optimality of Heterogeneous Deployment 
+
+The O(L) transfer reduction makes cross-tier serving feasi-ble . The next question is when it is also cost-efficient . We derive a closed-form cost model that determines when het-erogeneous deployment provably dominates homogeneous deployment as a function of workload ratio ρ, cross-tier price ratio γ, and interconnect bandwidth, independently of implementation details. 
+
+4.3.1 End-to-End Latency Decomposition 
+
+Under modality-level disaggregation, the end-to-end la-tency of a single multimodal request decomposes as: 
+
+Ttotal = Tvision (C) + Txfer + Tprefill (D) + Tdecode (D) (5) where each component maps to a specific hardware re-source: • Tvision (C) = Cvision /(Bv · RC
+
+> FLOPS
+
+): vision encoding on a consumer GPU, where Cvision (FLOPs) is the per-image compute cost, Bv is the vision batch size, and RC 
+
+> FLOPS
+
+is the consumer GPU’s FP16 throughput. • Txfer = Demb /BW PCIe : embedding transfer over PCIe. For our setup, Txfer = 0 .18 ms (negligible). • Tprefill (D) = Cprefill (sctx )/R D
+
+> FLOPS
+
+: prefill is compute-bound, scaling linearly with context length. • Tdecode (D) = nout · Mdecode /(Bd · BW D
+
+> HBM
+
+): decode is memory-bandwidth-bound. Mdecode (bytes) is the model weight footprint streamed per token. We treat Cvision , Cprefill (·), and Mdecode as model-dependent constants measured via offline profiling. We group Tlang = Tprefill + Tdecode . Note that Tvision depends on 
+
+compute throughput (exploiting C’s strength) while Tlang 
+
+depends on memory bandwidth (exploiting D’s strength). 
+
+4.3.2 Cost Minimization 
+
+Consider a cluster serving at throughput target Θ (re-quests/second): 
+
+Θ = min 
+
+ nC
+
+Tvision 
+
+, nD
+
+Tlang 
+
+
+
+(6) At the balanced operating point, nC = nD · ρ where ρ =
+
+Tvision /T lang . The cost reduction ratio of heterogeneous over homogeneous deployment is: Cost hetero 
+
+Cost homo 
+
+= ργ + 1 
+
+ρ + 1 (7) 50.0 0.5 1.0 1.5 2.0 2.5 3.0                     
+
+> Vision-to-language time ratio ρ=Tvision /T lang
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> 80
+> Cost saving  ∆cost  (%)
+> Ours ( ρ=0.63, 31.4%)
+> (a) Cost saving vs. ρ
+> γ= 0 .10
+> γ= 0 .19 (4090/A100)
+> γ= 0 .30
+> γ= 0 .50
+> 20 40 60 80 100 120
+> Model depth L(transformer layers)
+> 10 0
+> 10 1
+> 10 2
+> Transfer ratio  R = DKV /D emb
+> 7B
+> 13B
+> 34B 72B
+> R= 1
+> (b) Transfer ratio vs. model depth
+> MHA ( nkv /n h= 1 )
+> GQA ( nkv /n h= 0 .125 )
+
+Figure 1: (a) Cost saving ∆cost (Eq. 8) as a function of the vision-to-language time ratio ρ for different price ratios γ.The RTX 4090/A100 operating point ( γ=0 .19 , ρ=0 .63 ) is marked. (b) Transfer ratio R (Eq. 2) across model depths, confirming that modality-level disaggregation becomes increasingly advantageous for larger models. where γ = Price C /Price D is the cross-tier price ratio. The cost saving is: 
+
+∆cost = ρ(1 − γ)
+
+ρ + 1 (8) Savings increase with both the vision-to-language ratio 
+
+ρ and the price gap (1 − γ).
+
+Instantiation. For our setup: ρ ≈ 0.63 , γ =3000 /16000 = 0 .1875 . Eq. 8 predicts ∆cost = 31 .4% .Our actual configuration achieves 40.6% savings; the ad-ditional saving arises because work stealing (Section 5.3) makes consumer GPUs productive beyond their primary vision role. 
+
+# 5 HeteroServe: System Design 
+
+We build HeteroServe to test whether the O(L) transfer re-duction predicted by Theorem 1 translates into a practical serving system. The goal is to show that modality-level disaggregation over commodity PCIe yields a deployable runtime with concrete engineering solutions. HeteroServe maps compute-bound vision encoding to consumer GPUs (RTX 4090) and bandwidth-bound language generation to datacenter GPUs (A100), addressing three deployment challenges: low-overhead embedding transfer (§5.2), load-imbalance mitigation via cross-type work stealing (§5.3), and runtime engine optimizations to ensure that the dis-aggregation architecture, not implementation overhead, determines performance (§5.4). 
+
+5.1 Architectural Realization 
+
+To instantiate modality-level disaggregation on real hard-ware, HeteroServe organizes GPUs into two pools matched to the resource profile of each phase (Figure 2): • Consumer Pool (C): Low-cost, high-compute GPUs (e.g., RTX 4090, 24 GB VRAM, PCIe) host the vision Consumer Pool (C)                   
+
+> RTX 4090 × 2 |24 GB |PCIe
+> GPU c1
+> Pre-loaded LLM
+> GPU c2
+> Pre-loaded LLM
+> Vision Queue
+> R1 R2 R3 R4
+> Vision Encoding
+> Datacenter Pool (D)
+> A100 × 2 |80 GB |NVLink
+> GPU d1
+> LLM + KV Cache
+> GPU d2
+> LLM + KV Cache
+> Language Queue
+> R1 R2 R3 R4
+> Language Generation
+> Multimodal Scheduler
+> (phase-aware)
+> Incoming
+> Requests
+> Transfer
+> Tokens
+> Visual Embeddings
+> ~4.5 MB/image (PCIe)
+> Cross-Type
+> Work Stealing
+
+Figure 2: HeteroServe architecture. Consumer GPUs (RTX 4090) handle vision encoding and transfer lightweight visual embeddings ( ∼4.5 MB) via PCIe to dat-acenter GPUs (A100), which perform language generation. When the consumer pool is idle, cross-type work stealing allows consumer GPUs to assist with language decoding using pre-loaded LLM weights. encoder, either fixed-resolution (CLIP ViT-L/14, 576 tokens) or dynamic-resolution (Qwen2.5-VL, variable tokens), and process image encoding in parallel. • Datacenter Pool (D): High-bandwidth GPUs (e.g., A100 80 GB, NVLink) host the language model with KV cache and run both prefill and decode, optionally un-der tensor parallelism (TP), supporting MHA and GQA backends. A request flows through three phases: (1) Vision En-coding on C, producing an embedding tensor [1 , N v , d ];(2) Feature Transfer via PCIe (MB-scale, ∼0.18 ms); and (3) Language Generation on D (prefill + decode). A cen-tral phase-aware Multimodal Scheduler coordinates the pools, maintains vision and language queues, and triggers work stealing when C is idle. 
+
+5.2 Embedding-Only Transfer Protocol 
+
+HeteroServe implements a streaming transfer protocol that overlaps vision encoding with feature delivery: 1. Batched Vision Encoding. The consumer GPU en-codes images in batches. As each batch completes, the resulting embeddings are immediately pushed to a CPU-side pinned memory buffer via asynchronous DMA ( cudaMemcpyAsync on a dedicated transfer stream). 2. Aligned Batch Handoff. The scheduler accumu-lates embeddings in a buffer until a target batch size 
+
+Balign (default: 32) is reached, then hands the entire 60 2 4 6 8 10 12 14 16 18 20                
+
+> Time (seconds)
+> Vision Encode
+> (Batch 1) Xf Work Stealing
+> 4.5 MB
+> Vision Encode
+> (Batch 2) Xf Work Stealing
+> 4.5 MB
+> Vision Encode
+> (Batch 3) Xf Work Stealing
+> 4.5 MB
+> Prefill Decode Prefill Decode Prefill Decode
+> <100 ms
+> Consumer
+> GPU ( c1)
+> Datacenter
+> GPU ( d1)
+> Vision Encode Embedding Transfer Work Stealing Prefill Decode
+
+Figure 3: Timeline of consumer GPU activity. After com-pleting vision encoding, the consumer GPU transfers em-beddings and then steals language generation tasks until new vision requests arrive. Pre-loaded LLM weights en-able sub-100 ms role switching. batch to the language queue. A timeout mechanism (500 ms) prevents tail latency for under-filled batches. For models with variable visual token counts (e.g., Qwen2.5-VL), the scheduler tracks per-request em-bedding lengths and pads or packs batches accord-ingly. 3. Device Placement. The embeddings are transferred from CPU pinned memory to the target datacenter GPU’s HBM just before prefill begins. 
+
+Comparison with EPD. EPD transfers KV cache layer-by-layer between prefill and decode instances, requiring careful pipelining and high-bandwidth links. Our proto-col transfers a single, compact embedding tensor once 
+
+per request, with no layer-wise coordination. This proto-col is model-agnostic : it handles fixed-length embeddings (LLaVA) and variable-length embeddings (Qwen2.5-VL) uniformly, since the transfer granularity is always a single embedding per request. 
+
+5.3 Utilization Recovery via Cross-Type Work Stealing 
+
+Heterogeneous disaggregation creates a load imbalance: the vision encoding phase ( ∼38% of end-to-end latency) is significantly shorter than language generation ( ∼60% ,Table 6), leaving consumer GPUs idle for the majority of each serving cycle. HeteroServe recovers this stranded capacity through cross-type work stealing , a utilization re-covery mechanism where idle consumer GPUs temporarily assist with language decoding. Vision requests arrive in bursts; after encoding, consumer GPUs sit idle 60–70% of each cycle. Consumer GPUs steal sequence-level lan-guage tasks (full decode sequences), minimizing schedul-ing overhead. KV cache capacity ( ∼4 GB after co-residing encoder + decoder weights) limits the stealing batch size to Bconsumer =16 .
+
+5.3.1 Design Principles (P1) Vision-first priority. Vision encoding is on the criti-cal path. Work stealing must never delay vision processing. We enforce this by checking the vision queue at the begin-ning of every scheduler iteration. 
+
+(P2) Pre-loaded weights. HeteroServe pre-loads the LLM decoder weights onto consumer GPUs during ini-tialization, trading ∼6 GB of VRAM for sub-100 ms role-switching latency. The vision encoder ( ∼400 MB) and LLM decoder ( ∼14 GB) co-reside on the 24 GB consumer GPU, with ∼4 GB remaining for KV cache during work-stealing episodes. 
+
+(P3) Bounded assistance. Consumer GPUs process language tasks with smaller batch sizes ( Bconsumer = 16 vs. 
+
+Bdatacenter = 64 ). Each work-stealing episode processes at most one half-batch with a 100 ms collection timeout. 
+
+5.3.2 Scheduling Algorithm 
+
+Each consumer GPU runs a priority-driven loop (Algo-rithm 1). The threshold τ (default: 16) prevents work steal-ing when the language queue is not significantly backed up. This simple priority scheme is effective because vision encoding is naturally bursty: images arrive in clusters, the consumer GPUs process them rapidly, and then have a sustained idle period. 
+
+Algorithm 1: Consumer GPU Scheduling Loop 
+
+while system is running do if vision queue is not empty then ▷ P1: Vision first 
+
+batch ← collect vision batch() encode and transfer(batch) 
+
+else if language queue.size() > τ then ▷ Work stealing 
+
+tasks ← collect language batch( Bconsumer /2, timeout=100ms) generate tokens(tasks, consumer decoder) 
+
+else 
+
+sleep(10ms) ▷ Idle wait 
+
+end if end while 
+
+5.3.3 Comparison with EPD’s Role Switching 
+
+EPD [Singh et al., 2025] also introduces dynamic role switching within a single GPU tier. HeteroServe’s work stealing differs in three ways: (1) it operates across hard-ware tiers; (2) the consumer GPU performs a different primary task (vision encoding) before stealing language work; and (3) the asymmetric memory constraint ( 24 GB vs. 80 GB) requires bounded-assistance policies that EPD does not need. 75.3.4 Parameter Sensitivity Aligned batch size Balign = 32 . This parameter mediates a tradeoff between prefill throughput and queueing latency. Too small ( ≪ 32 ): prefill efficiency drops below 60% on A100. Too large ( ≫ 32 ): TTFT inflates unacceptably. At 32, batch accumulation takes ∼1.7 s, prefill efficiency exceeds 85%, and the CUDA Graph captured at this size can be reused directly. 
+
+Work stealing threshold τ = 16 . This equals Bconsumer ,ensuring that when stealing is triggered, there are enough tasks to form a full consumer-side batch. Below this thresh-old, the datacenter GPUs can absorb the backlog within one iteration. 
+
+Collection timeout = 100 ms. This bounds the maxi-mum time a consumer GPU is locked in language mode, providing meaningful throughput contribution ( ∼7 tokens) while maintaining sub-200 ms worst-case vision response time. 
+
+5.3.5 Correctness Properties 
+
+The work stealing mechanism satisfies three correctness properties. 
+
+Property 1 (No Vision Starvation) . Vision tasks are never delayed by work stealing. The worst-case vision scheduling delay from work stealing is ∼212 ms, negligible compared to vision encoding time ( ∼6.8 s per batch of 128). 
+
+Property 2 (Non-Increasing Queueing Delay) . Work steal-ing does not increase the expected queueing delay of any language task: W steal queue (ℓ) ≤ W no-steal queue (ℓ). Work steal-ing adds an auxiliary server without removing datacen-ter capacity. Under non-preemptive FIFO scheduling, adding servers cannot increase waiting time [Harchol-Balter, 2013]. 
+
+Property 3 (Mode-Switching Stability) . The work stealing mechanism does not exhibit mode thrashing. The threshold 
+
+τ introduces hysteresis, and the half-batch limit bounds each episode to ∼100 ms, ensuring the transition rate is bounded by the vision arrival rate. We confirm empiri-cally that consumer GPUs settle into a regular alternating pattern. 
+
+5.4 Runtime Engine Optimizations 
+
+The preceding sections describe HeteroServe’s core archi-tectural contributions. In this section, we describe runtime engine optimizations that, while individually well-known, are necessary for realizing the full potential of our archi-tecture and explain the 54% throughput advantage over vLLM. 
+
+Multi-Size CUDA Graph Capture. We capture CUDA Graphs for multiple decode batch sizes (32 and 64) during initialization, eliminating per-iteration CPU-GPU synchro-nization. CUDA Graph replay reduces per-iteration decode latency by eliminating ∼28% overhead from kernel launch and stream synchronization calls. 
+
+Flash Attention Varlen for Packed Prefill. We use Flash Attention’s variable-length interface, packing all se-quences into a single contiguous tensor with cumulative sequence length metadata. This eliminates padding over-head (up to 63%) and reduces kernel launches from B to 1 per attention layer. 
+
+Lazy KV Cache Allocation. HeteroServe defers KV cache block allocation until a request enters the language prefill phase, enabling the vision queue to hold thousands of pending requests without consuming datacenter GPU memory. 
+
+Tensor Parallelism Support. For models whose mem-ory footprint exceeds a single datacenter GPU (or to in-crease decode bandwidth), HeteroServe supports tensor-parallel (TP) language decoding across the datacenter pool. We implement a custom all-reduce kernel based on all gather followed by local summation, which (unlike standard NCCL all reduce ) is compatible with CUDA Graph capture. This enables CUDA Graph acceler-ation under TP=2 and TP=4 configurations. The consumer pool remains unaffected by tensor parallelism: it performs independent vision encoding regardless of how the data-center pool is partitioned. 
+
+# 6 Experiments 
+
+Theorem 1 predicts that modality-level disaggregation re-duces cross-device transfer by O(L), and the cost model (Section 4.3) predicts ∼31% savings under practical hard-ware pricing. We test both predictions on two architec-turally diverse MLLMs using HeteroServe as the evalua-tion platform. 
+
+6.1 Setup 
+
+Hardware & Pricing. NVIDIA A100-80GB ( ≈$16k each) and RTX 4090 ( ≈$3k each) at current street prices. We evaluate multiple cluster configurations ranging from 2 to 4 GPUs. 
+
+Models. We select two MLLMs that differ in every major architectural dimension to verify that HeteroServe generalizes across the design space: • LLaVA-1.5-7B [Liu et al., 2024]: uses a fixed-resolution CLIP ViT-L/14 vision encoder that always produces 576 visual tokens per image, paired with a Vicuna-7B lan-guage backbone using multi-head attention (MHA, 32 layers, 32 KV heads). This model can run on a single datacenter GPU. 8Table 4: LLaVA-1.5-7B results. CER = Tokens/s per $1,000 investment. 
+
+System Config Cost tok/s CER vs. vLLM 
+
+vLLM (4 ×A100) $64k 3,886 60.7 Baseline Ours (Homo) $64k 5,986 93.5 +54% Ours (Hetero) $38k 3,156 83.1 +37% CER 
+
+• Qwen2.5-VL : uses a dynamic-resolution vision encoder that produces a variable number of visual tokens depend-ing on the input image (typically 256–1500+ tokens), paired with a GQA-based language backbone (28 layers, 4 KV heads per group). This model benefits from tensor-parallel (TP=2, TP=4) language decoding to achieve higher throughput. Together, these models exercise HeteroServe’s support for fixed vs. dynamic visual token counts, MHA vs. GQA attention, and single-GPU vs. tensor-parallel language backends, all within the same unified framework. 
+
+Workload. COCO 2017 validation images with the prompt “Describe this image in detail” (max output 128 tokens). We measure output token throughput (tok/s) and define Cost-Efficiency Ratio (CER) as tok/s per $1,000 hardware investment. 
+
+Baselines. vLLM v0.3.0 [Kwon et al., 2023] under homogeneous A100 configurations with matching tensor parallelism. We configure vLLM with identical batch sizes, tensor parallelism settings, and hardware resources to en-sure a fair comparison. vLLM represents the strongest available open-source MLLM serving baseline at the time of evaluation. 
+
+6.2 Cost-Efficiency with Fixed-Resolution Vision (LLaVA-1.5-7B) 
+
+We first evaluate HeteroServe on LLaVA-1.5-7B, a model with fixed-resolution vision encoding and single-GPU lan-guage decoding. Table 4 summarizes the results. 
+
+Cost-Efficiency. The heterogeneous configuration (2 ×RTX 4090 + 2 ×A100) reduces hardware cost by 
+
+40.6% ($64k → $38k) while delivering 81% of baseline throughput, resulting in a 37% improvement in CER. 
+
+Throughput. Our homogeneous implementation out-performs vLLM by 54% (5,986 vs. 3,886 tok/s). We dis-entangle the sources of this gain in Section 6.6. 
+
+6.3 Generalization to Dynamic-Resolution Vision (Qwen2.5-VL) 
+
+We next evaluate HeteroServe on Qwen2.5-VL, which exercises a complementary set of architectural features: Table 5: Qwen2.5-VL results with tensor parallelism. All language GPUs are A100-80GB.                             
+
+> Configuration GPUs Cost tok/s CER
+> vLLM Baselines
+> TP=2 (2 ×A100) 2$32k 2,768 0.78 TP=4 (4 ×A100) 4$64k 3,619 0.51
+> HeteroServe
+> Cfg1: 4090+A100 ×23$35k 3,252 0.83 Cfg2: 4090 ×2+A100 ×24$38k 3,269 0.78 Cfg3: A100 ×2 (shared) 2$32k 3,351 0.94
+> Cfg4: A100 ×4 (shared) 4$64k 4,633 0.64
+
+dynamic-resolution vision encoding (variable visual to-ken count per image), GQA-based language attention, and tensor-parallel decoding. The same HeteroServe frame-work handles these differences without architectural mod-ification; only the model configuration changes. Table 5 presents the results. 
+
+Heterogeneous configurations excel in cost-efficiency. 
+
+Cfg1 (1 ×4090 + 2 ×A100, $35k) achieves CER = 0.83, out-performing the 4-GPU vLLM TP=4 baseline (CER = 0.51) by 63% at roughly half the cost. 
+
+Engine optimizations benefit homogeneous deploy-ments. Cfg3 on 2 ×A100 achieves 3,351 tok/s, 21% higher than vLLM TP=2 (2,768 tok/s) on identical hard-ware. Cfg4 on 4 ×A100 delivers 4,633 tok/s vs. vLLM’s 3,619 tok/s ( +28% ). 
+
+Diminishing returns from scaling. Cfg4 achieves the highest absolute throughput (4,633 tok/s) but at $64k, its CER (0.64) is lower than the 2-GPU Cfg3 (0.94), demon-strating diminishing returns from GPU count scaling with-out heterogeneous optimization. 
+
+6.4 Latency Breakdown 
+
+Table 6: Latency breakdown for LLaVA-1.5-7B heteroge-neous config (batch=128). 
+
+Phase Time (s) %
+
+Vision Encoding (RTX 4090) 6.82 38.2% 
+
+Feature Transfer (PCIe) 0.45 2.5% 
+
+Language Prefill (A100) 1.24 6.9% Language Decode (A100) 9.35 52.4% 
+
+Table 6 empirically confirms the feasibility condition from Section 4.2: the PCIe transfer overhead ( 2.5% ) is neg-ligible ( ≪ 1), validating that modality-level disaggregation does not introduce a meaningful interconnect bottleneck even over commodity PCIe. 96.5 Work Stealing Analysis 
+
+Enabling cross-type work stealing yields a 1.13 × speedup (3,156 vs. 2,793 tok/s), validating that idle consumer GPUs can meaningfully contribute to memory-bound language generation. The consumer GPU’s contribution is bounded by its KV cache capacity ( ∼4 GB), limiting the work-stealing batch size to 16 but still providing a consistent throughput boost. 
+
+6.6 Disentangling Architectural vs. Engine Gains 
+
+HeteroServe’s throughput advantage over vLLM (54% on LLaVA-1.5-7B, 21–28% on Qwen2.5-VL) could arise from the disaggregation architecture , from engine opti-mizations , or both. We decompose the gains along these two dimensions. 
+
+(a) Throughput ceiling (engine optimizations, identi-cal hardware). Table 7 isolates the engine-level contribu-tions on identical 4 ×A100 hardware. CUDA Graph cap-ture eliminates ∼28% kernel launch overhead (the largest single factor), Flash Attention Varlen removes up to 63% padding waste in packed prefill batches, and aligned batch scheduling increases effective language prefill batch sizes from 4–8 to 32–48. Together these raise throughput by up to 54% over vLLM v0.3.0, a prerequisite for exposing the architectural advantage, since without them runtime overhead masks the benefit of disaggregation. Table 7: Engine optimization ablation on identical 4×A100 (LLaVA-1.5-7B). Each row cumulatively adds one optimization.            
+
+> Configuration tok/s ∆vs. vLLM
+> vLLM v0.3.0 baseline 3,886 —+ CUDA Graph capture 4,980 +28% + Flash Attn Varlen packed 5,500 +42% + Aligned batch scheduling 5,986 +54%
+
+(b) Cost floor (architectural disaggregation, fixed budget). Table 8 isolates the cost-efficiency gain from modality-level heterogeneous deployment. The hetero-geneous configuration achieves 83% of homogeneous throughput at 59% of the cost, yielding 37% higher To-kens/$. Work stealing recovers additional idle consumer-GPU capacity. 
+
+Summary. Engine improvements raise the throughput ceiling; modality-level disaggregation reduces the cost floor. Both contribute to cost-efficiency, but only the latter makes cross-tier heterogeneous deployment possible. Table 8: Architectural disaggregation ablation under fixed budget (LLaVA-1.5-7B). CER = cost-efficiency ratio (To-kens/$).              
+
+> Configuration tok/s Cost ∆CER
+> Homogeneous 4 ×A100 5,986 $64k —Hetero. 2 ×4090+2 ×A100 3,156 $38k +37% + Work stealing 3,156 $38k +37%
+
+# 7 Conclusion 
+
+We showed that, under standard transformer KV caching, the modality boundary minimizes cross-device transfer in multimodal inference under standard stage-based execu-tion, reducing communication from O(L·sctx ) to O(Nv ·d),a factor of O(L) that is independent of hidden dimension, attention mechanism, or vision token count, and that grows with model depth. Because cross-device transfer drops to MB-scale, cross-tier heterogeneous serving over commodity PCIe becomes practical. We validated this with HeteroServe on LLaVA-1.5-7B (fixed resolution, MHA) and Qwen2.5-VL (dy-namic resolution, GQA, tensor parallel): a $38k heteroge-neous cluster improves cost-efficiency by 37% over a $64k homogeneous baseline, with up to 54% higher throughput than vLLM on the same hardware. As MLLMs scale to deeper architectures, the O(L) transfer advantage grows proportionally, suggesting that modality-level disaggrega-tion will become increasingly important for cost-efficient multimodal inference. 
+
+# References 
+
+Mor Harchol-Balter. Performance Modeling and Design of Computer Systems: Queueing Theory in Action . Cam-bridge University Press, 2013. Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with PagedAttention. In Proceedings of the 29th Symposium on Operating Systems Principles , pages 611–626, 2023. Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E Gonzalez, Hao Zhang, and Ion Stoica. vLLM: Easy, fast, and cheap LLM serving with PagedAttention. arXiv preprint arXiv:2309.06180 , 2024. Zhicheng Li, Shuoming Zhang, Jiacheng Zhao, Siqi Li, Xiyu Shi, Yangyu Zhang, Shuaijiang Li, Donglin Yu, 10 Zheming Yang, Yuan Wen, and Huimin Cui. Space-Serve: Efficient kernel-level multiplexing for large lan-guage model inference. In Proceedings of the 39th Conference on Neural Information Processing Systems (NeurIPS) , 2025. Haotian Liu, Chunyuan Li, Yuheng Li, and Young Jae Lee. Improved baselines with visual instruction tuning. arXiv preprint arXiv:2310.03744 , 2024. Jeff J. Ma et al. CornServe: Efficiently serving any-to-any multimodal models. arXiv preprint arXiv:2512.14098 ,2025. Zizhao Mo, Jianxiong Liao, Huanle Xu, Zhi Zhou, and ChengZhong Xu. Hetis: Serving LLMs in heteroge-neous GPU clusters with fine-grained and dynamic par-allelism. In Proceedings of the International Conference for High Performance Computing, Networking, Stor-age and Analysis (SC) , pages 1710–1724, 2025. doi: 10.1145/3712285.3759784. Haoran Qiu et al. ModServe: Modality- and stage-aware resource disaggregation for scalable multimodal model serving. arXiv preprint arXiv:2502.00937 , 2025. Gursimran Singh, Xinglu Wang, Yifan Hu, Timothy Yu, Linzi Xing, Wei Jiang, Zhefeng Wang, Xiaolong Bai, Yi Li, Ying Xiong, Yong Zhang, and Zhenan Fan. Effi-ciently serving large multimodal models using encode-prefill-decode (EPD) disaggregation. arXiv preprint arXiv:2501.05460 , 2025. Yihui Zhang, Han Shen, Renyu Yang, Di Tian, Yuxi Luo, Menghao Zhang, Li Li, Chunming Hu, Tianyu Wo, Chengru Song, and Jin Ouyang. Cauchy: A cost-efficient LLM serving system through adaptive hetero-geneous deployment. In Proceedings of the 2025 ACM Symposium on Cloud Computing (SoCC) , pages 881– 893, 2025. doi: 10.1145/3772052.3772264. Lingxiao Zhao et al. Enabling disaggregated multi-stage MLLM inference via GPU-internal scheduling and re-source sharing. arXiv preprint arXiv:2512.17574 , 2025. 11
