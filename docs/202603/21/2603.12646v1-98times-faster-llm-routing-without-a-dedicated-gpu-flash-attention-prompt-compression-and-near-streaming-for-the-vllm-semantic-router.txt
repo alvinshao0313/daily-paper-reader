@@ -1,0 +1,473 @@
+Title: 98$\times$ Faster LLM Routing Without a Dedicated GPU: Flash Attention, Prompt Compression, and Near-Streaming for the vLLM Semantic Router
+
+URL Source: https://arxiv.org/pdf/2603.12646v1
+
+Published Time: Mon, 16 Mar 2026 00:29:41 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# 98 × Faster LLM Routing Without a Dedicated GPU: Flash Attention, Prompt Compression, and Near-Streaming for the vLLM Semantic Router 
+
+Xunzhuo Liu 1, Bowei He 2,3,†, Xue Liu 2,3, Andy Luo 4, Haichen Zhang 4, Huamin Chen 51 vLLM Semantic Router Project, 2 MBZUAI, 3 McGill University, 4 AMD, 5 Red Hat 
+
+† Corresponding author: Bowei.He@mbzuai.ac.ae 
+
+Abstract —System-level routers that intercept LLM requests for safety classification, domain routing, and PII detection must be both fast and operationally lightweight: they should add minimal latency to every request, yet not require a dedicated GPU—an expensive resource better used for LLM inference itself. When the router co-locates on the same GPU as vLLM serving instances, standard attention’s O(n2) memory makes long-context classification (8K–32K tokens) impossible: at 8K tokens, three concurrent classifiers need ∼4.5 GB for attention masks alone, far exceeding the memory left by vLLM. We present three staged optimizations for the vLLM Semantic Router, benchmarked on AMD Instinct MI300X, that solve both the latency and the memory problem. Stage 1 : a custom CK Flash Attention operator for ONNX Runtime on ROCm reduces attention memory from O(n2) to O(n) and end-to-end (E2E) latency from 4,918 ms to 127 ms (38.7 ×), enabling 8K–32K tokens where SDPA OOMs. Stage 2 : classical NLP prompt compression (TextRank, position weighting, TF-IDF, and novelty scoring) reduces all inputs to ∼512 tokens without neural inference, capping both latency and GPU memory at a constant regardless of original prompt length (E2E 127 →62 ms, 2.0 ×). Stage 3 : near-streaming body processing with adaptive chunking and zero-copy JSON eliminates serialization overhead (E2E 62 →50 ms, 1.2 ×). Cumulatively: 98 × improvement (4,918 ms to 50 ms), 16K-token routing in 108 ms, and a total router GPU footprint under 800 MB—small enough to share a GPU with LLM serving and removing the need for a dedicated accelerator. Stage 1 targets AMD ROCm (NVIDIA GPUs already have FlashAttention via cuDNN); Stages 2 and 3 are hardware-agnostic. 1
+
+I. I NTRODUCTION 
+
+Large Language Model (LLM) inference serving systems such as vLLM [1] increasingly rely on system-level routing layers to enforce safety policies, classify intent, detect person-ally identifiable information (PII), and select optimal backend models before requests reach GPU inference endpoints. The vLLM Semantic Router [2] implements this as an Envoy [3] external processing (ext proc) filter: a gRPC service that intercepts HTTP requests in the proxy data plane, evaluates multiple classification signals in parallel, and mutates headers to route requests to appropriate endpoints. This architecture imposes a tight latency budget. Every millisecond spent in the routing layer adds directly to the user-perceived time-to-first-token (TTFT). For short prompts ( ≤512 
+
+> 1
+
+Model, benchmark, and code are provided in: https://github.com/ vllm-project/semantic-router and https://huggingface.co/llm-semantic-router. 
+
+tokens), GPU-based classification with ModernBERT [4] com-pletes in 9–14 ms per classifier (Table IV). However, real-world prompts are growing: retrieval-augmented generation (RAG) pipelines, code review, and document summarization routinely produce 8K–32K token contexts. At these lengths, three bottlenecks emerge: 1) Quadratic attention complexity. Standard scaled dot-product attention (SDPA) materializes an O(n2) atten-tion mask. At 8K tokens a single classifier session allocates ∼1.5 GB for this mask; at 16K the mask grows to ∼6 GB; at 32K, ∼24 GB. Because the router co-locates on the same GPU as vLLM inference instances— which consume the majority of HBM for KV cache and model weights—only ∼718 MB remains per classifier session. With three concurrent classifiers multiplying the demand, SDPA OOMs at 8K+ tokens. Higher batch concurrency (multiple simultaneous requests) further multiplies memory pressure, making the problem worse under production load. 2) CPU inference scaling. CPU-based ONNX and Candle backends avoid GPU memory pressure but show super-linear latency growth: 8K tokens require 4.9 s (ONNX) or 1.8 s (Candle, truncated to 512) for a single request through the full pipeline—far exceeding any acceptable routing budget. 3) Proxy serialization overhead. Envoy’s BUFFERED 
+
+body mode requires the entire HTTP body to be ac-cumulated, then serialized as a single protobuf mes-sage. The ext proc service must deserialize it, per-form json.Unmarshal on the full OpenAI-format payload, and json.Marshal the mutated body— operations that scale linearly with payload size. We address each bottleneck with a targeted optimization and show that the three stages compose multiplicatively at 8K tokens: GPU+FA alone delivers 38.7 × (4,918 →127 ms), adding prompt compression yields 79 × (127 →62 ms), and adding near-streaming reaches 98 × (62 →50 ms). At 16K tokens the combined system achieves 108 ms end-to-end—a regime where CPU backends cannot operate. While Stage 1 targets AMD ROCm (NVIDIA GPUs already have FlashAt-tention via cuDNN and libraries such as Candle), Stages 2 
+
+> arXiv:2603.12646v1 [cs.CL] 13 Mar 2026
+
+and 3 are hardware-agnostic and benefit any GPU or CPU backend. Our contributions are: 1) CK Flash Attention for ONNX Runtime on ROCm. Acustom operator, ONNX graph rewriter, and HIP kernel that bring FlashAttention to ONNX Runtime on AMD GPUs for the first time, reducing classifier memory from O(n2) to O(n) allowing 8K–32K token sequences where SDPA OOMs (§IV-A). 2) Neural-inference-free prompt compression. A classi-cal NLP pipeline combining TextRank, U-shaped posi-tion weighting, TF-IDF, and novelty scoring that com-presses prompts to ∼512 tokens before classification with no model call and no accuracy loss, applicable to any backend (§IV-B). 3) Near-streaming body processing. An adaptive chunked handler for Envoy ext proc that detects the routing mode from the first chunk and selects between zero-copy passthrough and incremental accumulation, avoid-ing full-body JSON serialization for the majority of requests (§IV-C). 4) GPU co-location with LLM inference. The combined memory and latency reductions let the router share a GPU with vLLM serving instances, removing the need for a dedicated accelerator and improving GPU density in production clusters (§VI). II. B ACKGROUND AND RELATED WORK 
+
+A. Envoy External Processing 
+
+Envoy’s ext proc filter [3] enables out-of-process request interception via bidirectional gRPC streaming. The router receives ProcessingRequest messages for headers, body, and trailers, and responds with mutations (header modifica-tions, body rewrites, or immediate responses). In BUFFERED 
+
+mode, the entire request body is delivered in a single message; in STREAMED mode, the body arrives as a sequence of fixed-size chunks with an end-of-stream flag on the final chunk. 
+
+B. Attention Mechanisms and Flash Attention 
+
+Standard self-attention computes softmax( QK T/√dk) V ,requiring O(n2) memory for the attention matrix. FlashAtten-tion [5] restructures this via tiling and kernel fusion to achieve 
+
+O(n) memory with no approximation error. FlashAttention-2 [6] further improves parallelism. AMD’s Composable Kernel (CK) library [7] provides a ROCm-native implementation us-ing tiled fused multi-head attention (FMHA) kernels optimized for MI300X. 
+
+C. Prompt Compression 
+
+Liu et al. [8] demonstrated that LLMs exhibit a U-shaped attention pattern: information at the beginning and end of the context receives disproportionate attention, while the middle is “lost.” This observation informs position-aware prompt compression strategies. Recent prompt compression methods fall into three cate-gories. LLM-based methods such as LLMLingua [9] use a small causal language model (e.g., LLaMa-7B) to compute     
+
+> Client Envoy
+> Sem. Router
+> MI300X GPU
+> vLLM Inference
+> KV cache + weights
+> ONNX Classifiers
+> 3×mmBERT (0.8 GB)
+> HTTP
+> gRPC
+> HTTP
+> ONNX
+> Fig. 1. Co-located deployment: the router’s ONNX classifiers share the MI300X GPU with vLLM inference, consuming only ∼0.8 GB vs. vLLM’s
+> ∼190 GB—no dedicated accelerator needed.
+
+per-token perplexity and prune low-entropy tokens, reaching up to 20 × compression with minimal task performance loss. LLMLingua-2 [10] improves on this by framing compression as token classification using a bidirectional encoder (XLM-RoBERTa) trained on a distilled compression dataset, running 3–6 × faster than LLMLingua. Self-information methods like Selective Context [11] use a base LM to score lexical units by self-information, retaining only high-information segments. 
+
+Learned abstractive methods such as RECOMP [12] train compressors end-to-end for RAG settings, generating sum-maries at 6% compression rate. All of these approaches require LLM or neural network in-ference at compression time—precisely the overhead we need to avoid in a latency-sensitive routing layer. TextRank [13], a graph-based unsupervised ranking algorithm inspired by PageRank, provides an extractive method with no neural infer-ence. Combined with TF-IDF weighting [14], position-aware scoring, and centroid-based novelty detection adapted from Radev et al. [15] and the diversity principle of MMR [16], these classical NLP techniques can compress prompts without any model call. Table I compares the approaches. 
+
+D. ModernBERT 
+
+ModernBERT [4] is a bidirectional encoder trained on 2 tril-lion tokens with native 8K context length, rotary position em-beddings (RoPE), and alternating local/global attention layers. ModernBERT natively supports FlashAttention: its alternating local (128-token sliding window) and global attention pattern maps directly to FA’s tiled kernel interface. We use a fine-tuned variant (mmBERT-32K) with YaRN RoPE scaling [17] extended to 32K tokens, deployed as three concurrent ONNX sessions for domain classification, jailbreak detection, and PII detection. III. S YSTEM ARCHITECTURE 
+
+The vLLM Semantic Router operates as an Envoy ext proc filter in the data plane of a Kubernetes-based LLM serving infrastructure. The router’s classifier sessions share the same GPU as one or more vLLM inference instances rather than requiring a dedicated GPU. Dedicating an entire MI300X (192 GB HBM3) solely to lightweight classification would be wasteful. However, it means the router must operate within whatever GPU memory the vLLM instances leave available— typically a small fraction of total HBM. Figure 1 illustrates the request flow. TABLE I COMPARISON OF PROMPT COMPRESSION APPROACHES . C OMPRESSION LATENCY IS FOR A 16K-TOKEN INPUT . O UR METHOD IS THE ONLY ONE REQUIRING ZERO NEURAL INFERENCE , KEEPING COMPRESSION OVERHEAD TO ∼19 MS AT 16K TOKENS VS . SECONDS FOR NEURAL METHODS .†                         
+
+> Method Requires Neural Inf. Compression Granularity Attention Preserved? Compression Latency
+> LLMLingua [9] LLaMa-7B Token Yes ∗∼2–5 s LLMLingua-2 [10] XLM-R (560M) Token Yes ∗∼0.3–1 s Selective Context [11] GPT-2/LLaMa Sentence/phrase Partial ∼1–3 s RECOMP [12] Trained encoder Abstractive No (rewritten) ∼0.5–2 s
+> Ours None Sentence Yes (U-shaped + novelty) ∼19 ms
+> ∗Attention preservation via perplexity scoring, not explicit position weighting. †Latencies for other methods are estimates based on model sizes and reported compression rates; our 19 ms is measured directly on the compression pipeline at 16K tokens (Table VII).
+
+The router processes each request through a pipeline of stages: (1) header inspection and model detection, (2) body parsing and content extraction, (3) prompt compression (op-tional), (4) parallel signal evaluation (jailbreak, PII, domain, modality), (5) decision engine evaluation, and (6) model routing and header mutation. IV. S YSTEM DESIGN 
+
+The vLLM Semantic Router addresses each bottleneck from §I with a dedicated optimization layer. This section describes the design of all three stages; quantitative evaluation follows in §V. 
+
+A. CK Flash Attention for ONNX Runtime on ROCm 1) ONNX Runtime with ROCm Execution Provider: We compile the mmBERT-32K classifiers to ONNX format and execute them through ONNX Runtime [18] with the ROCm execution provider on AMD Instinct MI300X GPUs (192GB HBM3, gfx942 architecture). Three classifier sessions (do-main, jailbreak, PII) run concurrently, sharing the GPU mem-ory pool. 
+
+2) Why Flash Attention Is Unavailable in ONNX Runtime for ROCm: ONNX Runtime includes built-in FlashAttention support only for NVIDIA CUDA execution providers, specif-ically targeting SM 80–89 architectures via operators such as 
+
+com.microsoft.MultiHeadAttention and Group-QueryAttention . These kernels call cuDNN or the Dao-AILab flash-attention library [5], neither of which runs on AMD GPUs. The ROCm execution provider in ORT falls back to standard SDPA, which materializes the full [1 , 1, S, S ] atten-tion mask in HBM. At 8K tokens, a single session requests a 1.5 GB buffer for this mask. Because the router shares the GPU with vLLM inference instances (which consume the majority of HBM for KV cache and model weights), only ∼718 MB remains available per classifier session, and allocation fails. Although AMD provides Flash Attention through the Com-posable Kernel (CK) library [7] for PyTorch (merged as a CK backend in late 2024), no equivalent integration exists for ONNX Runtime. The ORT custom operator API is the only extensibility path, and it requires solving three additional problems: (1) defining the ONNX graph transformation to replace SDPA subgraphs, (2) mapping ModernBERT’s alter-nating local/global attention pattern to CK’s sliding-window parameters, and (3) converting the O(n2) 2-D attention mask to an O(n) 1-D padding bias compatible with CK’s kernel interface. 
+
+3) Custom CK Flash Attention Operator: We implement a custom ORT operator registered under the com.ck domain that bridges this gap. The system has three components: 
+
+a) ONNX Graph Rewrite.: A Python script (rewrite_graph.py ) performs pattern-matching on the exported ONNX graph to locate SDPA subgraphs. The pattern detected is: 
+
+Q*scale → MatMul(Q,K T) → Add(mask) 
+
+→ Softmax → MatMul(attn,V) 
+
+Each matched subgraph is replaced by a single 
+
+CKFlashAttention node with inputs [Q, K, V, pad_bias] and attributes scale , window_size_left ,and window_size_right . The 2-D attention mask 
+
+[B, H, S q , S k] (from Where /Expand nodes) is replaced by a 1-D padding bias [B, 1, 1, S ] derived from the input 
+
+attention_mask :
+
+pad_bias = −65504 · (1 − attention_mask ) (1) cast to FP16. A dead-code elimination pass then removes the now-unused 2-D mask construction subgraph, recovering the 
+
+O(n2) → O(n) memory savings. 
+
+b) ModernBERT Attention Mapping.: ModernBERT uses alternating local and global attention layers: local layers apply a sliding window of 128 tokens, while global layers (every 3rd layer) attend to the full sequence. The rewrite script detects local vs. global layers by mask node names (e.g., Where_1 vs. Where_2 ) and assigns per-layer window parameters:  
+
+> •
+
+Local layers: window_left=63, window_right=64 (128-token window)  
+
+> •
+
+Global layers: window_left= −1, window_right= −1 (full attention) 
+
+c) HIP Kernel and ORT Registration.: The C++/HIP implementation (ort_custom_op.cpp 
+
++ ck_fmha_dispatch.hip ) registers 
+
+CKFlashAttention as an ORT custom operator bound to the ROCMExecutionProvider . At compute time, the kernel reads Q, K, V tensors and the optional padding bias, obtains the HIP stream from ORT’s kernel context, and dispatches to CK-tile’s FmhaFwdFp16 kernel with 
+
+GenericAttentionMask for sliding-window support. Runtime head-dimension dispatch covers 32, 64, and 128. The compiled shared library (libort_ck_flash_attn.so ,192 KB, targeting gfx942 ) is loaded at session creation via 
+
+ORT_CK_FLASH_ATTN_LIB .
+
+d) Model Preparation Pipeline.: The end-to-end flow is: 1) Export mmBERT-32K from PyTorch to ONNX (model_sdpa_fp16.onnx ). 2) Run rewrite_graph.py with --hdim 64 --local-attention 128 to produce the FA model. 3) At runtime, the Rust ONNX binding checks for 
+
+ORT_CK_FLASH_ATTN_LIB and loads the FA variant. This pipeline is fully automated in the CI/CD Dockerfile, and prebuilt FA models are published to HuggingFace for deployment. 
+
+B. Prompt Compression for Classification 
+
+Flash Attention solves the OOM problem by reducing attention memory from O(n2) to O(n), enabling 8K–32K token classification on a shared GPU. However, two scal-ing challenges remain. First, FA latency still grows with sequence length: 259 ms per classifier at 16K tokens, 756 ms at 32K (Table V). Under concurrent load, FA memory also accumulates—at C=20 with 32K tokens, the combined work-ing set becomes substantial even at O(n) per request. Sec-ond, GPU contention from three concurrent classifier sessions further increases wall-clock time. We observe that classifica-tion signals (jailbreak intent, PII presence, domain category) are typically concentrated in specific regions of the prompt, not uniformly distributed. We therefore compress the prompt 
+
+before classification: by reducing all inputs to ∼512 tokens regardless of original length, compression simultaneously caps FA latency at ∼19 ms, caps per-request GPU memory at a constant small footprint, and decouples both metrics from the original prompt length. 
+
+1) Algorithm: Our compression pipeline scores each sen-tence with four signals, then selects the top-ranked sentences to fill the token budget. Following MEAD [15], which pio-neered the weighted-combination approach to extractive sum-marization (centroid + position + first-sentence overlap), we combine four complementary signals in a linear composite. All pairwise similarities use the cosine measure on term-frequency vectors [19]. 
+
+a) Sentence Segmentation.: The input text is split into sentences using a rule-based multilingual segmenter support-ing Latin scripts, CJK characters, Arabic, and Devanagari. For GC efficiency with large prompts, sentences are capped at 500 before ranking. 
+
+b) Signal 1: TextRank (Centrality).: Following Mihalcea and Tarau [13], we construct a cosine-similarity graph over sentence TF vectors and compute PageRank scores via power iteration. Sentences similar to many other important sentences score high. We use a flat adjacency matrix with sync.Pool 
+
+recycling to avoid GC pressure on large inputs. 
+
+c) Signal 2: Position Weighting.: Liu et al. [8] demon-strated that LLM attention follows a U-shaped curve over input position. We parametrize this empirical finding as: 
+
+wpos (i) = 1 − d · sin 
+
+ π i n − 1
+
+
+
+(2) where i is the 0-indexed sentence position, n is the total sentence count, and d ∈ [0 , 1] controls the curve depth (default 
+
+d=0 .5). The sine function is the natural single-parameter smooth approximation of the reported U-shape: at d=0 .5, edge sentences receive weight 1.0 and the middle sentence 0.5. 
+
+d) Signal 3: TF-IDF Information Density.: Each sen-tence receives a mean TF-IDF score [14] computed over the document’s sentence corpus. Sentences containing rare, discriminative terms—those with high inverse document frequency—score higher, following the self-information ap-proximation of Selective Context [11] but without neural inference. 
+
+e) Signal 4: Novelty (Inverse Centrality).: TextRank re-wards centrality, but safety-critical content (jailbreak prefixes, PII) is typically an outlier . Adapting centroid-based scor-ing [15] in the opposite direction, we score each sentence by its dissimilarity from the document centroid: 
+
+rnov (i) = 1 − cos( tf i, ¯tf ) (3) where tf i is the sentence’s TF vector and ¯tf is the mean of all sentence TF vectors. Where Radev et al. [15] retain sentences closest to the centroid (most representative), we boost sentences farthest from it, following the diversity prin-ciple of MMR [16]. Adversarial or sensitive content scores high without keyword lists or pattern matching—purely from distributional divergence. 
+
+f) Composite Ranking and Selection.: The final score for sentence i is: 
+
+s(i) = α1 · rTR (i) + α2 · wpos (i)+ α3 · rTF -IDF (i) + α4 · rnov (i) (4) where all component scores are max-normalized to [0 , 1] and the weights α1–4 sum to 1. Following MEAD’s precedent of empirically tuning combination weights for the target task, we set α = (0 .20 , 0.40 , 0.35 , 0.05) based on grid search over 384 Wikipedia-based test cases classified by the production mmBERT-32K models (§V-F). Position receives the highest weight because the domain question or system prompt is overwhelmingly at the beginning or end of the context, and the U-shaped attention curve from Liu et al. [8] ensures those sentences carry the most classifier-relevant information. TF-IDF is the primary content signal, surfacing sentences with rare, domain-specific terminology. TextRank contributes centrality to retain the most representative sentences. Novelty receives the lowest weight: while it helps surface outlier content (jailbreak prefixes, PII), high novelty weight displaces domain-representative sentences, reducing domain classifica-tion accuracy. In practice, the PreserveFirstN=3 and 
+
+PreserveLastN=2 guarantees already protect boundary signals, making heavy novelty weighting unnecessary. Re-maining sentences are ranked by s(i) and greedily selected until the token budget (default 512) is reached. Selected sen-tences are reassembled in original order to preserve discourse coherence. Compression must not degrade classification accuracy. The original, uncompressed prompt is always sent to the upstream LLM; compression is applied only to the evaluation text used by the router’s classifiers. Unlike neural compression meth-ods that may introduce artifacts from model-specific biases or abstractive rewriting, our extractive approach preserves original tokens verbatim—no paraphrasing, no hallucinated content. The high position weight ensures sentences at the beginning and end of the context are preserved, following the attention pattern documented by Liu et al. [8]; TF-IDF surfaces domain-specific vocabulary. We trade peak compression ratio (sentence-level vs. token-level granularity) for strict faithful-ness: every token in the compressed output appears in the original prompt. We evaluate accuracy impact in §V-F. 
+
+2) GC Optimization: For prompts exceeding 8K tokens, the TextRank adjacency matrix and TF-IDF maps generate significant garbage collection pressure. We apply several op-timizations:  
+
+> •
+
+Flat n × n float64 slice instead of nested slices for the adjacency matrix  
+
+> •
+
+sync.Pool for power-iteration buffer reuse  
+
+> •
+
+Sentence cap at 500 (with uniform sampling for longer documents)  
+
+> •
+
+Map pre-sizing and bitset-based deduplication These reduce both latency and allocation pressure for large prompts, keeping compression overhead well below the clas-sification time even at 16K+ tokens. 
+
+C. Near-Streaming Body Processing 1) Motivation: Even with GPU-accelerated classification and prompt compression reducing the classifier input to 512 tokens (∼19 ms FA latency), the E2E latency for a16K-token request through Envoy’s BUFFERED mode is still 142 ms (with compression active). Profiling reveals that 
+
+json.Unmarshal and json.Marshal on the ∼64 KB body account for most of the remaining overhead. 
+
+2) Phase 1: Zero-Copy JSON Operations: We replace all hot-path JSON operations with targeted field extraction using gjson [20] and sjson [21]:  
+
+> •
+
+Targeted field extraction : Extracts model , messages ,and stream via gjson path queries without full deserial-ization, avoiding the O(n) cost of json.Unmarshal . 
+
+> •
+
+In-place model rewrite : Replaces the model field via sjson byte-level surgery, avoiding full marshal/unmarshal round-trips.  
+
+> •
+
+Deferred SDK parsing : The full OpenAI SDK struct is only constructed when needed for complex operations (memory injection, modality routing), not on every re-quest.                            
+
+> init
+> passthrough accumulate
+> model specified
+> model = “auto”
+> forward chunks zero-copy
+> buffer + incremental NLP →classify at EOS
+> Fig. 2. Near-streaming body handler state machine. The first chunk determines the path: specified models bypass body inspection entirely; “auto” requests accumulate for classification with incremental preprocessing. TABLE II BODY -PROCESSING STRATEGIES FOR LLM REQUEST PROXIES . O UR NEAR -STREAMING APPROACH ACHIEVES PASSTHROUGH -LEVEL LATENCY WHEN THE MODEL IS SPECIFIED ,RETAINING INSPECTION CAPABILITY WHEN NEEDED .
+> Strategy Inspect? Mutate? Overhead Copies
+> Pure passthrough No No ∼00Header-only routing No Headers ∼00Full buffering Yes Yes O(n)2–3
+> Ours Adaptive Adaptive O(1) /O(n)∗0/1 ∗∗O(1) /0 copies in passthrough (specified model); O(n)/1 copy in accumulate (auto model).
+
+3) Phase 2: Streamed Body Handler: We implement a StreamedBodyHandler that processes Envoy’s 
+
+STREAMED body chunks through a three-state machine: 1) init : The first chunk arrives. The handler extracts the 
+
+model field using gjson on the partial JSON. If the model is explicitly specified (not “auto”), transition to 
+
+passthrough ; otherwise, transition to accumulate .2) passthrough : For requests with a specified model, each chunk is forwarded to the upstream without modifi-cation. Only headers need mutation (model rewrite, routing). 3) accumulate : For “auto” model requests requiring clas-sification, chunks are consumed (not forwarded) while the handler incrementally performs sentence splitting and TF-IDF vector computation on the arriving data. At end-of-stream, the complete body is passed to the classification pipeline with pre-computed NLP state. This design overlaps I/O (chunk delivery from client →
+
+Envoy → ext proc) with computation (incremental NLP pre-processing), reducing the effective wall-clock time. Figure 2 illustrates the state transitions. 
+
+4) Comparison with Alternative Body-Processing Strate-gies: Table II compares our near-streaming approach with three alternative body-processing strategies that span the design space between zero-inspection passthrough and full buffering. 
+
+Pure passthrough (TCP splice [22] or SOCKMAP [23]) forwards bytes at the kernel level without entering user space, with near-zero overhead but no ability to inspect requests. 
+
+Header-only routing (e.g., Envoy’s native header-match rout-ing) examines only HTTP headers, which carry the model name but not the prompt content needed for safety classifica-tion. Full buffering (Envoy’s BUFFERED mode, used by most LLM proxy frameworks such as LiteLLM [24]) accumulates the entire request body before processing, allowing full in-spection and mutation at the cost of O(n) latency from JSON serialization and 2–3 in-memory copies. Our near-streaming handler adaptively selects between passthrough and accumulation based on the first chunk’s con-tent. For the common case where the client specifies a model (not “auto”), the handler detects this from the first ∼1 KB chunk via gjson and transitions to passthrough—matching the latency profile of pure streaming with zero body copies. Only when classification is needed (“auto” model) does the handler accumulate and inspect the body, overlapping I/O with incremental NLP preprocessing. This approach is distinct from prior work in three ways: 1) Unlike Conveyor [25], which optimizes output-side 
+
+streaming by overlapping tool execution with LLM de-coding, we optimize input-side streaming by overlapping body delivery with NLP preprocessing. 2) Unlike StreamingLLM [26], which addresses streaming 
+
+inference (token generation over unbounded contexts via attention sinks), we address streaming request pre-processing (classification and routing before inference begins). 3) Unlike LiteLLM’s sidecar architecture [24], which re-duces proxy overhead by offloading non-critical opera-tions to a separate process while still fully buffering the body, we avoid body buffering entirely for the majority of requests. We are not aware of prior work that applies adap-tive chunked-streaming body processing with early model detection to LLM routing. The closest analog is En-voy’s FULL_DUPLEX_STREAMED mode (introduced in Envoy 1.31), which allows bidirectional chunk-by-chunk processing but provides no built-in mechanism for the init →passthrough/accumulate state machine that our design requires. V. E VALUATION 
+
+A. Experimental Setup 
+
+Table III lists the hardware and software versions used throughout the evaluation. All experiments run on a single server with one AMD Instinct MI300X GPU shared between two vLLM serving instances and the semantic router. 
+
+a) Methodology.: Each benchmark configuration sends N =10 sequential HTTP requests through the Envoy →ext proc →router pipeline after a warm-up phase (3 requests for streamed tests; 1 request plus ROCm JIT compilation for GPU tests). Latency is measured as wall-clock time of the curl call. Prompt payloads are synthetically generated at target token counts (500, 2K, 8K, 16K) with embedded jailbreak prefixes, PII tokens, and domain-specific content so that all three classifiers fire on every request. Each configuration was repeated across 2–3 independent runs on                                                                                                            
+
+> TABLE III TESTBED CONFIGURATION .
+> Component Version / Spec
+> GPU AMD Instinct MI300X, 192 GB HBM3 GPU arch gfx942 (CDNA 3) ROCm 7.0 ONNX Runtime 1.22.1 (ROCm wheel) CK Flash Attn lib libort ck flash attn.so (192 KB) Rust ort crate 2.0.0-rc.10 (load-dynamic) Go 1.24.1 Envoy v1.33 Classifier model mmBERT-32K (270M params, FP16) TABLE IV GPU ACCELERATION ON MI300X: E2E ROUTING LATENCY (TOP )AND PER -SIGNAL EXTRACTION LATENCY (BOTTOM ). C ANDLE CPU AT 8K
+> TRUNCATES TO 512 TOKENS (1,818 MS E2E). N=10 PER RUN ;SEE §V-A.
+> Tokens Signal GPU (ms) CPU (ms) Speedup
+> End-to-end routing latency (ONNX GPU+FA vs ONNX CPU)
+> ∼500 (all) 22 803 36.5 ×∼2,000 (all) 31 1,773 57.2 ×∼8,000 (all) 127 4,918 38.7 ×
+> Per-signal extraction latency
+> ∼500 Jailbreak 14.2 779.8 54.9 ×∼500 Domain 9.0 601.2 66.8 ×∼500 PII 8.6 664.9 77.3 ×∼2,000 Jailbreak 20.8 1,684.2 81.0 ×∼2,000 PII 18.7 1,745.0 93.3 ×∼8,000 Jailbreak 58.1 1,519.0 26.1 ×∼8,000 PII 118.2 4,905.5 41.5 ×
+> TABLE V SDPA VS CK F LASH ATTENTION (MS ), CONCURRENCY 1. SDPA OOM SAT 8K+ WITH 3CONCURRENT SESSIONS .
+> Seq Length SDPA (ms) FA (ms) Speedup
+> 512 19 19 1.0 ×
+> 1,024 26 23 1.1 ×
+> 2,048 51 32 1.6 ×
+> 4,096 167 51 3.3 ×
+> 8,192 OOM 105 —16,384 OOM 259 —32,768 OOM 756 —
+
+separate container restarts; per-run averages varied by less than 3% (coefficient of variation), confirming reproducibility. Tables report the per-run average from a representative run; cross-run ranges are noted where relevant. 
+
+B. GPU Acceleration 
+
+Table IV shows end-to-end routing latency and per-signal classifier latency across GPU and CPU backends. GPU+FA achieves 26–93 × speedup over CPU for individual classifiers and 36–57 × speedup end-to-end. Table V shows that FA handles sequence lengths where SDPA fails due to OOM, and provides 3.3 × speedup at the crossover point. Figure 3 illustrates why co-location requires both FA and compression: SDPA’s O(n2) attention memory exceeds avail-able HBM at 8K tokens, FA’s O(n) scaling keeps it viable but Fig. 3. Attention memory per classifier session vs. sequence length. SDPA exceeds the ∼718 MB available (dashed line) at ∼6K tokens. FA stays below but grows linearly. With compression, all inputs are reduced to 512 tokens, yielding a constant footprint regardless of original prompt length. TABLE VI SIGNAL EXTRACTION LATENCY WITH COMPRESSION (STREAMED, GPU+FA). 16K →512 TOKENS YIELDS 12 × JAILBREAK SPEEDUP WITH IDENTICAL RESULTS .                     
+
+> Tokens Signal No Compression Compressed
+> ∼500 Jailbreak 10.1 ms 9.3 ms
+> ∼2,000 Jailbreak 18.0 ms 11.1 ms
+> ∼8,000 Jailbreak 45.3 ms 10.5 ms
+> ∼16,000 Jailbreak 126.6 ms 10.4 ms
+> ∼16,000 Domain 85.3 ms 7.1 ms
+> ∼16,000 PII 84.6 ms 6.2 ms
+
+still grows with length, and compression collapses all inputs to a constant 512-token footprint. 
+
+C. Prompt Compression 
+
+Table VI shows signal extraction latency with and without compression. Compression reduces 16K-token jailbreak clas-sification from 126.6 ms to 10.4 ms (12 × speedup) because all inputs are reduced to ∼512 tokens before FA classification. Table VII reports the compression pipeline’s own overhead and output ratio. All inputs compress to ∼512 tokens regard-less of original length, matching the configured budget. Com-pression latency grows sublinearly with input size—from 2 ms at 2K tokens to 19 ms at 16K—due to the 500-sentence cap and parallelized pairwise scoring in the TextRank adjacency computation. Even at 16K tokens the compression step adds less than the FA classifier time it saves (19 ms overhead vs. 240 ms FA reduction; Table V). 
+
+D. Staged Acceleration 
+
+Table VIII summarizes the cumulative impact of each op-timization layer. All rows use 8K tokens—the longest CPU-tested configuration—allowing direct comparison across every stage. A supplementary 16K row shows continued scaling beyond the CPU-operable regime. The near-streaming stage provides the largest benefit at longer prompts: at 8K tokens, streaming reduces E2E latency                        
+
+> TABLE VII PROMPT COMPRESSION RATIO AND LATENCY BY INPUT SIZE (N=96 PER SIZE ,MAX TOKENS =512). C OMPRESSION LATENCY IS CPU-ONLY (NO
+> GPU INFERENCE ).
+> Input Tokens Output Tokens Ratio Latency (ms)
+> ∼2,000 510 25.1% 2
+> ∼4,000 511 12.7% 4
+> ∼8,000 512 6.4% 9
+> ∼16,000 512 3.2% 19
+
+from 62 to 50 ms (19.4% reduction); at 16K, from 142 to 108 ms (23.9%). At short prompts ( ∼500 tokens), the benefit is negligible (17 ms in both modes) because JSON processing overhead is minimal relative to other pipeline costs. 
+
+a) Single-Signal Deployment (Domain Only).: Ta-bles VIII–VI measure the full three-classifier pipeline (jail-break + PII + domain). In deployments that need only domain-intent routing—e.g., model selection without safety guards— a single classifier session suffices. Table IX isolates this scenario. With a single domain classifier, streaming cuts 16K-token E2E latency from 61 ms to 31 ms (49% reduction)—a larger relative gain than the three-classifier case (24%) because JSON serialization overhead constitutes a greater fraction of total time when classifier work is smaller. Domain signal extraction latency is ∼6 ms regardless of input size (compressed to 512 tokens), so the remaining 25 ms is streaming I/O, gRPC framing, and compression. For single-signal deployments, the optimized router adds under 35 ms to every request at any prompt length up to 16K tokens. 
+
+E. Scalability Under Concurrent Load 
+
+Table X shows FA latency scaling under concurrent re-quests. The upper block shows raw classifier latency without compression; the lower block shows the effective end-to-end latency when prompt compression and streaming are enabled. With compression, all prompts are reduced to ∼512 tokens before classification, so the GPU processes a constant-size input regardless of original prompt length. The CPU-side compression cost ( ∼19 ms at 16K tokens; Table VII) runs in parallel per-request goroutines and does not contend with GPU resources. Three points stand out. First, without compression, FA latency grows quadratically with sequence length and linearly with concurrency, reaching 9.9 seconds at C=20 for 32K tokens (measured in PR #1431). With compression and stream-ing enabled, the GPU always processes 512-token inputs, collapsing the derived 32K C=20 estimate to sub-250 ms— a 40 × reduction. Second, the E2E overhead beyond GPU classification (streaming I/O, compression, gRPC framing) grows modestly with original prompt length (17 ms at 512 tokens to 108 ms at 16K, measured; 125 ms at 32K, estimated) because compression cost scales with input length while the compressed output is constant-size. Third, no OOM failures occur at any tested configuration—compression caps the GPU input at 512 tokens regardless of original prompt length. TABLE VIII STAGED ACCELERATION AT 8K TOKENS . E ACH STAGE BUILDS ON THE PREVIOUS ; PER -STAGE AND CUMULATIVE SPEEDUPS ARE MEASURED E2E  
+
+> THROUGH
+
+ENVOY (N =10 PER RUN , 2–3 RUNS ; §V-A). T HE 16K ROW SHOWS SCALING BEYOND THE CPU-OPERABLE REGIME .
+
+Configuration Tokens E2E (ms) Stage Speedup Cumulative 
+
+ONNX CPU, BUFFERED (baseline) 8K 4,918 — 1.0 ×
+
+Candle CPU, BUFFERED 8K 1,818 2.7 × 2.7 ×
+
+ONNX GPU (SDPA), BUFFERED 8K OOM — —
+
+Stage 1: GPU + CK Flash Attention 
+
+ONNX GPU (FA), BUFFERED 8K 127 38.7 × 38.7 ×
+
+Stage 2: + Prompt Compression (8K → ∼ 512 tokens) 
+
+ONNX GPU (FA), BUFFERED + comp 8K 62 2.0 × 79.3 ×
+
+Stage 3: + Near-Streaming + Zero-Copy JSON 
+
+ONNX GPU (FA), STREAMED + comp 8K 50 1.2 × 98.4 ×
+
+Extended: 16K tokens (beyond CPU range) 
+
+ONNX GPU (FA), STREAMED + comp 16K 108 — —
+
+Fig. 4. E2E latency comparison (log scale). GPU+FA with streaming and compression achieves 50 ms at 8K tokens. At 16K+, only GPU+FA operates (108 ms at 16K; Table VIII). TABLE IX DOMAIN -ONLY E2E LATENCY : BUFFERED VS . STREAMED WITH PROMPT COMPRESSION AND GPU+FA ( N =15 PER SIZE , SINGLE CLASSIFIER ). R EDUCTION IS RELATIVE TO BUFFERED AT THE SAME TOKEN COUNT .
+
+Tokens BUFFERED (ms) STREAMED (ms) Reduction 
+
+∼500 12 11 8.3% 
+
+∼2,000 15 14 6.7% 
+
+∼8,000 30 20 33.3% 
+
+∼16,000 61 31 49.2% 
+
+F. Classification Accuracy 
+
+We evaluate accuracy at two levels: (1) end-to-end classifier decisions on the production benchmark, and (2) classification accuracy on a larger offline corpus with real content. 
+
+a) End-to-End Classifier Accuracy.: All benchmark payloads contain embedded ground-truth signals: a jail-break prefix (“Ignore all previous instructions. . . ”), PII tokens (SSN, email, credit card number), and domain-specific technical content (computer science). The router’s Prometheus counters ( llm_signal_extraction_total 
+
+and llm_signal_match_total ) record every classifier decision. Across 40 requests without compression and 42 with compression enabled, domain classification and PII detection both achieve 100% match rates—no signal is lost due to compression. Jailbreak detection is threshold-dependent (the “Ignore all previous instructions” prefix scores near the 0.5 decision boundary); when detected, the match rate is also 100%. 
+
+b) Classification Accuracy on Real Content.: To vali-date that compression preserves—or improves—classifier de-cisions, we ran an offline evaluation using 384 test cases constructed from 8 full Wikipedia articles across 8 domains, at 4 prompt lengths (2K–16K tokens), with 12 signal-position combinations per domain. Each prompt embeds a jailbreak prefix, PII tokens (SSN, email, credit card), and a domain-TABLE X CLASSIFIER LATENCY UNDER CONCURRENT LOAD ON MI300X: RAW FA ( TOP ) VS . EFFECTIVE WITH COMPRESSION + STREAMING (BOTTOM ). W ITH COMPRESSION ALL INPUTS REDUCE TO ∼512 TOKENS . B OTTOM -PANEL C=1 VALUES AT 512–16K ARE MEASURED ; 32K C=1 IS ESTIMATED . C >1                                                                          
+
+> VALUES ARE DERIVED FROM C=1 OVERHEAD PLUS THE 512-TOKEN FA CONCURRENCY PROFILE .
+> Original Tokens Mode C=1 C=10 C=20
+> Raw FA classifier latency (median ms, no compression)
+> 512 FA only 19 77 142 2,048 FA only 32 141 275 8,192 FA only 105 601 1,058 16,384 FA only 259 1,567 3,089 32,768 FA only 756 5,406 9,872
+> Effective E2E latency (ms, compression + streaming + FA)
+> 512 + Comp + Stream 17 75 140 2,048 + Comp + Stream 24 92 157 8,192 + Comp + Stream 50 118 183 16,384 + Comp + Stream 108 166 231
+> 32,768 + Comp + Stream 125 183 248 TABLE XI CLASSIFICATION ACCURACY :ORIGINAL (UNCOMPRESSED )VS .
+> COMPRESSED PROMPTS CLASSIFIED BY THE PRODUCTION MM BERT-32K
+> MODELS (384 TEST CASES , 8 DOMAINS ×4SIZES ×12 SIGNAL COMBOS ,MI300X GPU WITH FA).
+> Metric Original Compressed
+> Domain classification (correct domain, n=384 )
+> Overall 53.1% 61.2%
+> PII detection (when PII signal embedded, n=288 )
+> PII detected 78.5% 92.4%
+> Jailbreak detection (when signal embedded, n=288 )
+> Jailbreak detected 70.8% 56.6%
+
+specific technical question at controlled positions (start, mid-dle, or end). We classify each prompt with the production mmBERT-32K ONNX models before and after compression to 512 tokens via the Semantic Router’s classification API on AMD MI300X (ROCm, CK Flash Attention). Table XI reports the results. The central finding is that compression improves classifi-cation accuracy rather than degrading it. This is consistent with recent work showing that prompt compression acts as a denoising step: by removing redundant and irrelevant tokens, compression increases the signal-to-noise ratio of the classifier input [27, 28]. The same principle underlies summarization-based feature reduction for text classification, where condensing long documents to their most informative sentences consistently improves classifier accuracy [29, 30]. In our setting, the mechanism is concrete: full Wikipedia articles contain thousands of tokens of historical narrative, biographical detail, and chronological filler that the mmBERT-32K intent classifier interprets as “history.” Compression strips this noise and retains the domain-specific sentences (via TF-IDF scoring and position weighting), concentrating the signal into a 512-token window where the classifier can attend to it effectively. Domain classification accuracy rises from 53.1% to 61.2%. The improvement is largest for domains whose articles are heavily narrative: “Immune system” is misclassified as history on the original 10K-token article but correctly classified as health after compression (77% of cases); “Structural engi-neering” rises from 0% to 48%. This aligns with the “lost in the middle” effect [8]: transformer attention concentrates on the beginning and end of long inputs, and content in the middle—where the domain signal may reside—receives disproportionately low attention. Compression eliminates this dilution by selecting the highest-scoring sentences regardless of position and reassembling them within the classifier’s effective attention span. PII detection improves from 78.5% to 92.4% after com-pression. In long text, PII tokens (SSN, credit card numbers) constitute a tiny fraction of the input and fall below the token classifier’s effective attention; compression concentrates these tokens into the 512-token window where the classifier reliably detects them at all positions (start: 95.8%, middle: 100%, end: 99.0%). Jailbreak detection decreases from 70.8% to 56.6% after compression. This is expected: the weight tuning prioritizes domain-representative content over outlier sentences (§IV-B), and compression removes some of the surrounding context that the classifier uses to detect adversarial intent. In production, this trade-off is acceptable because jailbreak and PII detection run on the full uncompressed prompt; compression is applied only for domain routing where the accuracy improvement matters. The compressed-prompt jailbreak numbers represent a lower bound, not the operational accuracy. 
+
+G. Throughput 
+
+Since the benchmark uses sequential requests (C=1 ), throughput is the reciprocal of E2E latency. Table XII shows the single-stream throughput for key configurations. At C=1 
+
+the optimized router processes 20 requests/s at 8K tokens and 9.3 at 16K tokens. Under concurrent load, aggregate throughput scales further: at C=10 with compression and TABLE XII SINGLE -STREAM THROUGHPUT (C=1) DERIVED FROM E2E LATENCY .              
+
+> Configuration Latency (ms) req/s
+> ONNX CPU, 8K (baseline) 4,918 0.2 GPU+FA, 500 tok 22 45.5 GPU+FA, 8K tok 127 7.9 GPU+FA+comp+stream, 500 tok 17 58.8 GPU+FA+comp+stream, 8K tok 50 20.0 GPU+FA+comp+stream, 16K tok 108 9.3
+
+streaming (Table X), the system sustains ∼60 requests/s at 16K tokens (10 concurrent / 166 ms per request). VI. D ISCUSSION 
+
+a) How the Stages Compose.: The three stages stack: GPU acceleration reduces per-token compute cost, prompt compression reduces the number of tokens processed, and streaming reduces I/O serialization overhead. The prompt compression benefit is multiplicative with GPU acceleration: at 16K tokens, compression reduces classifier input from 16K to 512 tokens, and per-classifier FA latency drops from 259 ms to ∼19 ms (Table V). Without GPU acceleration, compression would reduce the ONNX CPU classifier input from 8K tokens (4.9s E2E) to 512 tokens ( ∼0.8s), but the CPU baseline at 512 tokens is already high, so the relative gain is smaller than on GPU. 
+
+b) Accuracy vs Latency Trade-off.: Prompt compression acts as a denoising step for classification: by removing the tokens that are irrelevant to the classification task, it increases the signal-to-noise ratio of the classifier input. This finding is consistent with recent work on prompt compression [27] and summarization-based feature reduction [29], both of which show that condensing text to its most informative content improves downstream classifier accuracy. In our evaluation, domain classification improves from 53.1% to 61.2% after compression, and PII detection from 78.5% to 92.4% (Ta-ble XI). The improvement is driven by the “lost in the middle” effect [8]: long inputs dilute the classifier’s attention across thousands of irrelevant tokens, while compression concentrates the signal within the model’s effective attention span. Jailbreak detection decreases from 70.8% to 56.6%, but this trade-off is by design: in production, jailbreak and PII detection run on the full uncompressed prompt, while compression is applied only for domain routing. The original, uncompressed prompt is always forwarded to the upstream LLM. 
+
+c) GPU Co-location and Density.: In production, the se-mantic router shares the GPU with vLLM inference instances rather than requiring a dedicated accelerator. This co-location improves GPU density and removes the need to provision, schedule, or monitor a separate GPU pool for the routing layer—but it means the router must fit within whatever HBM vLLM leaves available. Each stage further reduces memory pressure for co-location:  
+
+> •
+
+Without any optimization (SDPA): three classifier ses-sions at 8K tokens allocate ∼4.5 GB for attention masks                          
+
+> TABLE XIII GPU RESOURCE REQUIREMENTS OF LLM ROUTING SYSTEMS . O UR ROUTER IS THE ONLY ONE DESIGNED TO CO -LOCATE ON THE SERVING
+> GPU.
+> Router Model GPU Mem. Ded. GPU?
+> RouteLLM (MF) Mat. factorization 0 (CPU) No RouteLLM (BERT) 0.3B classifier ∼0.6 GB Yes RouteLLM (Causal) 8B LLM ∼16 GB Yes NVIDIA Blueprint BERT/CLIP + Triton ∼1–2 GB Yes R2-Router Reasoning LLM ∼16+ GB Yes
+> Ours 3×mmBERT-32K ∼0.8 GB No
+
+alone—more than the ∼2 GB typically left by vLLM. At 16K tokens this grows to ∼18 GB; at 32K, ∼72 GB. Co-location cannot work at long contexts.  
+
+> •
+
+With FA only : O(n) memory reduces the 8K working set to ∼200 MB, making co-location viable. But FA memory still grows linearly—at 32K tokens with 20 concurrent requests, the aggregate working set becomes significant, and FA latency reaches 756 ms per classifier.  
+
+> •
+
+With FA + compression : the GPU always processes 
+
+∼512-token inputs regardless of original prompt length. Memory per request is constant and small ( ∼19 ms FA latency, negligible working set), making co-location safe even at 32K tokens with high concurrency. No OOM is possible from the router regardless of input length or batch size. The total router GPU footprint (model weights plus working memory) stays under ∼800 MB, so a single GPU can serve both LLM inference and routing classification. 
+
+d) Comparison with Other LLM Routers.: Table XIII compares our deployment model with other LLM routing sys-tems. Most existing routers require dedicated GPU resources for the routing decision itself. RouteLLM [31] offers three router architectures: a lightweight matrix factorization model (CPU-only), a 0.3B BERT classifier ( ∼600 MB GPU), and an 8B causal LLM router ( ∼16 GB GPU). The causal LLM router is their strongest performer but requires a dedicated GPU comparable in cost to the models being routed. The NVIDIA LLM Router Blueprint [32] uses BERT or CLIP classification served through Triton Inference Server, requiring a dedicated GPU service with TensorRT optimization. R2-Router [33] goes further, running a reasoning LLM to jointly select the target model and output-length budget, requiring substantial GPU resources for the routing decision itself. In contrast, our router co-locates with vLLM on the same GPU. Three mmBERT-32K classifier sessions consume 
+
+∼600 MB for model weights; Flash Attention keeps working memory at O(n); and prompt compression caps the GPU input at 512 tokens per request. The total router GPU footprint stays under ∼800 MB regardless of input length, small enough to share an MI300X (or any GPU) with LLM serving. This saves one GPU per node in the routing infrastructure at cluster scale. 
+
+e) Cost of a Dedicated Router GPU.: Table XIV trans-lates the memory requirements from Tables XIII and V into cloud GPU costs using published 2025–2026 on-demand pric-TABLE XIV ANNUAL COST OF A DEDICATED ROUTER GPU PER SERVING NODE ,                           
+
+> BASED ON CLOUD ON -DEMAND PRICING . O UR ROUTER ADDS $0 BY CO -LOCATING ON THE EXISTING SERVING GPU.
+> Router Config. GPU Mem. GPU $/yr/node
+> SDPA, 8K, C=1 ∼5 GB L4 $3,500 SDPA, 16K, C=1 ∼19 GB A10G $8,800 SDPA, 32K, C=1 ∼73 GB A100 80G $10,100 RouteLLM (Causal) ∼16 GB A10G $8,800 R2-Router ∼16+ GB A10G $8,800
+> Ours (co-located) 0.8 GB None $0
+> Pricing: L4 $0.40/hr (GCP), A10G $1.00/hr (AWS g5.xlarge ), A100 80 GB $1.15/hr (market avg). Annual = rate ×8,760 hrs.
+
+ing. Without Flash Attention, SDPA-based classification at 8K tokens requires ∼5 GB (model weights + 4.5 GB attention masks for three concurrent sessions), fitting on an NVIDIA L4 (24 GB, ∼$0.40/hr). At 16K tokens the attention masks alone grow to ∼18 GB, requiring at least an A10G (24 GB, 
+
+∼$1.00/hr). At 32K tokens the masks reach ∼72 GB, demand-ing an A100 80 GB ( ∼$1.15/hr) or larger. These figures are for single-request concurrency (C=1); under production load (C=10–20), peak GPU memory multiplies with the number of in-flight classifier sessions, potentially requiring even larger hardware. Routers based on causal LLMs—RouteLLM’s 8B model or R2-Router’s reasoning LLM—need ∼16 GB re-gardless of prompt length, requiring a dedicated A10G or equivalent. For a 32-node LLM serving cluster, dedicating one A10G per node for routing adds ∼$281K/year; at 32K tokens with SDPA, the cost rises to ∼$323K/year on A100s. Our ap-proach eliminates this line item entirely. Even compared to RouteLLM’s lightweight matrix-factorization router (which is CPU-only and free of GPU cost), our router provides stronger classification—three concurrent 270M-parameter classifiers vs. a linear model—while still requiring no dedicated GPU. 
+
+f) Portability Beyond AMD.: Stage 1 (the custom CK Flash Attention operator) is AMD-specific: it bridges a gap that does not exist on NVIDIA hardware, where ONNX Runtime already ships built-in FA kernels for CUDA (SM 80+) and frameworks such as Candle [34] provide native FA via cuDNN. Stages 2 and 3—prompt compression and near-streaming body processing—are hardware-agnostic, operating in Go on the CPU side of the router. Any deployment routing long-context prompts through an Envoy ext proc filter benefits from these two stages, whether classifiers run on AMD, NVIDIA, or CPU backends. 
+
+g) Limitations.: The current prompt compression uses approximate tokenization (character-length heuristic) rather than the actual model tokenizer. While this is sufficient for the coarse-grained compression ratios we target (32 × reduction), future work should integrate the model-specific tokenizer for precise budget control. The streaming handler’s “accumulate” path buffers the entire body in memory before classification, so the memory savings are primarily in reduced JSON processing, not in total memory usage. VII. C ONCLUSION 
+
+We have presented three optimizations for low-latency LLM semantic routing, each delivering a measured stage of acceler-ation at 8K tokens: GPU-accelerated classification with custom CK Flash Attention for ONNX Runtime on AMD ROCm (4,918 →127 ms, 38.7 ×), classical NLP prompt compression combining TextRank, position weighting, TF-IDF, and novelty scoring (127 →62 ms, 2.0 ×), and near-streaming body process-ing with adaptive chunking and zero-copy JSON operations (62 →50 ms, 1.2 ×). The three stages compose to a cumulative 
+
+98 × reduction in end-to-end routing latency (4,918 ms to 50 ms) and enable 16K-token routing in 108 ms—a regime where CPU backends cannot operate—all while maintaining classification accuracy. While the CK Flash Attention operator (Stage 1) targets AMD ROCm where no prior ORT integration existed, the prompt compression and near-streaming stages are hardware-agnostic and can accelerate routing on NVIDIA GPUs (which already have FlashAttention via cuDNN and Candle) or CPU backends alike. The system scales to 32K-token sequences and 20 concurrent requests without OOM, supporting real-time safety classification and intent routing for long-context LLM applications. All code is open-source as part of the vLLM Semantic Router project. 2
+
+REFERENCES 
+
+[1] W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. E. Gonzalez, H. Zhang, and I. Stoica, “Efficient memory management for large language model serving with PagedAttention,” in Proceedings of the 29th Sympo-sium on Operating Systems Principles (SOSP) . ACM, 2023, arXiv:2309.06180. [2] vLLM Project, “vLLM Semantic Router: System level intelligent router for mixture-of-models,” https://github. com/vllm-project/semantic-router, 2025. [3] Envoy Proxy Project, “Envoy proxy: External process-ing filter,” https://www.envoyproxy.io/docs/envoy/latest/ configuration/http/http filters/ext proc filter, 2024, ver-sion 1.33. [4] B. Warner, B. Clavi´ e, A. Chaffin, O. Wather, S. Gal-lagher, I. M. Biber, B. Richter, A. Deschˆ enes-Larose, V. Gulizia, J. Tagliabue et al. , “Smarter, better, faster, longer: A modern bidirectional encoder for fast, memory efficient, and long context finetuning and inference,” 
+
+arXiv preprint arXiv:2412.13663 , 2024. [5] T. Dao, D. Y. Fu, S. Ermon, A. Rudra, and C. R´ e, “FlashAttention: Fast and memory-efficient exact atten-tion with IO-awareness,” in Advances in Neural Infor-mation Processing Systems (NeurIPS) , vol. 35, 2022, pp. 16 344–16 359, arXiv:2205.14135. [6] T. Dao, “FlashAttention-2: Faster attention with bet-ter parallelism and work partitioning,” arXiv preprint arXiv:2307.08691 , 2023. 
+
+> 2https://github.com/vllm-project/semantic-router
+
+[7] AMD ROCm, “Composable Kernel: Performance portable programming model for machine learning tensor operators,” https://github.com/ROCm/composable kernel, 2024, used for CK Flash Attention FMHA kernels on MI300X. [8] N. F. Liu, K. Lin, J. Hewitt, A. Paranjape, M. Bevilacqua, F. Petroni, and P. Liang, “Lost in the middle: How language models use long contexts,” Transactions of the Association for Computational Linguistics , vol. 12, pp. 157–173, 2024, arXiv:2307.03172. [9] H. Jiang, Q. Wu, C.-Y. Lin, Y. Yang, and L. Qiu, “LLM-Lingua: Compressing prompts for accelerated inference of large language models,” in Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing (EMNLP) , 2023, pp. 13 358–13 376. [10] Z. Pan, Q. Wu, H. Jiang, M. Xia, X. Luo, J. Zhang, Q. Lin, V. R¨ uhle, Y. Yang, C.-Y. Lin, H. V. Zhao, L. Qiu, and D. Zhang, “LLMLingua-2: Data distillation for efficient and faithful task-agnostic prompt compres-sion,” in Findings of the Association for Computational Linguistics: ACL 2024 , 2024, pp. 963–981. [11] Y. Li, B. Dong, F. Guerin, and C. Lin, “Compressing context to enhance inference efficiency of large lan-guage models,” in Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing (EMNLP) , 2023, pp. 6342–6353. [12] F. Xu, W. Shi, and E. Choi, “RECOMP: Improving retrieval-augmented LMs with context compression and selective augmentation,” in Proceedings of the Twelfth International Conference on Learning Representations (ICLR) , 2024. [13] R. Mihalcea and P. Tarau, “TextRank: Bringing order into text,” in Proceedings of the 2004 Conference on Empiri-cal Methods in Natural Language Processing (EMNLP) .Barcelona, Spain: Association for Computational Lin-guistics, 2004, pp. 404–411. [14] K. Sp¨ arck Jones, “A statistical interpretation of term specificity and its application in retrieval,” Journal of Documentation , vol. 28, no. 1, pp. 11–21, 1972. [15] D. R. Radev, H. Jing, M. Sty´ s, and D. Tam, “Centroid-based summarization of multiple documents,” Informa-tion Processing & Management , vol. 40, no. 6, pp. 919– 938, 2004. [16] J. Carbonell and J. Goldstein, “The use of MMR, diversity-based reranking for reordering documents and producing summaries,” in Proceedings of the 21st Annual International ACM SIGIR Conference on Research and Development in Information Retrieval . ACM, 1998, pp. 335–336. [17] B. Peng, J. Quesnelle, H. Fan, and E. Shao, “YaRN: Efficient context window extension of large language models,” arXiv preprint arXiv:2309.00071 , 2023. [18] ONNX Runtime developers, “ONNX Runtime,” https:// onnxruntime.ai/, 2021, version 1.22. [19] G. Salton and C. Buckley, “Term-weighting approaches in automatic text retrieval,” Information Processing & Management , vol. 24, no. 5, pp. 513–523, 1988. [20] J. B. Tidwall, “GJSON: Get json values quickly in Go,” https://github.com/tidwall/gjson, 2024. [21] ——, “SJSON: Set json values quickly in Go,” https: //github.com/tidwall/sjson, 2024. [22] V. S. Pai, M. Aron, G. Banga, M. Svendsen, P. Dr-uschel, W. Zwaenepoel, and E. Nahum, “Locality-aware request distribution in cluster-based network servers,” in Proceedings of the 8th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS) , 1998, pp. 205–216, tCP splice for zero-copy proxy forwarding. [23] M. Majkowski, “SOCKMAP — TCP splicing of the future,” https://blog.cloudflare.com/ sockmap-tcp-splicing-of-the-future, 2018. [24] BerriAI, “LiteLLM: Achieving sub-millisecond proxy overhead,” https://docs.litellm.ai/blog/ sub-millisecond-proxy-overhead, 2025. [25] Y. Xu, X. Kong, T. Chen, and D. Zhuo, “Conveyor: Efficient tool-aware LLM serving with tool partial ex-ecution,” in arXiv preprint arXiv:2406.00059 , 2024. [26] G. Xiao, Y. Tian, B. Chen, S. Han, and M. Lewis, “Ef-ficient streaming language models with attention sinks,” in Proceedings of the Twelfth International Conference on Learning Representations (ICLR) , 2024. [27] Z. Pan et al. , “Understanding and improving information preservation in prompt compression for LLMs,” in 
+
+Findings of EMNLP , 2025. [Online]. Available: https: //aclanthology.org/2025.findings-emnlp.949/ [28] H. Jung et al. , “Discrete prompt compression with reinforcement learning,” in Findings of ACL ,2024. [Online]. Available: https://aclanthology.org/2024. findings-acl.57.pdf [29] N. Akter et al. , “A novel summarization-based approach for feature reduction enhancing text classification ac-curacy,” Engineering, Technology & Applied Science Research , 2024. [30] Y. Huang et al. , “Improving long text understanding with knowledge distilled from summarization model,” arXiv preprint arXiv:2405.04955 , 2024. [31] I. Ong, A. Almahairi, V. Wu, W.-L. Chiang, T. Wu, J. E. Gonzalez, M. W. Kadous, and I. Stoica, “RouteLLM: Learning to route LLMs with preference data,” arXiv preprint arXiv:2406.18665 , 2024. [32] NVIDIA, “NVIDIA AI blueprint: LLM router,” https://github.com/NVIDIA-AI-Blueprints/llm-router, 2025, uses BERT/CLIP classification via Triton Inference Server. [33] Z. Feng, J. Qian, S. Ma, T. Liu, and Z. Zheng, “R2-Router: A new paradigm for LLM routing with reason-ing,” arXiv preprint arXiv:2602.02823 , 2025. [34] Hugging Face, “Candle: Minimalist ML framework for Rust,” https://github.com/huggingface/candle, 2024, pro-vides FlashAttention support via cuDNN on NVIDIA GPUs. APPENDIX 
+
+To illustrate the compression pipeline, consider a 2,048-token RAG prompt with the following structure (sentences abbreviated):                       
+
+> [1] You are a helpful financial assistant. [2] Answer ques-tions using only the provided context. [3] If the answer is not in the context, say “I don’t know.” [4] Context: The company reported Q3 revenue of $4.2B. . . [5] Operating expenses increased 12% year-over-year. . . [6] The board approved a $500M share buyback program. . . [7] Em-ployee headcount remained stable at 12,400. . . [8] Re-gional sales in APAC grew 8%. . . [9] The CFO noted that “margins are expected to improve in Q4.”. . . [10] . . . (180 more sentences of retrieved context) . . . [190] Question: What is the company’s revenue outlook?
+
+a) Step 1: Sentence Segmentation.: The prompt is split into 190 sentences using the multilingual rule-based seg-menter. 
+
+b) Step 2: Scoring.: Each sentence receives a composite score combining TextRank, position, TF-IDF, and novelty signals (§IV-B).  
+
+> •
+
+Position weighting assigns high scores to sentences [1]– [4] (system prompt, instructions) and [190] (the user question) via the U-shaped curve; middle sentences [90]– [100] receive the lowest weight.  
+
+> •
+
+TextRank identifies [4], [6], and [9] as central (they share financial terms with many other sentences).  
+
+> •
+
+TF-IDF upweights [6] (“buyback” is rare/distinctive) and [9] (direct CFO quote with “margins”, “outlook”).  
+
+> •
+
+Novelty would upweight any sentence whose vocabulary diverges from the financial-report average—e.g., an in-jected jailbreak prefix or PII amid earnings data would score high. 
+
+c) Step 3: Selection and Reordering.: Sentences [1]–[3] and [189]–[190] are always preserved (primacy/recency). The remaining budget ( ∼512 tokens minus preserved sentences) is filled by top-ranked sentences. The selected sentences are reordered by original position:              
+
+> [1] You are a helpful financial assistant. [2] Answer ques-tions using only the provided context. [3] If the answer is not in the context, say “I don’t know.” [4] Context: The company reported Q3 revenue of $4.2B. . . [6] The board approved a $500M share buyback program. . . [9] The CFO noted that “margins are expected to improve in Q4.”. . . [190] Question: What is the company’s revenue outlook?
+
+The compressed prompt retains the system instructions, the most informative context sentences, and the user question in their original order—reducing ∼2,048 tokens to ∼480 tokens (4.3 × compression) while preserving all content relevant to domain classification, jailbreak detection, and PII scanning. The original, uncompressed prompt is forwarded to the up-stream LLM; only the router’s classifiers see the compressed version.
