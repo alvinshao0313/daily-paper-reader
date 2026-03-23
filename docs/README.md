@@ -6,73 +6,73 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-03-22
-- 运行时间：2026-03-22 19:36:29 UTC
+- 最新运行日期：2026-03-23
+- 运行时间：2026-03-23 19:50:17 UTC
 - 运行状态：成功
 - 本次总论文数：17
 - 精读区：6
 - 速读区：11
 
 ### 今日简报（AI）
-今日精选 17 篇前沿成果，深度复盘多模态大模型推理优化与具身智能边缘部署。
-重点推荐覆盖感知解码（CAMD）以提升推理效率，并系统梳理了具身智能模型在资源受限环境下的落地策略。
-建议开发者关注多模态轻量化与视频生成加速技术，探索大模型在端侧设备的实战应用。
-- 详情：[/202603/22/README](/202603/22/README)
+今日深度解析 17 篇 AI 论文，聚焦视频大模型加速与长文本压缩的突破性进展。
+重点推荐 ParallelVLM 实现的视频 LLM 无损并行解码，以及 BEAVER 带来的无需训练的结构感知提示词压缩方案。
+建议关注多模态推理效率与端侧轻量化部署，这是当前提升大模型实用性的关键路径。
+- 详情：[/202603/23/README](/202603/23/README)
 
 ### 精读区论文标签
-1. [CAMD: Coverage-Aware Multimodal Decoding for Efficient Reasoning of Multimodal Large Language Models](/202603/22/2603.14745v1-camd-coverage-aware-multimodal-decoding-for-efficient-reasoning-of-multimodal-large-language-models)  
+1. [ParallelVLM: Lossless Video-LLM Acceleration with Visual Alignment Aware Parallel Speculative Decoding](/202603/23/2603.19610v1-parallelvlm-lossless-video-llm-acceleration-with-visual-alignment-aware-parallel-speculative-decoding)  
+   标签：评分：10.0/10、query:mc
+   evidence：用于Video-LLM加速的投机解码与剪枝
+2. [BEAVER: A Training-Free Hierarchical Prompt Compression Method via Structure-Aware Page Selection](/202603/23/2603.19635v1-beaver-a-training-free-hierarchical-prompt-compression-method-via-structure-aware-page-selection)  
+   标签：评分：10.0/10、query:mc
+   evidence：LLM的免训练提示词压缩
+3. [PoC: Performance-oriented Context Compression for Large Language Models via Performance Prediction](/202603/23/2603.19733v1-poc-performance-oriented-context-compression-for-large-language-models-via-performance-prediction)  
    标签：评分：9.0/10、query:mc
-   evidence：多模态大语言模型的高效推理
-2. [Embodied Foundation Models at the Edge: A Survey of Deployment Constraints and Mitigation Strategies](/202603/22/2603.16952v1-embodied-foundation-models-at-the-edge-a-survey-of-deployment-constraints-and-mitigation-strategies)  
-   标签：评分：9.0/10、query:mc
-   evidence：基础模型部署约束与模型压缩综述
-3. [VLM2Rec: Resolving Modality Collapse in Vision-Language Model Embedders for Multimodal Sequential Recommendation](/202603/22/2603.17450v1-vlm2rec-resolving-modality-collapse-in-vision-language-model-embedders-for-multimodal-sequential-recommendation)  
-   标签：评分：9.0/10、query:mc
-   evidence：研究将视觉语言模型（VLM）作为多模态编码器
-4. [VLM-AutoDrive: Post-Training Vision-Language Models for Safety-Critical Autonomous Driving Events](/202603/22/2603.18178v1-vlm-autodrive-post-training-vision-language-models-for-safety-critical-autonomous-driving-events)  
-   标签：评分：9.0/10、query:mc
-   evidence：适配预训练视觉语言模型
-5. [Distilling Reasoning Without Knowledge: A Framework for Reliable LLMs](/202603/22/2603.14458v1-distilling-reasoning-without-knowledge-a-framework-for-reliable-llms)  
+   evidence：大语言模型的上下文压缩
+4. [Efficient LLM Serving for Agentic Workflows: A Data Systems Perspective](/202603/23/2603.16104v1-efficient-llm-serving-for-agentic-workflows-a-data-systems-perspective)  
    标签：评分：8.0/10、query:mc
-   evidence：通过教师-学生框架为LLM蒸馏推理能力
-6. [Efficient Document Parsing via Parallel Token Prediction](/202603/22/2603.15206v1-efficient-document-parsing-via-parallel-token-prediction)  
+   evidence：智能体工作流的高效大模型服务
+5. [Semantic One-Dimensional Tokenizer for Image Reconstruction and Generation](/202603/23/2603.16373v1-semantic-one-dimensional-tokenizer-for-image-reconstruction-and-generation)  
    标签：评分：8.0/10、query:mc
-   evidence：VLM的高效加速技术
+   evidence：用于高效多模态对齐的语义分词
+6. [A Pipelined Collaborative Speculative Decoding Framework for Efficient Edge-Cloud LLM Inference](/202603/23/2603.19133v1-a-pipelined-collaborative-speculative-decoding-framework-for-efficient-edge-cloud-llm-inference)  
+   标签：评分：8.0/10、query:mc
+   evidence：用于高效LLM推理的投机解码
 
 ### 速读区论文标签
-1. [HeBA: Heterogeneous Bottleneck Adapters for Robust Vision-Language Models](/202603/22/2603.16653v1-heba-heterogeneous-bottleneck-adapters-for-robust-vision-language-models)  
+1. [Growing Networks with Autonomous Pruning](/202603/23/2603.19759v1-growing-networks-with-autonomous-pruning)  
    标签：评分：8.0/10、query:mc
-   evidence：适配大规模视觉语言模型 (VLM)
-2. [Early Quantization Shrinks Codebook: A Simple Fix for Diversity-Preserving Tokenization](/202603/22/2603.17052v1-early-quantization-shrinks-codebook-a-simple-fix-for-diversity-preserving-tokenization)  
+   evidence：训练期间的自主剪枝以减少参数
+2. [Beyond Single Tokens: Distilling Discrete Diffusion Models via Discrete MMD](/202603/23/2603.20155v1-beyond-single-tokens-distilling-discrete-diffusion-models-via-discrete-mmd)  
    标签：评分：8.0/10、query:mc
-   evidence：大语言模型中的矢量量化
-3. [Training-Free Sparse Attention for Fast Video Generation via Offline Layer-Wise Sparsity Profiling and Online Bidirectional Co-Clustering](/202603/22/2603.18636v1-training-free-sparse-attention-for-fast-video-generation-via-offline-layer-wise-sparsity-profiling-and-online-bidirectional-co-clustering)  
+   evidence：离散扩散模型的蒸馏方法
+3. [TinyML Enhances CubeSat Mission Capabilities](/202603/23/2603.20174v1-tinyml-enhances-cubesat-mission-capabilities)  
    标签：评分：8.0/10、query:mc
-   evidence：用于快速视频生成的免训练稀疏注意力
-4. [SEM: Sparse Embedding Modulation for Post-Hoc Debiasing of Vision-Language Models](/202603/22/2603.19028v1-sem-sparse-embedding-modulation-for-post-hoc-debiasing-of-vision-language-models)  
+   evidence：用于模型部署的剪枝与量化
+4. [Adaptive Greedy Frame Selection for Long Video Understanding](/202603/23/2603.20180v1-adaptive-greedy-frame-selection-for-long-video-understanding)  
    标签：评分：8.0/10、query:mc
-   evidence：视觉语言模型的稀疏嵌入调制
-5. [Fine-tuning MLLMs Without Forgetting Is Easier Than You Think](/202603/22/2603.14493v1-fine-tuning-mllms-without-forgetting-is-easier-than-you-think)  
+   evidence：通过帧选择实现VLM的高效推理
+5. [QiMeng-CodeV-SVA: Training Specialized LLMs for Hardware Assertion Generation via RTL-Grounded Bidirectional Data Synthesis](/202603/23/2603.14239v1-qimeng-codev-sva-training-specialized-llms-for-hardware-assertion-generation-via-rtl-grounded-bidirectional-data-synthesis)  
    标签：评分：7.0/10、query:mc
-   evidence：多模态大语言模型的微调与正则化
-6. [LMetric: Simple is Better - Multiplication May Be All You Need for LLM Request Scheduling](/202603/22/2603.15202v1-lmetric-simple-is-better---multiplication-may-be-all-you-need-for-llm-request-scheduling)  
+   evidence：训练用于硬件断言的专用LLM
+6. [GoldenStart: Q-Guided Priors and Entropy Control for Distilling Flow Policies](/202603/23/2603.14245v1-goldenstart-q-guided-priors-and-entropy-control-for-distilling-flow-policies)  
    标签：评分：7.0/10、query:mc
-   evidence：用于推理加速的LLM请求调度
-7. [100x Cost & Latency Reduction: Performance Analysis of AI Query Approximation using Lightweight Proxy Models](/202603/22/2603.15970v1-100x-cost--latency-reduction-performance-analysis-of-ai-query-approximation-using-lightweight-proxy-models)  
+   evidence：蒸馏流策略以实现快速推理
+7. [GT-PCQA: Geometry-Texture Decoupled Point Cloud Quality Assessment with MLLM](/202603/23/2603.14951v1-gt-pcqa-geometry-texture-decoupled-point-cloud-quality-assessment-with-mllm)  
    标签：评分：7.0/10、query:mc
-   evidence：使用代理模型降低 AI 查询的成本和延迟
-8. [POaaS: Minimal-Edit Prompt Optimization as a Service to Lift Accuracy and Cut Hallucinations on On-Device sLLMs](/202603/22/2603.16045v1-poaas-minimal-edit-prompt-optimization-as-a-service-to-lift-accuracy-and-cut-hallucinations-on-on-device-sllms)  
+   evidence：基于 MLLM 的点云质量评估框架
+8. [VTC-Bench: Evaluating Agentic Multimodal Models via Compositional Visual Tool Chaining](/202603/23/2603.15030v1-vtc-bench-evaluating-agentic-multimodal-models-via-compositional-visual-tool-chaining)  
    标签：评分：7.0/10、query:mc
-   evidence：针对设备端小语言模型的提示词优化
-9. [UVLM: A Universal Vision-Language Model Loader for Reproducible Multimodal Benchmarking](/202603/22/2603.13893v1-uvlm-a-universal-vision-language-model-loader-for-reproducible-multimodal-benchmarking)  
+   evidence：评估智能体多模态模型 (MLLM)
+9. [Next-Frame Decoding for Ultra-Low-Bitrate Image Compression with Video Diffusion Priors](/202603/23/2603.15129v2-next-frame-decoding-for-ultra-low-bitrate-image-compression-with-video-diffusion-priors)  
    标签：评分：6.0/10、query:mc
-   evidence：视觉语言模型的统一加载与基准测试
-10. [The Reasoning Bottleneck in Graph-RAG: Structured Prompting and Context Compression for Multi-Hop QA](/202603/22/2603.14045v2-the-reasoning-bottleneck-in-graph-rag-structured-prompting-and-context-compression-for-multi-hop-qa)  
+   evidence：利用扩散先验的生成式图像压缩
+10. [SOMP: Scalable Gradient Inversion for Large Language Models via Subspace-Guided Orthogonal Matching Pursuit](/202603/23/2603.16761v1-somp-scalable-gradient-inversion-for-large-language-models-via-subspace-guided-orthogonal-matching-pursuit)  
    标签：评分：6.0/10、query:mc
-   evidence：大语言模型推理的上下文压缩
-11. [Adversarial attacks against Modern Vision-Language Models](/202603/22/2603.16960v1-adversarial-attacks-against-modern-vision-language-models)  
+   evidence：LLM梯度中的稀疏信号恢复
+11. [OPERA: Online Data Pruning for Efficient Retrieval Model Adaptation](/202603/23/2603.17205v1-opera-online-data-pruning-for-efficient-retrieval-model-adaptation)  
    标签：评分：6.0/10、query:mc
-   evidence：针对视觉语言模型的对抗性攻击
+   evidence：检索模型适配的数据剪枝
 
 
 <div class="dpr-home-promo-card">
