@@ -1,0 +1,351 @@
+Title: CALVO: Improve Serving Efficiency for LLM Inferences with Intense Network Demands
+
+URL Source: https://arxiv.org/pdf/2603.21257v1
+
+Published Time: Tue, 24 Mar 2026 01:22:13 GMT
+
+Number of Pages: 8
+
+Markdown Content:
+# CALVO: Improve Serving Efficiency for LLM Inferences with Intense Network Demands 
+
+# Weiye Wang 
+
+Shanghai Jiao Tong University 
+
+# Chen Chen ∗
+
+Shanghai Jiao Tong University 
+
+# Junxue Zhang 
+
+University of Science and Technology of China 
+
+# Zhusheng Wang 
+
+Huawei 
+
+# Hui Yuan 
+
+Huawei 
+
+# Zixuan Guan 
+
+Huawei 
+
+# Xiaolong Zheng 
+
+Huawei 
+
+# Qizhen Weng 
+
+Institute of Artificial Intelligence (TeleAI), China Telecom 
+
+# Yin Chen 
+
+Institute of Artificial Intelligence (TeleAI), China Telecom 
+
+# Minyi Guo 
+
+Shanghai Jiao Tong University 
+
+Abstract 
+
+Distributed prefix caching has become a core technique for ef-ficient LLM serving. However, for long-context requests with high cache hit ratios, retrieving reusable KVCache blocks from remote servers has emerged as a new performance bot-tleneck. Such network-intensive LLM inference is expected to become increasingly common as agentic AI workloads continue to grow. However, existing LLM inference engines remain largely compute-centric: they treat KVCache loading as a subordinate phase to GPU execution and often fail to account for its delay explicitly during scheduling. We present CALVO , an LLM serving engine that treats KVCache loading as a first-class concern. CALVO decouples KVCache loading and GPU computation into independently managed, asynchronously progressing stages, enabling bet-ter utilization of network, PCIe, and computation resources. In addition, CALVO incorporates KVCache loading delay as an explicit component of per-request service cost, leading to more accurate scheduling decisions. Experiments on a real testbed with diverse long-context workloads show that 
+
+CALVO substantially improves the efficiency of network-intensive LLM inference, achieving up to 61.67% higher SLO attainment than the baseline. 
+
+1 Introduction 
+
+Large language models (LLMs) have demonstrated versatile capabilities on various real-world tasks like chatbot conversa-tion and code generation [ 9, 25 , 27 ]. Given the surging user demands, LLM service providers need to efficiently serve 
+
+> ∗
+
+Chen Chen is the corresponding author. L2: DRAM L1: VRAM LLM Inference System Controlling Thread L3 L2 L2 L1 L3: Distributed KV Pool Compute Execution Workflow Loading Loading 
+
+> Via Network Via PCIe
+> FIFO Queue Control
+
+Figure 1: Workflow in a typical LLM inference engine (e.g., vLLM) when integrated with a distributed KV-Cache pooling framework (e.g., LMCache). 
+
+the incoming inference requests, for which Time-to-First-Token (TTFT) is a key efficiency metric. In particular, con-fronting the trend of increasing input context length (e.g., for document QA and project-level code completion), pre-fix caching [22 ] is prevalently adopted to optimize TTFT, which, by reusing previously-generated KVCache upon pre-fix match, leverages storage resources for less computation. To host large-volume KVCache in production platforms, distributed caching is often adopted with the LLM inference engine, rendering it a common demand to conduct inter-node KVCache reuse. As reported by existing works [ 22 ], a single node often fails to provide sufficient memory capacity to attain high cache hit ratio. To enlarge the available caching space, KVCache storage frameworks such as Mooncake [ 22 ]and LMCache [ 19 ] combine the DRAM spaces on distributed servers into a shared caching pool. As shown in Fig. 1, be-fore the GPU computation of each inference starts, the LLM engine needs to load the reusable prefix cache from remote 
+
+1
+
+> arXiv:2603.21257v1 [cs.DC] 22 Mar 2026 Wang et al., Weiye Wang, Chen Chen, Junxue Zhang, Zhusheng Wang, Hui Yuan, Zixuan Guan, Xiaolong Zheng, Qizhen Weng, Yin Chen, and Minyi Guo
+
+memory (L3)—first to its local CPU memory (L2) and then to its GPU HBM (L1). While inter-node KVCache reuse can improve the cache hit ratio and reduce redundant computation [ 22 ], it how-ever introduces non-negligible communication overhead. Our empirical measurements show that, when serving a long-context LooGLE dataset [ 13 ] with a distributed KV-Cache pool (with 400 Gbps links), the KVCache loading time may account for over 90% of the TTFT time. We call such in-ference workloads— which rely heavily on prefix caching and have a communication time comparable to computation —as 
+
+network-intensive LLM inferences . With the wide adoption of KVCache pool and the high prompt similarity in popular LLM applications [ 15 ], network-intensive LLM inferences would be increasingly prevalent in production clusters. However, when serving network-intensive LLM inferences, existing LLM service engines [ 12 , 28 ]—designed for conven-tional computation-intensive inference workloads—often fail to attain high efficiency. Those frameworks are designed to be compute-centric , treating cross-node KVCache loading as a subordinate step controlled by the LLM compute scheduler. This design choice leads to two problems. First, the central-ized, compute-centric serving control incurs low utilization of both compute and network resources. Before an infer-ence completes all its stages (i.e., L3-to-L2 loading, L2-to-L1 loading, and GPU computing), no other inferences can si-multaneously utilize the temporally idled resources in any stage, causing substantial resource idling. Second, compute-centric scheduling control often leads to suboptimal service order. When determining the inference service order under contention, existing frameworks rely on simple heuristics like FIFO [ 12 ] or only consider the computation amount [ 6], totally ignoring the KVCache loading delay which is actually a significant part of the overall service cost, and this would compromise the overall TTFT performance. In this paper, we design CALVO , an optimized LLM engine for efficient serving of network-intensive LLM inferences, guided by the design philosophy to treat cross-node KVCache loading as a first-class citizen alongside computation . To be concrete, there are two key techniques in CALVO .First, regarding cross-stage service coordination, CALVO 
+
+decouples control across KVCache loading and computation, so as to fully pipeline the inference serving path. A key chal-lenge is that loading can proceed only after the destination space at the higher storage level has been allocated. To ad-dress this challenge, CALVO manages each KVCache loading stage with an independent dispatcher-executor pair, and lets lower-level dispatchers proactively trigger space allocation at higher levels, so that loading at different stages can overlap as soon as data dependencies are satisfied. Second, regarding inter-inference scheduling order, CALVO 
+
+incorporates the KVCache loading delay of an inference as part of its overall service cost, which is more accurate and can help to optimize the scheduling performance. With sys-tem profiling, we depict the service cost as a binary linear function which joins the factors of KVCache loading and computation. That cost is then used for working out the best scheduling order—respectively for minimizing the average TTFT and for maximizing SLO attainment. 
+
+CALVO is implemented atop vLLM [ 12 ], a mainstream LLM serving engine (together with LMCache [ 19 ], a popular KVCache access interlayer). We further verify the effective-ness of CALVO by conducting a comprehensive evaluation with diverse benchmarks. The results show that, when serv-ing network-intensive LLM inferences, CALVO attains sig-nificantly higher efficiency the status-quo practice, with an improvement of up to 61.67% in SLO attainment of TTFT. 
+
+2 Background and Motivation 2.1 LLM Inference: The Basics 
+
+LLM inference: execution procedures and service objec-tives. Large language models (LLMs) [ 4 , 7 , 26 ] have nowa-days been widely adopted in various fields like finance [ 14 ], arts [ 20 ] and science [ 23 ]. Applying LLM techniques re-quires LLM inference, which contains two phases: prefill 
+
+and decode [30 ]. The prefill phase processes the entire input prompt and constructs the intermediate attention keys and values (known as the KVCache ), which is commonly deemed computation-intensive. To LLM service providers, efficient serving competing inference requests from diverse users is crucial. Specifically, a key service quality metric is the time gap between the request arrival and the generation of the first token, namely Time-To-First-Token (TTFT), which critically affects user experience. In this paper, we primarily consider accelerating the prefill phase 1, and focus on optimizing the TTFT performance. 
+
+Prefix caching: a common technique to save computa-tion cost. Mainstream LLM today now supports context window of 128K-2M tokens, enabling more long-context tasks like long-document QA [ 13 ]. However, increased con-text size also introduces substantial computation demands, yielding a quadratic complexity in prefilling computation [ 11 ]. To mitigate this, production-grade LLM systems widely adopt prefix caching, which stores the KVCache for previously processed text prefixes [ 1 , 18 ]. By reusing KVCache across requests sharing the same prefix, the LLM service system can avoid expensive re-computation during the prefill phase, yielding a much better TTFT performance. For example, as illustrated later in Fig. 2, compared with performing pure 
+
+> 1With the wide adoption of PD disaggregation [ 30 ] as well as the emergence of prefill-only workloads [ 6], it is increasingly common to independently optimize the TTFT performance for the prefill phase. 2CALVO: Improve Serving Efficiency for LLM Inferences with Intense Network Demands
+
+Table 1: Statistics of representative long-context datasets. “Avg. Context” denotes the average number of tokens in the provided context, and “Avg. Query” denotes the average token length of the user query.            
+
+> Num. Reqs Avg. Context Avg. Query LooGLE 120 28 .1𝐾 28
+> ICL 120 28 .3𝐾 61
+> Code 100 38 .3𝐾 209
+
+computation using vLLM, remotely loading the KVCache by vLLM-LMCache can reduce the TTFT by over 88%. 
+
+2.2 Network-Intensive LLM Inference 
+
+Prevalence of distributed KVCache storage. With the ever-expanding long-context processing demands, the KV-Cache storage consumption keeps booming at a high rate, rendering the KVCache storage space on a single node eas-ily used up. For instance, when serving inference with the Llama-3.1-8B model, the KVCache for merely 10M tokens would consume a storage space of over 1TB. To accommo-date the large-volume KVCache content with relatively high speed (SSD, HDD or cloud storage platforms like S3 is of-ten too slow), modern LLM service providers [ 22 ] often join the idled memory on different servers into a distributed KV-Cache pool [ 19 , 22 , 29 ], which is then plugged to the LLM inference engine [12, 28]. As previously shown in Fig. 1, there are three storage lay-ers for the KVCache content: L1—the GPU VRAM (HBM), L2—the local CPU DRAM, and L3—the remote CPU DRAM. When a LLM request arrives, it will wait for being scheduled in a FIFO queue. Once a request is scheduled into a com-putation iteration, before the computation starts, the LLM engine needs to load the reusable KVCache content to GPU VRAM. Specifically, the engine first searches for the longest reusable prefix in the KVCache pool; the spotted KVCache prefix (usually on remote host) would be loaded first from L3 to L2 and then from L2 to L1. The inference computation will be triggered once all the KVCache needed by the cur-rent execution batch is done. After computation, the main control thread will go back to fetch a set of waiting requests to execute in the next iteration. 
+
+KVCache loading: an emerging bottleneck for LLM in-ference. In typical LLM applications, an LLM inference in-put is composed of two parts: a static application-context and a dynamic user-query . The KVCache content of the shared context is usually reusable across different requests, with run-time computation only needed for processing the user query. In particular, with the in-depth adoption of LLM techniques, the static contexts in many applications are increasingly com-plex and lengthy. As shown later in Tab. 1, scenarios such as 4K 8K 16K 32K 48K 64K 96K 
+
+> Token Length of Context
+> 0
+> 2
+> 4
+> 6
+> TTFT (s)
+> vLLM-Compute
+> vLLM-LMCache-Load
+> vLLM-LMCache-Compute
+
+Figure 2: Breakdown of TTFT when a Llama-3.1-8B model serves requests with varying context-token length (to load from a remote server) yet fixed query-token length. From the figure we learn that KVCache reusing can effectively reduce TTFT, yet KVCache load-ing now becomes a major bottleneck. 
+
+long document QA and project-level code completion task involve extremely long contexts (e.g., an average of 28.1K tokens in LooGLE [ 13 ]), whereas the corresponding user queries are relatively short (e.g., only 28 tokens on average). This highlights an increasingly common pattern in the era of agentic AI era [15, 23]: long context, short query .Since KVCache reusing essentially trades storage for com-putation efficiency, a larger context-to-query ratio (i.e., a higher cache hit ratio) would shift the bottleneck from KV-Cache processing (computation) to KVCache loading (com-munication). Fig. 2 shows the TTFT breakdown when serv-ing a single request with varying context lengths yet a fixed query length (1000); the KVCache is loaded from a remote server following the setup in §4.1. It clearly demonstrates that, while KVCache reusing can help to reduce the overall TTFT, the ratio of KVCache loading in TTFT keeps increas-ing, becoming an remarkable performance bottleneck. For such LLM workloads with a high cache reuse ratio, since network transmission time is a key building block of their KVCache loading delay, we call them as network-intensive LLM inference . As LLM applications become more complex, it can be expected that network-intensive LLM inference would be a mainstream LLM workload type in the future. Therefore, in this paper we focus on efficiency (TTFT) optimizations of network-intensive LLM inferences. 
+
+2.3 Inefficiencies of Existing Practices 
+
+While network-intensive LLM inferences are increasingly popular, existing LLM serving engines [ 12 , 28 ] still follow the legacy design for conventional computation-dominate LLM workloads. Our study shows that their compute-centric de-sign renders themselves high inefficient for network-intensive inferences, and there are two reasons for that. 
+
+2.3.1 Low resource utilization due to centralized, compute-centric control of the entire serving workflow. Different KV-Cache processing stages in Fig. 1 require different resource 
+
+> 3
+
+Wang et al., Weiye Wang, Chen Chen, Junxue Zhang, Zhusheng Wang, Hui Yuan, Zixuan Guan, Xiaolong Zheng, Qizhen Weng, Yin Chen, and Minyi Guo vLLM-LMCache CALVO 
+
+> 0
+> 10000
+> 20000
+> 30000
+> 40000
+> 50000
+> 60000
+> 70000
+> Token Loading Rate (Token/s)
+> 160
+> 180
+> 200
+> 220
+> 240
+> Compute Rate (Token/s) Load
+> Compute
+
+Figure 3: Per-stage pro-cessing throughput in vLLM-LMCache is suboptimal (the throughput of our later proposed CALVO system is shown for comparison). R1 First (R1->R2) 
+
+> R2 First (R2->R1)
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> Timestamp (Second)
+> R1 Load
+> R1 Compute
+> R2 Load
+> R2 Compute
+
+Figure 4: Given two network-intensive requests, FIFO or compute-based SJF may prolong the average TTFT. 
+
+types: network bandwidth for L3 →L2, PCIe bandwidth for L2 →L1, and GPU processors for computation. However, the current LLM engines exemplified by vLLM adopts a central-ized (single-threaded) control over the entire workflow: each stage (including the computation stage) is triggered passively as instructed by the main thread. Such a centralized control is reasonable for conventional LLM workloads where there is no runtime KVCache loading, but no longer so for the emerging network-intensive LLM inferences: for which a centralized control is straightforward. when the KVCache blocks of one inference request step to the next stage, the idled resources cannot be immediately used to serve other pending requests, leading to poor resource utilization. Our measurements confirm this inefficiency. Specifically, we serve the LooGLE dataset [ 13 ] over the Llama-3.1-8B model, with a workload intensity of 1.2 queries per second. We measure per-stage processing throughput as the peak average throughput within any 20-second interval. In Fig. 3 we compare such per-stage processing throughput under vLLM-LMCache with that under our optimized CALVO en-gine (elaborated later in §3.1). The comparison results clearly demonstrate the resource utilization of current LLM serving frameworks is far from optimal. 
+
+2.3.2 Low scheduling quality due to blindness to KVCache loading costs. On production LLM service backends, a mas-sive number of LLM inference submitted from different users may compete for the limited resources; under such resource contention, the scheduling order critically affects the over-all performance—in terms of the average TTFT value or the overall SLO attainment (in cases where a maximum al-lowable TTFT is associated for each request [ 17 ]). While KVCache loading has become a main performance bottle-neck for network-intensive LLM inference, existing LLM engines are blind to such costs in scheduling. Such blindness compromises the LLM scheduling quality. User Request Context Query Scheduler Priority Estimator Cache Hit Query API Executor L3 L2 Dispatcher - Allocate L2 space - Dispatch task L2 L1 Dispatcher - Allocate L1 space - Dispatch task L3 L2 Executor L2 L1 Executor Compute Executor Compute Context Manager CALVO Component vLLM Component Request Flow Execution Flow Priority Queue Autonomous Execution (1) (2) (3) (4) (5) (7) (6) (8) Batch L3 Loading Concurrent load CUDA streams CALVO Module 
+
+Figure 5: Workflow of CALVO .
+
+To illustrate the impact, we profile the loading and com-putation time of requests from the loogle dataset [ 31 ] with vLLM-LMCache. Consider two sampled requests: R1 (arriv-ing earlier)—requiring 0.361 s to load and 0.019 s to compute, and R2—requiring 0.199 s to load and 0.025 s to compute. A scheduler that enforces naive FIFO or enforces SJF based on only the computation time [ 6] would prioritize R1, resulting in an average TTFT of 0.49 s. In contrast, another scheduler applying SJF with awareness to the KVCache loading time (prioritizing R2) can reduce the average TTFT to 0.41 s. 
+
+Summary. In summary, the compute-centric nature of ex-isting LLM engines hurts the serving efficiency of network-intensive LLM inferences; to improve, we need to optimize existing LLM service engines in both inter-stage service co-ordination and inter-request queue management. 
+
+3 Solution 
+
+In this section, we present CALVO , an optimized LLM engine that—by treating cross-network KVCache loading as a first-class citizen (stage) equally important to prefill-computation —can efficiently serve network-intensive LLM inferences. As shown in Fig. 5, CALVO is built atop vLLM; its workflow is driven by a priority estimator and multiple loading dis-patcher/executors. By adding the autonomous dispatcher-s/executors, CALVO enhances the resource utilization in each stage; meanwhile, under the new priority estimator, CALVO 
+
+improves the overall scheduling performance with aware-ness to the KVCache loading costs. Next we elaborate the optimizations respectively on the two aspects. 
+
+3.1 Inter-stage Workflow Optimization 
+
+Recall that our previous study shows that, in existing LLM engines, the centralized control of the KVCache processing workflow (across all the stages of L3 → L2 loading, L2 →
+
+L1 loading, and GPU computation) compromises the overall resource utilization. To maximize the resource utilization on each stage under the dataflow dependency, our insight is to equally grant each stage with the autonomy to act 
+
+4CALVO: Improve Serving Efficiency for LLM Inferences with Intense Network Demands 20000 30000 40000 50000 60000 
+
+> Number of context tokens to load
+> 0.2
+> 0.4
+> Loading latency
+> Data point
+> Fitted Linear Model
+
+Figure 6: Relationship between loading latency and the number of context tokens to load, when serving Llama-3.1-8B model, following the setup in §4.1. 
+
+independently—similar to the classical dynamic scheduling 
+
+mechanism in computer architecture design [24]. To that end, in CALVO we let each KVCache loading stage managed by an independent dispatcher-executor pair. As de-picted in Fig. 5, for each loading stage, each dispatcher keeps driving its executor to conduct KVCache loading as long as 
+
+(1) some lower-level KVCache blocks of the highest-priority request are ready to pick up , and (2) the destination storage spaces of those KVCache blocks are allocated . For the compute stage, when all KV-cache blocks required by a request finally become resident in L1 space, it immediately launches the prefilling process, avoiding the compute wastage caused by waiting for loading completion in the critical path. Meanwhile, for smooth cross-stage negotiation, each time a stage completes loading a KVCache block, it would issue a signal to the upper-level stage executor, so as to enable fine-grained loading overlapping. In particular, to let KVCache loading be conducted autonomously, L1 space allocation should not be triggered by the compute stage in a reactive manner, which would block KVCache preloading; instead, in 
+
+CALVO we let the lower-level stage dispatcher proactively 2
+
+trigger space allocation at the higher storage level. Similarly, when the L3 →L2 dispatcher issues a data transfer task to its executor, it will at the same time submit a GPU memory allo-cation request to the L2 →L1 dispatcher, so as to proactively reserve GPU space for pipelined L2 →L1 loading. 
+
+3.2 Inter-request Scheduling Optimization 
+
+To optimize the overall scheduling performance, a prerequi-site is to precisely predict the service cost of each LLM in-ference request; based on the discussion in §2.3.2, in CALVO 
+
+we incorporate the KVCache loading delay as an indepen-dent component of the overall cost when serving a network-intensive LLM inference. Specifically, with offline system profiling, we fit out a binary linear function as the perfor-mance model, which respectively captures (1) 𝑇 load —loading latency as a function of the number of context tokens (which 
+
+> 2
+
+While such proactive space allocation may take additional GPU memory space, since the prefill phase is computation-bound, trading additional memory consumption for faster execution is usually acceptable. In the extreme case where the available space in GPU memory in not enough, this method simply degrades to the reactive allocation method. 10 0                
+
+> 10 1
+> Average TTFT (s)
+> LooGLE
+> Llama-3.1-8B
+> 10 0
+> 10 1
+> Qwen2.5-14B-Instruct-1M
+> 10 0
+> 10 1
+> Average TTFT (s)
+> ICL
+> 10 0
+> 10 1
+> 0.5 0.7 11.2 1.5 234
+> QPS (queries per second)
+> 10 1
+> Average TTFT (s)
+> Code
+> 0.5 0.7 11.2 1.5 234
+> QPS (queries per second)
+> 10 1
+> vLLM-LMCache CALVO w/o scheduling optim. CALVO
+
+Figure 7: Performance on Average TTFT Latency. 
+
+is linear as measured by Fig. 6), and (2) 𝑇 comp —computation latency as a function of the number of query tokens. We then leverage the modeled prefill cost to optimize the scheduling policy. For different efficiency objective forms, this translates to different scheduling algorithms. (1) To optimize the average TTFT of competing inference requests, we apply the Shortest-Job-First (SJF) principle with the estimated prefill cost, which is known to be optimal [ 5 ]. (2) To optimize the overall SLO attainment (in cases where each request is associated as a TTFT deadline at submission time), we apply the Least-Slack-Time-First (LSTF) principle, which is optimal for SLO attainment ratio [ 16 ]. For each incoming request, LSTF computes its slack time by LST =
+
+DDL − 𝑇 load − 𝑇 comp . The computed per-request LST serves as the priority of the corresponding request—with a smaller LST value indicating a higher urgency. 
+
+4 Evaluation 4.1 Experimental Setup 
+
+Implementation. We implement 3 CALVO on top of vLLM (v0.9.1) [ 12 ] and LMCache (v0.3.1) [ 19 ] with 3.3K lines of code, and we use Mooncake Store [ 22 ] as the L3 KVCache storage backend; all those frameworks are representative in production environments. To enable direct communication between loading dispatchers and loading executors without 
+
+> 3
+
+For fair comparison, we identified and optimized two performance issues in vLLM-LMCache, which are orthogonal to our contributions. First, to ensure LMCache fully utilize loading bandwidth, we use Mooncake’s batch_get_-into interface for L3 →L2 transfers, and we issue multiple L2 →L1 load kernels on different CUDA streams to better utilize PCIe bandwidth. Second, we restrict vLLM-LMCache to prefill only one request at a time, preventing incorrect batching decisions by vLLM default scheduler. 5Wang et al., Weiye Wang, Chen Chen, Junxue Zhang, Zhusheng Wang, Hui Yuan, Zixuan Guan, Xiaolong Zheng, Qizhen Weng, Yin Chen, and Minyi Guo 50              
+
+> 100
+> SLO Attainment (%)
+> LooGLE
+> Llama-3.1-8B Qwen2.5-14B-Instruct-1M
+> 50
+> 100
+> SLO Attainment (%)
+> ICL
+> 0.5 0.7 11.2 1.5 2
+> QPS (queries per second)
+> 50
+> 100
+> SLO Attainment (%)
+> Code
+> 0.5 0.7 11.2 1.5 2
+> QPS (queries per second)
+> vLLM-LMCache CALVO w/o scheduling optim. CALVO
+
+Figure 8: Performance on TTFT SLO Attainment. 
+
+interrupting the main computation loop of vLLM, we use the ZeroMQ library [ 10 ] to implement inter-process communi-cation between worker process and scheduler process. To make the vLLM scheduler agnostic to KV-cache loading, we override the add_request() function of the vLLM scheduler to intercept inference requests, preventing them from being enqueued in vLLM’s FIFO computation scheduler queue. 
+
+Hardware platform. The evaluation is conducted on one GPU node equipped with an 80 GB GPU and 128 GB CPU DRAM. The remote CPU DRAM pool consists of a CPU node with 512 GB DRAM; the two nodes are interconnected via RDMA with a 400 Gbps bandwidth link, all representative in modern GPU clusters. 
+
+Workloads. We utilize two popular open-source LLMs with long context capabilities: Llama-3.1-8B-Instruct [ 2 ] and Qwen2.5-14B-Instruct-1M [ 25 ]. Meanwhile, we construct the test suite by sampling contexts and corresponding queries from the three long context datasets: LooGLE [ 13 ] includes long documents from diverse sources such as arXiv, Wikipedia; 
+
+ICL [31 ] features many-shot In-Context Learning tasks from diverse domains such as classification, summarization, rea-soning, and translation; Code [ 3 ] covers varying coding tasks for LLM, and we use its project level code completion tasks for our evaluation. The statistics of these datasets are de-scribed in Tab. 1. Besides, since request arrival intervals are not available in these datasets, we simulate them following the Poisson distribution with different query intensities. 
+
+4.2 End-to-end Performance 
+
+Average TTFT. We first evaluate the end-to-end perfor-mance of CALVO under diverse QPS rates. As shown in Fig. 7, FIFO 
+
+> SJF-PT
+> SJF
+> Policy
+> 8
+> 10
+> Average TTFT (s)
+
+Figure 9: Comparison of different scheduling poli-cies in Average TTFT. FIFO 
+
+> EDF
+> LSTF
+> Policy
+> 40%
+> 60%
+> 80%
+> SLO Attainment (%)
+
+Figure 10: Comparison of different scheduling poli-cies in SLO Attainment. 
+
+regarding the average TTFT performance, CALVO substan-tially outperforms the default baseline (vLLM-LMCache) as well as its variant without scheduling optimization (Use FIFO scheduling policy). For example, for the ICL dataset, when QPS is 1.2, CALVO can reduce the average TTFT by over 81.3%. Moreover, by comparing CALVO with its FIFO variant, we learn that scheduling optimization in CALVO is indeed indispensable for optimizing the overall performance effi-ciency. 
+
+SLO Attainment. To check SLO attainment performance, we further assign each request with a TTFT SLO, by scal-ing its TTFT measured under interference-free conditions with a factor uniformly sampled from {2×, 4×, 8×} , which is similar to prior works [ 8, 21 ]. The results in Fig. 8 confirm the performance superiority of CALVO : in each case, the SLO attainment under CALVO is consistently better than the baselines. Specifically, when the QPS is 1.2, the SLO attain-ment of CALVO is 61.67% higher than the vLLM-LMCache baseline. 
+
+4.3 Micro-benchmark Analysis 
+
+Superiority of binary cost modeling. In inference sched-uling, another choice of cost modeling is to simply use the prefill token number (we call the resultant scheduling method as SJF-PT ). We thus compare CALVO (with the SJF policy integrated) against SJF-PT in Fig. 9, where each inference request is assigned a cache hit ratio randomly sampled from 25%, 50%, 75% and 100%. Fig. 9 suggests that, when not using the binary linear function for cost modeling, the estimated scheduling priority would be highly inaccurate, rendering the TTFT even worse than FIFO. 
+
+Superiority of LSTF. We also compare CALVO (with the LSTF policy integrated) with the Earliest Deadline First (EDF) policy, the latter not relying on the request service cost. As shown in Fig. 10, with the concrete knowledge of inference service cost, LSTF can make higher-quality scheduling de-cisions than the static EDF policy ( 73% versus 58% ). This confirms the need to leverage the information of KVCache loading cost in scheduling. 
+
+> 6
+
+CALVO: Improve Serving Efficiency for LLM Inferences with Intense Network Demands 25 50 100 
+
+> Cache Hit Ratio of Context (%)
+> 0
+> 10
+> 20
+> Average TTFT
+> vLLM-LMCache
+> CALVO
+
+Figure 11: Average TTFT under diverse cache hit rates. Sensitivity study on cache hit ratio. We manually set the cache hit ratio respectively to 25%, 50%, 75% and 100%, and Fig. 11 shows the resultant CALVO performance. According to Fig. 11, the average TTFT performance is monotonously improving under CALVO as the cache hit ratio increases, suggesting that it is highly desirable to apply CALVO in the coming agentic AI era with high KVCache reusing ratio [ 22 ]. 
+
+5 Conclusion and Future Work 
+
+In this paper, we design CALVO , an optimized LLM engine for efficient serving of network-intensive LLM inference. 
+
+CALVO treats cross-server KVCache loading as a first-class stage to serve, granting autonomy to each stage for higher resource utilization, and also incorporating KVCache load-ing delay as independent cost factor for better scheduling decisions. Evaluations on long-context datasets show that 
+
+CALVO can effectively enhance the serving efficiency of network-intensive LLM inferences in average TTFT and SLO attainment. In the future, we plan to extend CALVO to accelerate agentic AI workflows, which requires the correlated KV-Cache loading tasks be scheduled in a coordinated manner. Meanwhile, we also plan to apply the network-as-a-first-class-citizen philosophy into production inference system like Mooncake, so as to enhance the request routing perfor-mance as well as to mitigate the network collisions. 
+
+References 
+
+[1] Shubham Agarwal, Sai Sundaresan, Subrata Mitra, Debabrata Maha-patra, Archit Gupta, Rounak Sharma, Nirmal Joshua Kapu, Tong Yu, and Shiv Saini. 2025. Cache-Craft: Managing Chunk-Caches for Ef-ficient Retrieval-Augmented Generation. arXiv. doi:10.48550/arXiv. 2502.15734 [2] Meta AI. [n. d.]. Introducing Llama 3.1: Our Most Capable Models to Date. https://ai.meta.com/blog/meta-llama-3-1/. [3] Egor Bogomolov, Aleksandra Eliseeva, Timur Galimzyanov, Evgeniy Glukhov, Anton Shapkin, Maria Tigina, Yaroslav Golubev, Alexander Kovrigin, Arie van Deursen, Maliheh Izadi, and Timofey Bryksin. 2024. Long Code Arena: A Set of Benchmarks for Long-Context Code Models. arXiv:2406.11612 [cs] doi:10.48550/arXiv.2406.11612 [4] Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, et al . 2020. Language models are few-shot learners. Advances in neural information processing systems 33 (2020), 1877–1901. [5] L. L. Cheng. 1985. A Proof of the Optimality of the Shortest-Job-First Policy for Monotone Processors. Operations Research 33, 5 (1985), 1035–1040. doi:10.1287/opre.33.5.1035 [6] Kuntai Du, Bowen Wang, Chen Zhang, Yiming Cheng, Qing Lan, Hejian Sang, Yihua Cheng, Jiayi Yao, Xiaoxuan Liu, Yifan Qiao, Ion Stoica, and Junchen Jiang. 2025. PrefillOnly: An Inference Engine for Prefill-only Workloads in Large Language Model Applications. In 
+
+Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles . ACM, Lotte Hotel World Seoul Republic of Korea, 399–414. doi:10.1145/3731569.3764834 [7] Luciano Floridi and Massimo Chiriatti. 2020. GPT-3: Its nature, scope, limits, and consequences. Minds and Machines 30 (2020), 681–694. [8] Diandian Gu, Yihao Zhao, Yinmin Zhong, Yifan Xiong, Zhenhua Han, Peng Cheng, Fan Yang, Gang Huang, Xin Jin, and Xuanzhe Liu. 2023. ElasticFlow: An Elastic Serverless Training Platform for Distributed Deep Learning. In Proceedings of the 28th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 . ACM, Vancouver BC Canada, 266–280. doi:10.1145/ 3575693.3575721 [9] Qiuhan Gu. 2023. Llm-based code generation method for golang com-piler testing. In Proceedings of the 31st ACM Joint European Software Engineering Conference and Symposium on the Foundations of Software Engineering . 2201–2203. [10] iMatix Corporation. [n. d.]. ZeroMQ. https://zeromq.org. [11] Huiqiang Jiang, Yucheng Li, Chengruidong Zhang, Qianhui Wu, Xu-fang Luo, Surin Ahn, Zhenhua Han, Amir H. Abdi, Dongsheng Li, Chin-Yew Lin, Yuqing Yang, and Lili Qiu. 2024. MInference 1.0: Accel-erating Pre-filling for Long-Context LLMs via Dynamic Sparse Atten-tion. In Annual Conference on Neural Information Processing Systems 2024, NeurIPS 2024 .[12] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serv-ing with PagedAttention. In Proceedings of the 29th Symposium on Op-erating Systems Principles (SOSP ’23) . Association for Computing Ma-chinery, New York, NY, USA, 611–626. doi:10.1145/3600006.3613165 [13] Jiaqi Li, Mengmeng Wang, Zilong Zheng, and Muhan Zhang. 2024. LooGLE: Can Long-Context Language Models Understand Long Con-texts?. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , Lun-Wei Ku, Andre Martins, and Vivek Srikumar (Eds.). Association for Computational Linguistics, Bangkok, Thailand, 16304–16333. doi:10.18653/v1/2024. acl-long.859 [14] Yinheng Li, Shaofei Wang, Han Ding, and Hang Chen. 2023. Large language models in finance: A survey. In Proceedings of the fourth ACM international conference on AI in finance . 374–382. [15] Chaofan Lin, Zhenhua Han, Chengruidong Zhang, Yuqing Yang, Fan Yang, Chen Chen, and Lili Qiu. 2024. Parrot: Efficient Serving of LLM-based Applications with Semantic Variable. In USENIX OSDI .[16] C. L. Liu and J. W. Layland. 1973. Scheduling Algorithms for Multi-programming in a Hard-Real-Time Environment. J. ACM 20, 1 (1973), 46–61. doi:10.1145/321738.321743 [17] Jiachen Liu, Zhiyu Wu, Jae-Won Chung, Fan Lai, Myungjin Lee, and Mosharaf Chowdhury. 2024. Andes: Defining and Enhancing Quality-of-Experience in LLM-Based Text Streaming Services. [18] Yuhan Liu, Hanchen Li, Yihua Cheng, Siddhant Ray, Yuyang Huang, Qizheng Zhang, Kuntai Du, Jiayi Yao, Shan Lu, Ganesh Anantha-narayanan, Michael Maire, Henry Hoffmann, Ari Holtzman, and Junchen Jiang. 2024. CacheGen: KV Cache Compression and Stream-ing for Fast Large Language Model Serving. In Proceedings of the ACM SIGCOMM 2024 Conference . ACM, Sydney NSW Australia, 38–56. doi:10.1145/3651890.3672274 [19] LMCache. [n. d.]. LMCache. https://lmcache.ai/. [20] Christos Makridis. 2025. The Impact of Generative Artificial Intelli-gence on Artists. Available at SSRN (2025). 7Wang et al., Weiye Wang, Chen Chen, Junxue Zhang, Zhusheng Wang, Hui Yuan, Zixuan Guan, Xiaolong Zheng, Qizhen Weng, Yin Chen, and Minyi Guo 
+
+[21] Deepak Narayanan, Keshav Santhanam, and Amar Phanishayee. 2023. Heterogeneity-Aware Cluster Scheduling Policies for Deep Learning Workloads. In ASPLOS 23 .[22] Ruoyu Qin, Zheming Li, Weiran He, Jialei Cui, Feng Ren, Mingxing Zhang, Yongwei Wu, Weimin Zheng, and Xinran Xu. 2025. Mooncake: Trading More Storage for Less Computation — A KVCache-centric Architecture for Serving LLM Chatbot. In 23rd USENIX Conference on File and Storage Technologies (FAST 25) . USENIX Association, Santa Clara, CA, 155–170. [23] Shuo Ren, Pu Jian, Zhenjiang Ren, Chunlin Leng, Can Xie, and Jiajun Zhang. 2025. Towards Scientific Intelligence: A Survey of LLM-based Scientific Agents. arXiv preprint arXiv:2503.24047 (2025). [24] John Paul Shen and Mikko H. Lipasti. 1995. The Microarchitecture of Superscalar Processors. Proc. IEEE 83, 12 (1995), 1603–1623. doi:10. 1109/5.476077 [25] Qwen Team. 2025. Qwen2.5-1M: Deploy Your Own Qwen with Context Length up to 1M Tokens. https://qwenlm.github.io/blog/qwen2.5-1m/. [26] Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timothée Lacroix, Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, et al . 2023. Llama: Open and efficient foundation language models. arXiv preprint arXiv:2302.13971 (2023). [27] Junchao Wu, Shu Yang, Runzhe Zhan, Yulin Yuan, Lidia Sam Chao, and Derek Fai Wong. 2025. A survey on LLM-generated text detection: Necessity, methods, and future directions. Computational Linguistics 
+
+(2025), 1–66. [28] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. SGLang: Effi-cient Execution of Structured Language Model Programs. In Advances in Neural Information Processing Systems , A. Globerson, L. Mackey, D. Belgrave, A. Fan, U. Paquet, J. Tomczak, and C. Zhang (Eds.), Vol. 37. Curran Associates, Inc., 62557–62583. [29] Zhiqiang Xie. [n. d.]. SGLang HiCache: Fast Hierarchical KV Caching with Your Favorite Storage Backends | LMSYS Org. https://lmsys.org/blog/2025-09-10-sglang-hicache. [30] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-anzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . USENIX Association, Santa Clara, CA, 193–210. [31] Kaijian Zou, Muhammad Khalifa, and Lu Wang. 2025. On Many-Shot In-Context Learning for Long-Context Evaluation. In Proceed-ings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , Wanxiang Che, Joyce Nabende, Ekaterina Shutova, and Mohammad Taher Pilehvar (Eds.). Associ-ation for Computational Linguistics, Vienna, Austria, 25605–25639. doi:10.18653/v1/2025.acl-long.1245 8
