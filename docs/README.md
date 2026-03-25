@@ -6,112 +6,85 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-03-24
-- 运行时间：2026-03-24 20:00:30 UTC
+- 最新运行日期：2026-03-25
+- 运行时间：2026-03-25 19:58:34 UTC
 - 运行状态：成功
-- 本次总论文数：30
-- 精读区：19
-- 速读区：11
+- 本次总论文数：21
+- 精读区：11
+- 速读区：10
 
 ### 今日简报（AI）
-今日深度研读 30 篇 AI 论文，重点攻克视频大模型无损加速与多模态模型的高效剪枝难题。
-核心结论指出 ParallelVLM 可通过视觉对齐实现并行投机解码加速，而领域感知层选择则是优化 VLM 剪枝的关键。
-建议普通读者关注多模态模型在长上下文推理与效率平衡上的最新技术趋势。
-- 详情：[/202603/24/README](/202603/24/README)
+今日深度复盘 21 篇 AI 顶刊，重点攻克 LLM 量化压缩与低秩蒸馏的理论天花板。
+DAQ 增量感知量化与低秩知识蒸馏技术双双斩获满分，为模型轻量化提供了严谨的收敛性与泛化保证。
+建议进一步探索长文本推理中的条件内存访问及视频扩散模型的 6-bit 量化，以实现更高效的端侧部署。
+- 详情：[/202603/25/README](/202603/25/README)
 
 ### 精读区论文标签
-1. [ParallelVLM: Lossless Video-LLM Acceleration with Visual Alignment Aware Parallel Speculative Decoding](/202603/24/2603.19610v2-parallelvlm-lossless-video-llm-acceleration-with-visual-alignment-aware-parallel-speculative-decoding)  
+1. [DAQ: Delta-Aware Quantization for Post-Training LLM Weight Compression](/202603/25/2603.22324v1-daq-delta-aware-quantization-for-post-training-llm-weight-compression)  
    标签：评分：10.0/10、query:mc
-   evidence：通过视觉对齐感知剪枝加速视频LLM
-2. [Understanding Pruning Regimes in Vision-Language Models Through Domain-Aware Layer Selection](/202603/24/2603.20275v1-understanding-pruning-regimes-in-vision-language-models-through-domain-aware-layer-selection)  
+   evidence：用于训练后LLM权重压缩的增量感知量化
+2. [Demystifying Low-Rank Knowledge Distillation in Large Language Models: Convergence, Generalization, and Information-Theoretic Guarantees](/202603/25/2603.22355v1-demystifying-low-rank-knowledge-distillation-in-large-language-models-convergence-generalization-and-information-theoretic-guarantees)  
    标签：评分：10.0/10、query:mc
-   evidence：视觉语言模型 (VLM) 中的结构化解码器层剪枝
-3. [AE-LLM: Adaptive Efficiency Optimization for Large Language Models](/202603/24/2603.20492v1-ae-llm-adaptive-efficiency-optimization-for-large-language-models)  
+   evidence：LLM低秩知识蒸馏的理论框架
+3. [FAAR: Format-Aware Adaptive Rounding for NVFP4](/202603/25/2603.22370v1-faar-format-aware-adaptive-rounding-for-nvfp4)  
    标签：评分：10.0/10、query:mc
-   evidence：包含量化和混合专家在内的LLM效率优化统一框架
-4. [ResPrune: Text-Conditioned Subspace Reconstruction for Visual Token Pruning in Large Vision-Language Models](/202603/24/2603.21105v1-resprune-text-conditioned-subspace-reconstruction-for-visual-token-pruning-in-large-vision-language-models)  
+   evidence：针对LLM的NVFP4格式低比特量化
+4. [ForestPrune: High-ratio Visual Token Compression for Video Multimodal Large Language Models via Spatial-Temporal Forest Modeling](/202603/25/2603.22911v1-forestprune-high-ratio-visual-token-compression-for-video-multimodal-large-language-models-via-spatial-temporal-forest-modeling)  
    标签：评分：10.0/10、query:mc
-   evidence：用于提升多模态大模型推理效率的视觉Token剪枝
-5. [QMoP: Query Guided Mixture-of-Projector for Efficient Visual Token Compression](/202603/24/2603.21232v1-qmop-query-guided-mixture-of-projector-for-efficient-visual-token-compression)  
+   evidence：针对视频多模态大语言模型的Token剪枝
+5. [Sparser, Faster, Lighter Transformer Language Models](/202603/25/2603.23198v1-sparser-faster-lighter-transformer-language-models)  
    标签：评分：10.0/10、query:mc
-   evidence：通过剪枝进行多模态模型压缩
-6. [Uncertainty-Aware Knowledge Distillation for Multimodal Large Language Models](/202603/24/2603.21426v1-uncertainty-aware-knowledge-distillation-for-multimodal-large-language-models)  
-   标签：评分：10.0/10、query:mc
-   evidence：针对多模态大语言模型的不确定性感知知识蒸馏
-7. [Rethinking Token Reduction for Large Vision-Language Models](/202603/24/2603.21701v1-rethinking-token-reduction-for-large-vision-language-models)  
-   标签：评分：10.0/10、query:mc
-   evidence：大型视觉语言模型的Token减少技术
-8. [Nemotron-Cascade 2: Post-Training LLMs with Cascade RL and Multi-Domain On-Policy Distillation](/202603/24/2603.19220v2-nemotron-cascade-2-post-training-llms-with-cascade-rl-and-multi-domain-on-policy-distillation)  
+   evidence：LLM的非结构化稀疏与高效稀疏计算
+6. [ME-IQA: Memory-Enhanced Image Quality Assessment via Re-Ranking](/202603/25/2603.20785v1-me-iqa-memory-enhanced-image-quality-assessment-via-re-ranking)  
    标签：评分：9.0/10、query:mc
-   evidence：LLM的多领域在线策略蒸馏
-9. [Mix-and-Match Pruning: Globally Guided Layer-Wise Sparsification of DNNs](/202603/24/2603.20280v1-mix-and-match-pruning-globally-guided-layer-wise-sparsification-of-dnns)  
+   evidence：推理诱导的视觉语言模型 (VLM)
+7. [CoVFT: Context-aware Visual Fine-tuning for Multimodal Large Language Models](/202603/25/2603.21077v1-covft-context-aware-visual-fine-tuning-for-multimodal-large-language-models)  
    标签：评分：9.0/10、query:mc
-   evidence：面向边缘部署的分层稀疏化与剪枝
-10. [KV Cache Optimization Strategies for Scalable and Efficient LLM Inference](/202603/24/2603.20397v1-kv-cache-optimization-strategies-for-scalable-and-efficient-llm-inference)  
+   evidence：多模态大语言模型（MLLM）的视觉微调
+8. [Latent Semantic Manifolds in Large Language Models](/202603/25/2603.22301v1-latent-semantic-manifolds-in-large-language-models)  
    标签：评分：9.0/10、query:mc
-   evidence：LLM KV缓存压缩与优化技术的系统综述
-11. [Beyond Token Eviction: Mixed-Dimension Budget Allocation for Efficient KV Cache Compression](/202603/24/2603.20616v1-beyond-token-eviction-mixed-dimension-budget-allocation-for-efficient-kv-cache-compression)  
+   evidence：大语言模型隐藏状态的几何分析
+9. [Mitigating Premature Discretization with Progressive Quantization for Robust Vector Tokenization](/202603/25/2603.22304v1-mitigating-premature-discretization-with-progressive-quantization-for-robust-vector-tokenization)  
    标签：评分：9.0/10、query:mc
-   evidence：用于高效Transformer推理的KV缓存压缩
-12. [Structural Sensitivity in Compressed Transformers: Error Propagation, Lyapunov Stability, and Formally Verified Bounds](/202603/24/2603.20991v1-structural-sensitivity-in-compressed-transformers-error-propagation-lyapunov-stability-and-formally-verified-bounds)  
+   evidence：多模态大语言模型分词的渐进式量化
+10. [EchoKV: Efficient KV Cache Compression via Similarity-Based Reconstruction](/202603/25/2603.22910v1-echokv-efficient-kv-cache-compression-via-similarity-based-reconstruction)  
    标签：评分：9.0/10、query:mc
-   evidence：压缩Transformer与LLM的敏感度分析
-13. [DyGeoVLN: Infusing Dynamic Geometry Foundation Model into Vision-Language Navigation](/202603/24/2603.21269v1-dygeovln-infusing-dynamic-geometry-foundation-model-into-vision-language-navigation)  
+   evidence：通过相似性重构进行LLM的KV缓存压缩
+11. [VISion On Request: Enhanced VLLM efficiency with sparse, dynamically selected, vision-language interactions](/202603/25/2603.23495v1-vision-on-request-enhanced-vllm-efficiency-with-sparse-dynamically-selected-vision-language-interactions)  
    标签：评分：9.0/10、query:mc
-   evidence：用于视觉语言导航的自适应分辨率 Token 剪枝
-14. [ALADIN:Attribute-Language Distillation Network for Person Re-Identification](/202603/24/2603.21482v1-aladinattribute-language-distillation-network-for-person-re-identification)  
-   标签：评分：9.0/10、query:mc
-   evidence：从CLIP到轻量级学生模型的蒸馏
-15. [SSAM: Singular Subspace Alignment for Merging Multimodal Large Language Models](/202603/24/2603.21584v1-ssam-singular-subspace-alignment-for-merging-multimodal-large-language-models)  
-   标签：评分：9.0/10、query:mc
-   evidence：合并多模态大语言模型（MLLM）以处理多种模态
-16. [CurvZO: Adaptive Curvature-Guided Sparse Zeroth-Order Optimization for Efficient LLM Fine-Tuning](/202603/24/2603.21725v1-curvzo-adaptive-curvature-guided-sparse-zeroth-order-optimization-for-efficient-llm-fine-tuning)  
-   标签：评分：9.0/10、query:mc
-   evidence：用于高效LLM微调的稀疏零阶优化
-17. [Unified Spatiotemporal Token Compression for Video-LLMs at Ultra-Low Retention](/202603/24/2603.21957v1-unified-spatiotemporal-token-compression-for-video-llms-at-ultra-low-retention)  
-   标签：评分：9.0/10、query:mc
-   evidence：视频LLM的Token压缩
-18. [Dual-Space Knowledge Distillation with Key-Query Matching for Large Language Models with Vocabulary Mismatch](/202603/24/2603.22056v1-dual-space-knowledge-distillation-with-key-query-matching-for-large-language-models-with-vocabulary-mismatch)  
-   标签：评分：9.0/10、query:mc
-   evidence：词表不匹配情况下的LLM知识蒸馏
-19. [Gumbel Distillation for Parallel Text Generation](/202603/24/2603.22216v1-gumbel-distillation-for-parallel-text-generation)  
-   标签：评分：9.0/10、query:mc
-   evidence：用于并行文本生成的蒸馏技术
+   evidence：通过稀疏视觉-语言交互增强VLLM效率
 
 ### 速读区论文标签
-1. [Grounded Chess Reasoning in Language Models via Master Distillation](/202603/24/2603.20510v1-grounded-chess-reasoning-in-language-models-via-master-distillation)  
+1. [Learning When to Attend: Conditional Memory Access for Long-Context LLMs](/202603/25/2603.17484v1-learning-when-to-attend-conditional-memory-access-for-long-context-llms)  
    标签：评分：8.0/10、query:mc
-   evidence：将专家系统推理蒸馏到语言模型中
-2. [MKA: Memory-Keyed Attention for Efficient Long-Context Reasoning](/202603/24/2603.20586v1-mka-memory-keyed-attention-for-efficient-long-context-reasoning)  
+   evidence：长文本LLM的高效内存访问与注意力跳过
+2. [6Bit-Diffusion: Inference-Time Mixed-Precision Quantization for Video Diffusion Models](/202603/25/2603.18742v1-6bit-diffusion-inference-time-mixed-precision-quantization-for-video-diffusion-models)  
    标签：评分：8.0/10、query:mc
-   evidence：通过KV缓存压缩实现高效长文本LLM推理
-3. [Predictive Regularization Against Visual Representation Degradation in Multimodal Large Language Models](/202603/24/2603.20808v1-predictive-regularization-against-visual-representation-degradation-in-multimodal-large-language-models)  
+   evidence：扩散Transformer的推理时混合精度量化
+3. [MKA: Memory-Keyed Attention for Efficient Long-Context Reasoning](/202603/25/2603.20586v2-mka-memory-keyed-attention-for-efficient-long-context-reasoning)  
    标签：评分：8.0/10、query:mc
-   evidence：对多模态大语言模型（MLLM）中视觉表示退化的诊断分析与正则化
-4. [CALVO: Improve Serving Efficiency for LLM Inferences with Intense Network Demands](/202603/24/2603.21257v1-calvo-improve-serving-efficiency-for-llm-inferences-with-intense-network-demands)  
+   evidence：针对长文本LLM的高效KV缓存压缩
+4. [Scaling Attention via Feature Sparsity](/202603/25/2603.22300v1-scaling-attention-via-feature-sparsity)  
    标签：评分：8.0/10、query:mc
-   evidence：提高LLM推理的服务效率
-5. [Sparse but not Simpler: A Multi-Level Interpretability Analysis of Vision Transformers](/202603/24/2603.15919v2-sparse-but-not-simpler-a-multi-level-interpretability-analysis-of-vision-transformers)  
+   evidence：通过特征稀疏化扩展注意力机制以实现高效Transformer
+5. [PersonalQ: Select, Quantize, and Serve Personalized Diffusion Models for Efficient Inference](/202603/25/2603.22943v1-personalq-select-quantize-and-serve-personalized-diffusion-models-for-efficient-inference)  
+   标签：评分：8.0/10、query:mc
+   evidence：使用基于LLM的重排序对个性化扩散模型进行量化
+6. [ConsRoute:Consistency-Aware Adaptive Query Routing for Cloud-Edge-Device Large Language Models](/202603/25/2603.21237v1-consrouteconsistency-aware-adaptive-query-routing-for-cloud-edge-device-large-language-models)  
    标签：评分：7.0/10、query:mc
-   evidence：使用Wanda剪枝的Vision Transformer可解释性分析
-6. [Evo-Retriever: LLM-Guided Curriculum Evolution with Viewpoint-Pathway Collaboration for Multimodal Document Retrieval](/202603/24/2603.16455v1-evo-retriever-llm-guided-curriculum-evolution-with-viewpoint-pathway-collaboration-for-multimodal-document-retrieval)  
+   evidence：用于高效大语言模型推理的自适应查询路由
+7. [How Far Can VLMs Go for Visual Bug Detection? Studying 19,738 Keyframes from 41 Hours of Gameplay Videos](/202603/25/2603.22706v1-how-far-can-vlms-go-for-visual-bug-detection-studying-19738-keyframes-from-41-hours-of-gameplay-videos)  
    标签：评分：7.0/10、query:mc
-   evidence：LLM引导的VLM检索课程学习
-7. [CycleCap: Improving VLMs Captioning Performance via Self-Supervised Cycle Consistency Fine-Tuning](/202603/24/2603.18282v1-cyclecap-improving-vlms-captioning-performance-via-self-supervised-cycle-consistency-fine-tuning)  
+   evidence：评估视觉语言模型（VLM）在视觉缺陷检测中的表现
+8. [Pruning for efficient deterministic global optimization over trained ReLU neural networks](/202603/25/2603.23299v1-pruning-for-efficient-deterministic-global-optimization-over-trained-relu-neural-networks)  
    标签：评分：7.0/10、query:mc
-   evidence：通过循环一致性提高VLM性能
-8. [HiMu: Hierarchical Multimodal Frame Selection for Long Video Question Answering](/202603/24/2603.18558v1-himu-hierarchical-multimodal-frame-selection-for-long-video-question-answering)  
-   标签：评分：7.0/10、query:mc
-   evidence：大型视觉语言模型的高效帧选择
-9. [Loc3R-VLM: Language-based Localization and 3D Reasoning with Vision-Language Models](/202603/24/2603.18002v1-loc3r-vlm-language-based-localization-and-3d-reasoning-with-vision-language-models)  
+   evidence：神经网络的非结构化和结构化剪枝
+9. [Efficient Coarse-to-Fine Diffusion Models with Time Step Sequence Redistribution](/202603/25/2603.21348v1-efficient-coarse-to-fine-diffusion-models-with-time-step-sequence-redistribution)  
    标签：评分：6.0/10、query:mc
-   evidence：为MLLM配备3D推理能力
-10. [LRConv-NeRV: Low Rank Convolution for Efficient Neural Video Compression](/202603/24/2603.18261v1-lrconv-nerv-low-rank-convolution-for-efficient-neural-video-compression)  
+   evidence：扩散模型的模型压缩和计算量减少
+10. [A Brief Comparison of Training-Free Multi-Vector Sequence Compression Methods](/202603/25/2603.22434v1-a-brief-comparison-of-training-free-multi-vector-sequence-compression-methods)  
    标签：评分：6.0/10、query:mc
-   evidence：用于高效神经视频压缩和部署的低秩卷积
-11. [CycleCap: Improving VLMs Captioning Performance via Self-Supervised Cycle Consistency Fine-Tuning](/202603/24/2603.18282v2-cyclecap-improving-vlms-captioning-performance-via-self-supervised-cycle-consistency-fine-tuning)  
-   标签：评分：6.0/10、query:mc
-   evidence：通过自监督微调提高VLM性能
+   evidence：Token剪枝与合并在序列压缩中的比较
 
 
 <div class="dpr-home-promo-card">
