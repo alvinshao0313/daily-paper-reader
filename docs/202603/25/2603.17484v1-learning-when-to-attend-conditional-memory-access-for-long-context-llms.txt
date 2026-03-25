@@ -1,0 +1,1635 @@
+Title: Learning When to Attend: Conditional Memory Access for Long-Context LLMs
+
+URL Source: https://arxiv.org/pdf/2603.17484v1
+
+Published Time: Thu, 19 Mar 2026 01:00:05 GMT
+
+Number of Pages: 26
+
+Markdown Content:
+# Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+Sakshi Choudhary * 1 Aditya Chattopadhyay * 2 Luca Zancato 2 Elvis Nunez 2 Matthew Trager 2 Wei Xia 2
+
+Stefano Soatto 2
+
+Abstract 
+
+Language models struggle to generalize beyond pretraining context lengths, limiting long-horizon reasoning and retrieval. Continued pretraining on long-context data can help but is expensive due to the quadratic scaling of Attention. We observe that most tokens do not require (Global) Attention over the entire sequence and can rely on local context. Based on this, we propose L2A 
+
+(Learning To Attend), a layer that enables con-ditional (token-wise) long-range memory access by deciding when to invoke global attention. We evaluate L2A on Qwen 2.5 and Qwen 3 models, extending their effective context length from 32K to 128K tokens. L2A matches the performance of standard long-context training to within 3% while skipping Global Attention for ∼80% of tokens, outperforming prior baselines. We also design custom Triton kernels to efficiently implement this token-wise conditional Attention on GPUs, achieving up to ∼2× improvements in training throughput and time-to-first-token over FlashAt-tention. Moreover, L2A enables post-training pruning of highly sparse Global Attention lay-ers, reducing KV cache memory by up to 50% with negligible performance loss. 
+
+1. Introduction 
+
+Consider a 100,000-token document. A sentence discussing “therefore the quarterly revenue is” likely depends mostly on the preceding summary paragraphs, but a phrase like “as mentioned in Section 2” may require retrieving information from thousands of tokens earlier. Standard Attention treats both cases identically, this uniformity is wasteful: most tokens don’t need to look far in the past, yet all pay the quadratic cost of Global Attention. 
+
+> *
+
+Equal contribution . Work done during an internship at AWS Agentic AI. 1Department of Electrical and Computer Engineering, Purdue University, USA 2AWS Agentic AI, USA. Correspondence to: Aditya Chattopadhyay <achatto@amazon.com >.
+
+Preprint. March 19, 2026. 
+
+Figure 1. Overview of L2A , a sequence modeling layer with token-wise conditional routing. All tokens are first processed by Local Attention. Next, tokens with routing decision dt = 1 invoke Global Attention, whereas tokens with dt = 0 bypass it. This enables efficient long-context modeling by invoking expensive Global Attention only when needed. We refer to the combined 
+
+{Local Attention + L2A Block } as the L2A layer. 
+
+This observation suggests the following question: can a model decide, token by token, when to access its long-term memory, and not just what to retrieve from it? We are interested in this problem since Large Language Models (LLMs) are being increasingly deployed in long-context scenarios such as multi-turn conversations (Maha-rana et al., 2024) and debugging long code repositories (Jimenez et al., 2023). However, training long-context LLMs is computationally expensive due to the quadratic complexity of Attention (Liu et al., 2024a), which enables it to perform verbatim lookup over its entire past (Zancato et al., 2024). Prior work on efficient long-context modeling has focused on a different question: what information to retrieve from the past. Methods like Native Sparse Attention (Yuan et al., 2025), Expansion Span (Nunez et al., 2025) and Landmark Attention (Nunez et al., 2025) sparsify the key-value pairs that each query attends to, selecting or compressing a fixed subset of the context. These approaches apply the same retrieval budget to every token, regardless of whether that token actually needs distant information. The result is a one-size-fits-all sparsity pattern that cannot adapt to the varying complexity of user’s queries. 1                 
+
+> arXiv:2603.17484v1 [cs.CL] 18 Mar 2026 Learning When to Attend: Conditional Memory Access for Long-Context LLMs
+> Figure 2. Long-context performance and efficiency of L2A at 128K context length. Left : Performance comparison of L2A against CLP for base model and other baselines on Qwen 2.5 7B, where L2A outperforms existing approaches. Right : Kernel-level speedups achieved by L2A relative to FlashAttention-2, with ∼10 ×and ∼8×speedups for the forward and backward passes at upto 90% sparsity in practice.
+
+We introduce L2A , a sequence modeling layer that adap-tively determines, at each token, whether to apply Global Attention (Attention applied to the whole context) or rely solely on local short-context Attention (Figure 1). Specif-ically, L2A first computes Local Attention over the recent past, the resulting output is then passed to a learned routing function that decides whether Global Attention is required. Tokens that trigger Global Attention retrieve information from the full context, while others retain only their local rep-resentations. In this way, L2A treats Global Attention as a selective long-term memory retrieval mechanism and Local Attention as a short-term memory for capturing immediate contextual dependencies. 
+
+L2A is trained with a standard next-token prediction objec-tive, along with a regularizer that encourages sparsity in the number of tokens invoking Global Attention. In our exper-iments, we show that this strategy preserves long-context performance while substantially reducing the computational cost of long-context fine-tuning. A key distinction between L2A and prior sparse or approx-imate Attention methods lies in where sparsity is applied. Existing approaches compute Attention for every query over a sparsified set of past key–value tokens (Yuan et al., 2025; Chen et al., 2024), whereas L2A computes exact Attention over the full context, but only for a sparse subset of query tokens. Hence, as alluded to before, prior work focuses on what information to access from the past, our approach focuses on when to access it. This enables token-wise condi-tional Global Attention that adapts to the query complexity, which is often unknown a priori. For instance, in needle-in-a-haystack tasks (Kamradt, 2024), long-term memory access might be needed only at specific token positions, whereas for in-context learning, Global Attention may be triggered frequently to compare and reuse provided examples. To translate this algorithmic sparsity into real wall-clock speedups, we design custom Triton kernels that yield up to 
+
+2× improvement in training throughput and time-to-first-token compared to FlashAttention-2 (FA-2) (Dao, 2023), which applies Global Attention uniformly to all tokens. L2A 
+
+is implemented as a drop-in replacement for standard At-tention layers, enabling direct fine-tuning of off-the-shelf LLMs at long context lengths via continued pre-training. Empirically, we demonstrate that L2A extends the context length of Qwen2.5 and Qwen3 models from 32K to 128K tokens. Across long-context benchmarks such as HELMET (Yen et al., 2025), BabiLong (Kuratov et al., 2024), and MRCR (Vodrahalli et al., 2024), L2A matches the perfor-mance of models trained with (exact) Attention over long contexts—a training practice commonly referred to as Con-tinued Long-Context Pre-training (CLP)—within 1.5–3%, while reducing training costs by allowing 75–80% of to-kens to skip Global Attention. Moreover, across different model scales (1.5B and 7B), L2A consistently outperforms sparse Attention-based training methods (Native Sparse At-tention (Yuan et al., 2025), S 2-Attn(Chen et al., 2024)) and training-free baselines (Dual Chunk Attention (An et al., 2024), SelfExtend (Jin et al., 2024). Figure 2 presents an overview of these results. Despite L2A ’s selectivity and higher efficiency, it requires storing the whole past KV cache, which can still be expen-sive for very long sequences. To address this, we propose a post-training layer-pruning strategy that retains only a lo-cal cache (4K tokens) for layers in which Global Attention is rarely activated (for sparsity ≥ 95% ). Compared to a similarly-sized Transformer, this reduces KV cache size by up to 50% at 128K context length with minimal performance degradation ( ≤ 1% ). 
+
+Paper Contributions. (1) We propose L2A , an efficient training alternative to extend the context length of LLMs through token-wise conditional access to long-term memory. (2) We design Triton kernels that exploit the sparsity arising from conditional long-term memory access to achieve upto 
+
+10 × speedups over FA-2 on modern GPUs. (3) Empirical evaluation shows that L2A extends the context length of 2Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+Qwen2.5 and Qwen3 models from 32K to 128K tokens, matching the performance of continued long-context pre-training while being 2× faster to train. 
+
+2. Preliminaries & Prior Work 
+
+We review the Attention mechanism (Vaswani et al., 2017) and its computational cost, followed by a discussion of prior work on sparse Attention variants. We defer further discussion on context length extrapolation, dynamic routing, and external memory-based approaches to Section B. 
+
+Attention Mechanism. For an input sequence of token embeddings X ∈ Rn×d, where n denotes the sequence length and d is the hidden dimension, the model computes query, key, and value representations as: 
+
+Q = XW Q, K = XW K, V = XW V (1) Here, WQ, WK, WV ∈ Rd×d are learnable projection ma-trices. At each timestep, the Attention mechanism computes a weighted average over all previously observed values, where the weights are determined by an exponentiated and normalized inner product between the current query and past keys. This can be written compactly for all tokens as: 
+
+Attn( Q, K, V) = softmax 
+
+ QK ⊤
+
+√d + M
+
+
+
+V, (Attn) where, Mij = 0 if j ≤ i and −∞ otherwise, enforcing causal Attention for autoregressive language modeling. The pairwise similarity matrix QK ⊤ scales quadratically with sequence length, making it a major computational bottleneck for long-context training. We refer to (Attn) as Global Attention to distinguish it from Local Attention variants, such as Sliding Window Attention, which restrict Attention to a fixed window of recent keys and values. Math-ematically, this corresponds to modifying the mask in (Attn) by setting Mij = 0 if 0 ≤ i − j ≤ w and −∞ otherwise, where w is the window size, restricting each token to attend to itself and the w preceding tokens. 
+
+Sparse (Approximate) Attention Variants. Various sparse and approximate Attention variants have been proposed to reduce the computational cost of Attention and broadly fall into trainable and training-free approaches. Trainable sparse Attention methods reduce training cost by compressing keys (Munkhdalai et al., 2024), selecting landmarks (Mohtashami & Jaggi, 2023; Nunez et al., 2025), or imposing fixed sparse patterns (Chen et al., 2024). Ap-proaches such as S 2-Attn (Chen et al., 2024) and Landmark Attention (Mohtashami & Jaggi, 2023) improve efficiency through sparse or summarized access to past context, but often fail to capture exact long-range dependencies, leading to degraded performance on challenging tasks (Gao et al., 2025; Lu et al., 2024). SE-Attention (Nunez et al., 2025) improves efficiency of Transformer architectures by replac-ing Global Attention with a Local Attention that compresses and retrieves blocks of tokens from the past. Similarly, Na-tive Sparse Attention (NSA) (Yuan et al., 2025) combines compressed, selected, and local context within a sliding window. These methods assume a fixed budget per query, attending to a predetermined set of key blocks regardless of contextual needs. As a result, sparsity is fixed and does not adapt to input or task complexity, which can lead to sub-optimal long-context performance, since the amount of relevant past information is difficult to determine a priori during training (see Section 1 for some examples). In contrast, training-free sparse Attention methods primarily target inference efficiency by reducing Attention cost during prefill and decoding, for example, through FlexPrefill and MInference for prefill acceleration and H2O and TokenSkip for faster decoding (Lai et al., 2025; Jiang et al., 2024a; Zhang et al., 2023; Xia et al., 2025). These approaches focus on inference-time optimization without providing training-time efficiency benefits. In this work, we view Global Attention as a long-term mem-ory retrieval mechanism and train models to learn when 
+
+to access this memory in a token-wise, context-dependent manner. A short-term memory captures local context, and a routing function determines whether Global Attention is required, enabling adaptive retrieval based on input com-plexity. 
+
+3. L2A: Learning When to Attend 
+
+Motivated by recency bias in LLMs (Peysakhovich & Lerer, 2023), L2A primarily relies on local context and invokes Global Attention only when necessary. 
+
+3.1. The L2A Layer 
+
+As illustrated in Figure 1, L2A consists of three modules: Local Attention, a Router, and Global Attention. To enable seamless integration with existing LLM architectures, Local Attention is implemented using Sliding Window Attention (SWA), while Global Attention is realized using (Attn) ap-plied over the full context. This design allows both modules to be initialized from the Attention layer parameters of an existing LLM, which we refer to as the Base LLM. The Router is implemented as a linear projection followed by a sigmoid activation, with weights initialized to zero to trigger Global Attention for all tokens at initialization. 
+
+Base LLM → L2A LLM. We replace all Attention layers in Base LLM with L2A layers using the procedure described above and leave the Feed-Forward Network (FFN) layers unchanged. We refer to the resulting model as the L2A LLM, which is subsequently trained to support longer context 3Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+lengths. Incorporating both Local and Global Attention introduces only a modest increase in parameter count (about 
+
+10% for the Qwen2.5 models) compared to the Base LLM, as the majority of parameters reside in the FFN layers. 
+
+Forward Pass for L2A Layer : Given an input sequence 
+
+(x1, . . . , xn), each token xt first attends to a local context of size k ≪ n using SWA: 
+
+st = LocalAttn( xt, xt−1, . . . , xt−k), t = 1 , . . . , n. (2) This local representation, which we denote st, is then passed to the Router module, which computes a score ˆdt in [0 , 1] 
+
+that is then thresholded to obtain the Router’s decision dt:
+
+ˆdt = σ(Ws t), dt =
+
+(
+
+1, if ˆdt ≥ 0.50, otherwise (3) Here, W ∈ R1×d denotes a learnable linear projection for the Router and σ(.) refers to the Sigmoid activation function. If dt = 1 , the token is processed also via Global Attention, otherwise, it retains its local representation st.
+
+at =
+
+(
+
+GlobalAttn( st, st−1, . . . , s1), if dt = 1 0, otherwise (4) The final output is thus given as 1:
+
+ot = st + ( at · dt) (5) Having described the L2A layer, we note that implementing such a conditional computation scheme in LLM training introduces a few technical challenges: 1. GPUs are optimized for dense matrix multiplications, enabling highly efficient kernels for Global Attention (Dao, 2023). In contrast, sparse computations arising from conditional execution are harder to accelerate due to irregular memory access and poor memory coalescing (Li et al., 2025; Gale et al., 2020; Gray et al., 2017). 2. Training LLMs with input-conditional computation graphs can be unstable due to discontinuous routing decisions, leading to Router collapse , as observed in Mixture-of-Experts models (Wang et al., 2024b). We address these challenges by: (i) implementing custom Triton kernels that build upon the tiled attention computation of FA-2 in a sparsity- and hardware-aware manner (see Section 3.2); and (ii) proposing a training algorithm that ensures stability and prevents convergence to solutions that rely only on local context (see Section 3.3). We elaborate on each of these two components in the following subsections. 
+
+> 1As is standard practice, we employ LayerNorm operations after each Local and Global Attention modules; we omit this detail from the exposition for brevity.
+
+3.2. L2A Kernel Design 
+
+To translate algorithmic sparsity into wall-clock speedups, we design a custom Triton (Tillet et al., 2019) kernel to real-ize conditional Global Attention by building upon the tiled Attention computations introduced in FA-2 (Dao, 2023). FA-2 partitions the Q, K, and V tensors into tiles, which are then streamed from high-bandwidth memory (HBM) into fast on-chip SRAM. For each Q tile, the kernel iterates over K–V tiles, applies causal masking, and accumulates attention outputs using an online log-sum-exp scheme, stor-ing the statistics in Lc to ensure numerical stability. By avoiding materialization of the full Attention matrix, FA-2 achieves high arithmetic intensity and GPU utilization. Building on this design, our kernel supports token-level con-ditional sparsity by selectively computing Attention only for queries that trigger Global Attention. Active queries (that is, queries with corresponding dt = 1 in Equation (3)) are first consolidated into a compact, contiguous buffer Qc, enabling efficient FA-2-style tiling, while their original sequence po-sitions are recorded in an index mapping Qidx to preserve causality. Attention is computed over tiles of Qc, K, and V,with causal masking enforced using the true query indices in Qidx rather than the compacted query order. This allows the kernel to skip key–value tiles outside a query’s causal range, reducing unnecessary computation while maintaining correctness. As in FA-2, Attention scores are accumulated using the same log-sum-exp scheme. After processing all relevant key–value tiles, Oc and Lc are written back to HBM, and the full output tensor O is reconstructed from 
+
+Oc using Qidx .This design preserves the memory efficiency and numerical stability of FA-2, while enabling conditional sparsity that translates directly into wall-clock speedups. The forward pass is detailed in Algorithm 1 in the Appendix. The back-ward pass follows a similar design, performing gradient computation only for active queries identified by Qidx . The saved statistics Lc and index mapping Qidx are reused to en-sure numerical stability and efficient gradient accumulation without revisiting irrelevant key–value tiles. 
+
+3.3. L2A Training Training Objective. For training L2A , we augment the train-ing loss with a sparsity regularizer that penalizes frequent invocation of Global Attention: 
+
+L = LNTP + λnL 
+
+> L
+
+X
+
+> l=1
+> n
+
+X
+
+> t=1
+
+ˆd2
+
+> l,t
+
+, (6) where LNTP denotes the Next Token Prediction (NTP) loss, 
+
+ˆdl,t 2 denotes the Router’s output at layer l, position t, L is the number of L2A layers, and n is the sequence length.   
+
+> 2we drop lfrom subsequent notation for brevity.
+
+4Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+As discussed in Section 3.1, the router decision dt de-scribed in Equation (3) is discrete and non-differentiable, with zero gradients almost everywhere. Hence, we employ the straight-through estimator (STE) (Bengio et al., 2013) to enable backpropagation and obtain a learning signal for the Router. This implies that, during the forward pass, the discrete routing decision dt is used; however, in the back-ward pass, gradients are computed using the sigmoid-based continuous relaxation ˆdt.
+
+Training Instabilities. Naively optimizing Equation (6) with stochastic gradient descent results in Router collapse ,where Global Attention is never invoked for any token. This behavior can be understood by analyzing the gradient of the loss in Equation (6) with respect to the Router score ˆdt:
+
+∂L
+
+∂ ˆdt
+
+=
+
+ ∂LNTP 
+
+∂ot
+
+T
+
+at + 2λnL ˆdt. (7) Recall from Section 3.2 that the Global Attention outputs 
+
+at (Equation (4)) are computed only for query tokens that invoke it. For all other tokens, referred to as masked tokens, 
+
+at = 0 . Consequently, ˆdt for these tokens receives no gradient signal from the NTP loss. As training progresses, the regularization term then dominates and drives dt → 0
+
+for all tokens, causing the Router to completely deactivate Global Attention. A detailed derivation for Equation (7) and subsequent discussion is provided in Section A. To counteract this missing learning signal for the masked tokens, we invoke Global Attention for all tokens (regard-less of the Router’s decision) with a small probability. 3
+
+This strategy preserves the forward behavior for the masked tokens since the Global Attention output, at, is always mul-tiplied by dt = 0 (see Equation (5)), while ensuring that non-zero gradients from the NTP loss reach the Router dur-ing backpropagation, even for the masked tokens. Since Global Attention is invoked sparingly, L2A largely retains the training throughput benefits of conditional computation. 
+
+3.4. L2A Inference 
+
+Autoregressive inference consists of two stages: prefill and decode. During prefill, Local Attention uses standard SWA kernels from FA-2, while Global Attention employs our sparse kernel to selectively compute attention for active queries. During decode, both modules use standard FA-2 decode kernels, with Global Attention skipped entirely for tokens where dt = 0 .
+
+The KV Cache Bottleneck During Inference. At long context lengths, storing the KV cache becomes the primary     
+
+> 3Specifically, in each training iteration, we sample a Bernoulli (with p= 0 .1in our experiments). If heads, we invoke Global Attention for all tokens regardless of dt. If tails, we follow Equa-tion (4).
+
+memory bottleneck (Saxena et al., 2024; Liu et al., 2024c; Pope et al., 2023). In L2A , even when Global Attention is skipped for a given token, its key and value representations must still be stored, as they may be required by future to-kens that invoke Global Attention. Consequently, without further optimization, L2A and the Base LLM incur similar KV cache costs during decode. The additional KV storage from Local Attention is negligible (less than 3% of the KV footprint for a 4K local window at 128K context). How-ever, as we describe next, we can leverage L2A ’s sparse Global Attention usage to further reduce KV cache memory at inference time. 
+
+Sparsity-based Layer Pruning. To reduce this overhead, we introduce a post-training layer pruning strategy that leverages the Global Attention sparsity measured at the end of training. Specifically, for layers exhibiting high sparsity (measured on held-out data), we prune the Global Attention module entirely while retaining Local Attention. This approach is particularly effective because Local At-tention stores KV states only within a small sliding win-dow, whereas Global Attention requires storage that scales with the full context length—making it the dominant con-tributor to KV cache memory. Empirically, we find that nearly 50% of Global Attention layers meet our sparsity criterion for pruning, enabling up to a 50% reduction in KV cache memory relative to the Base LLM with less than 1% degradation in downstream performance. These memory savings translate directly into practical benefits as lower KV cache requirements enable larger-batch inference and higher throughput. 
+
+4. Experiments 
+
+In this section, we demonstrate the efficacy of L2A for ex-tending LLM context length. We evaluate long-context per-formance across multiple benchmarks and compare against baselines (Section 4.1), report runtime speedups achieved by our custom Triton kernels over FA-2 (Section 4.2), and present ablations and sparsity analysis (Section 4.4 and Sec-tion 4.5). 
+
+Base LLMs and evaluation tasks. We consider the Qwen family of models as our Base LLMs for context extension, specifically Qwen2.5 7B (Qwen et al., 2025) and Qwen3 8B. For ablations and sparsity analysis, we additionally use Qwen2.5 1.5B to enable cost-efficient experimentation. All models have a pre-trained context length of 32K. Long-context performance is evaluated on HELMET (Yen et al., 2025), BABILong (Kuratov et al., 2024), and MRCR (Vo-drahalli et al., 2024), which cover diverse real-world and synthetic tasks (details in Section F.2). 
+
+Baselines. We compare L2A with training-free context extension methods (SelfExtend (Jin et al., 2024), DCA (An 5Learning When to Attend: Conditional Memory Access for Long-Context LLMs CLP                       
+
+> L2A (Ours)
+> FlexPrefill
+> DCA
+> S2-attn
+> SelfExtend
+> NSA
+> Base
+> 0
+> 20
+> 40
+> 60
+> 80
+> Score
+> 76.4 79.2
+> 69.8
+> 43.9
+> 29.0 25.9
+> 6.2
+> 13.9
+> Synthetic recall
+> CLP
+> L2A (Ours)
+> FlexPrefill
+> DCA
+> S2-attn
+> SelfExtend
+> NSA
+> Base
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50 50.0 50.0 49.7
+> 43.1 44.1
+> 38.1 39.2
+> 27.5
+> Retrieval-Augmented Generation
+> CLP
+> L2A (Ours)
+> FlexPrefill
+> DCA
+> S2-attn
+> SelfExtend
+> NSA
+> Base
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100 87.4 88.6 85.2 82.4
+> 77.0
+> 81.8 78.6
+> 71.5
+> Many-shot in-context learning
+> CLP
+> L2A (Ours)
+> FlexPrefill
+> DCA
+> S2-attn
+> SelfExtend
+> NSA
+> Base
+> 0
+> 1
+> 2
+> 32.8
+> 1.9
+> 2.4
+> 1.2
+> 2.5
+> 2.3
+> 1.5
+> 1.3
+> Generation w/ citations
+> CLP
+> L2A (Ours)
+> FlexPrefill
+> DCA
+> S2-attn
+> SelfExtend
+> NSA
+> Base
+> 0
+> 2
+> 4
+> 6
+> 8
+> 10
+> Score
+> 8.4
+> 9.6
+> 5.0
+> 1.8
+> 3.8
+> 0.6 0.2 0.0
+> Passage re-ranking
+> CLP
+> L2A (Ours)
+> FlexPrefill
+> DCA
+> S2-attn
+> SelfExtend
+> NSA
+> Base
+> 0
+> 5
+> 10
+> 15
+> 20
+> 21.3
+> 19.3
+> 17.0
+> 14.8
+> 19.0
+> 11.4
+> 8.7
+> 11.6
+> Multi-round co-reference resolution
+> CLP
+> L2A (Ours)
+> FlexPrefill
+> DCA
+> S2-attn
+> SelfExtend
+> NSA
+> Base
+> 0
+> 10
+> 20
+> 30
+> 40 38.6 40.4
+> 35.8 35.2
+> 39.2
+> 34.6
+> 17.6
+> 21.4
+> Fact chaining & relational reasoning
+> CLP
+> L2A (Ours)
+> FlexPrefill
+> DCA
+> S2-attn
+> SelfExtend
+> NSA
+> Base
+> 0
+> 10
+> 20
+> 30
+> 40 40.7 41.3
+> 37.8
+> 31.8 30.7
+> 27.8
+> 21.7 21.0
+> Aggregate
+
+Figure 3. Task-wise performance comparison of L2A and baseline methods on Qwen 2.5 7B model. L2A remains close to CLP performance while outperforming baselines on the majority of tasks. 
+
+et al., 2024)), training-based sparse attention methods (S 2-Attn (Chen et al., 2024), NSA (Yuan et al., 2025)), and an inference-time sparsity method (FlexPrefill (Lai et al., 2025)). Official implementations are used when available. For NSA, we evaluate a widely used open-source version (Li, 2025) (see Section E). We report CLP-trained Base models as upper bound and Base LLM evaluated at long context without further training as a lower-bound reference. 
+
+Implementation details. For all training-based experi-ments, we initialize from the Base LLM and train on a mixture of long documents from publicly available datasets. 
+
+L2A is initialized as described in Section 3.1, and unless stated otherwise, all L2A layers use Sliding Window At-tention (SWA) with a 4K window. We apply the same ini-tialization strategy to training baselines, initializing sparse attention layers from the Base LLM’s Attention parameters. Following Qwen (Yang et al., 2025), we increase the Ro-tary Position Embedding base frequency from 1M to 5M and train at 128K context length (a four-fold increase over the Base LLM). During training, we freeze FFN layers and update only token-mixing layers (Attention, NSA, L2A , and S2-Attn) along with LayerNorm parameters, which we find performs better than full-parameter training (Section E.1.3). FlexPrefill is applied to the CLP model, yielding faster Time-To-First-Token (TTFT) than CLP alone due to prefill sparsity. Additional details are provided in Appendix F. 
+
+4.1. L2A Across Long & Short Context Tasks 
+
+We evaluate L2A on Qwen2.5 1.5B and 7B as Base LLMs. Across long-context benchmarks and context lengths from 8K to 128K, L2A achieves performance within 3% of CLP for both models, demonstrating robust scaling with model size. L2A also consistently outperforms all considered training-based and training-free baselines (Figure 4). While most methods match Base LLM performance within the pretrained 32K context, their performance degrades, often substantially, beyond this length relative to CLP. In con-trast, L2A maintains strong performance beyond the pre-trained context, highlighting the benefit of conditionally ac-cessed long-term memory over fixed sparsity levels. While NSA matches full-attention performance when trained from scratch (Yuan et al., 2025), prior work shows significant degradation under continued pretraining, even within the native context length (Zhao et al., 2025), which aligns with our results in Figure 4. 7B 
+
+1.5B 
+
+Figure 4. Aggregate long-context performance of Qwen models at 1.5B and 7B scales. L2A achieves comparable performance to CLP across several context lengths, while significantly outperforming prior baselines. 
+
+We further report task-wise performance at 128K context, including Synthetic Recall, Retrieval-Augmented Genera-tion, and In-Context Learning (Figure 3). L2A consistently outperforms all baselines and remains competitive with CLP (detailed results in Tables 3 and 4). We additionally evaluate 6Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+Table 1. Zero-shot performance on standard short-context benchmarks for Qwen 2.5 models at different scales. L2A closely matches CLP, indicating that training at 128K context length does not degrade short-context performance                                                                
+
+> Scale Method BoolQ CommSenseQA PIQA Winogrande ARC-E ARC-C MMLU SWDE Avg
+> acc ↑acc ↑acc n ↑acc ↑acc n ↑acc n ↑acc ↑contains ↑
+> 1.5B CLP 73.36 74.45 75.95 64.72 88.72 73.81 60.46 86.50 74.74
+> L2A 71.44 73.46 76.01 64.09 88.59 73.12 60.03 87.31 74.26 7B CLP 82.57 84.52 79.43 76.01 96.09 88.65 73.39 91.00 83.95
+> L2A 80.15 83.70 80.14 75.69 96.21 88.14 72.76 92.17 83.62
+
+L2A on Qwen3 8B and observe similar trends, with L2A 
+
+outperforming all baselines while remaining within 3% of CLP (see Table 5). These results demonstrate the utility of 
+
+L2A across model families. Overall, L2A is the only method that achieves near-zero performance gap relative to CLP on long-context tasks while also achieving higher training throughput due to sparse use of Global Attention. To assess the impact of long-context training on short-context performance, we also evaluate short-context bench-marks with sequence lengths below 2K tokens. As shown in Table 1, L2A closely matches CLP across both model scales, with only small differences consistent with seed-level vari-ability. This indicates that training L2A at 128K context length does not degrade short-context performance. 
+
+Table 2. L2A achieves significantly higher training throughput than the Base LLM across model sizes. We report throughput in tokens per GPU per second, along with the corresponding speedup ratios, for three model variants. All models are trained on NVIDIA H200 GPUs, using batch sizes of 6M tokens for Qwen2.5 7B and Qwen3 8B, and 4M tokens for Qwen2.5 1.5B.                      
+
+> Model Method Toks/GPU/s Speedup Ratio
+> Qwen2.5-1.5B L2A (Ours) 3058.70 2.02 CLP 1517.74 1.00 Qwen2.5-7B L2A (Ours) 1383.85 2.15 CLP 642.67 1.00 Qwen3-8B L2A (Ours) 410.42 1.82 CLP 226.04 1.00
+
+4.2. Runtime Speedups from L2A Kernels 
+
+We begin by evaluating the throughput of the standalone 
+
+L2A kernel on NVIDIA H200 GPUs by benchmarking the forward and backward passes of our custom Triton kernel against FlashAttention-2 (FA-2). As shown in Figure 10 (Section D.1), our kernel achieves 1.6-35 × and 1.08-45 
+
+× speedups for the forward and the backward pass across varying sparsity levels, where sparsity denotes the fraction of queries for which Global Attention is skipped. 
+
+Training Speedups. These kernel-level gains translate into higher training throughput for L2A compared to CLP by conditionally invoking Global Attention only when required, thereby reducing the cost of the most expensive operation at long context lengths. As a result, across different Base LLMs, L2A achieves nearly 2 × higher training throughput at 128K context length. Detailed throughput comparisons with CLP are reported in Table 2. 
+
+Figure 5. Time-to-first-token (TTFT) for Qwen 2.5 7B averaged over different tasks from our long-context benchmark suites. L2A 
+
+achieves similar aggregate long-context performance as CLP, while being ∼ 2× faster. 
+
+Inference Speedups. As described in Section 3.4, the L2A 
+
+kernel is applied during the prefill phase of inference and can therefore exploit sparsity. Similar to training, L2A achieves nearly 2 × speedups in time-to-first-token (TTFT) compared to CLP. In Figure 5, we report average TTFT at 64K and 128K context lengths, averaged across tasks from our long-context benchmark suites. The results show that L2A is nearly Pareto-optimal, achieving aggregate long-context performance on par with CLP while approaching the TTFT of FlexPrefill, the fastest baseline in terms of average TTFT. In the Appendix (Figure 14 and Figure 15), we further ana-lyze how this trend evolves with increasing context length. Notably, L2A becomes faster for both training and inference prefill as context length increases, since the cost of Global Attention grows with sequence length. 
+
+4.3. Leveraging sparsity to reduce L2A ’s KV cache 
+
+In long-context deployment, the KV cache becomes a severe memory bottleneck. While L2A uses conditional Global Attention to reduce computation, it still requires the full KV cache (as discussed in Section 3.4). Interestingly, we find that many layers—nearly 50% in the Qwen 2.5 1.5B L2A 
+
+model—rely almost exclusively on Local Attention ( ≥95% of the time; see Figure 8). Based on this observation, we conduct the following experiment on the trained Qwen 2.5 7Learning When to Attend: Conditional Memory Access for Long-Context LLMs 8k 16k 32k 64k 128k                               
+
+> 50
+> 60
+> 70
+> 80
+> 90
+> Score
+> Synthetic recall
+> 8k 16k 32k 64k 128k
+> 35
+> 40
+> 45
+> 50
+> Retrieval-Augmented Generation
+> 8k 16k 32k 64k 128k
+> 50
+> 60
+> 70
+> 80
+> Many-shot in-context learning
+> 8k 16k 32k 64k 128k
+> 2
+> 4
+> 6
+> 8
+> Generation w/ citations
+> 8k 16k 32k 64k 128k
+> Sequence Length
+> 10
+> 20
+> 30
+> 40
+> Score
+> Passage re-ranking
+> 8k 16k 32k 64k 128k
+> Sequence Length
+> 10
+> 15
+> 20
+> 25
+> 30
+> Multi-round co-reference resolution
+> 8k 16k 32k 64k 128k
+> Sequence Length
+> 30
+> 35
+> 40
+> Fact chaining & relational reasoning
+> 8k 16k 32k 64k 128k
+> Sequence Length
+> 30
+> 35
+> 40
+> 45
+> Long Context Score
+> Aggregate Performance
+> Qwen-2.5-1.5B L2A L2A [Pruned]
+
+Figure 6. L2A [Pruned] is the model obtained by pruning Global Attention Modules that are more than 95% sparse—that is, layers where the Global Attention Module is not invoked for 95% of tokens. The figure shows minimal loss in long-context performance compared to L2A. 
+
+1.5B L2A model. We compute the average Router sparsity for each layer on a small subset of the training data and remove the Global Attention module from any layer with sparsity exceeding 95%. As shown in Figure 6, this results in nearly 50% KV cache memory savings (15 out of 28 Global Attention modules are dropped) with almost no loss in long-context performance. This translates to significant decoding throughput improvements over the CLP model (which has the same KV cache size as L2A without layer dropping) since we can now approximately double the batch size. ICL RAG Re-rank Cite FCRR MRCR Recall 
+
+> Long-context Benchmarks
+> 55
+> 60
+> 65
+> 70
+> 75
+> 80
+> 85
+> 90
+> Aggregate Sparsity (%)
+> 64k
+> 128k
+
+Figure 7. Average sparsity for each task at 64k and 128k con-text lengths, aggregated across Qwen2.5-1.5B, Qwen2.5-7B, and Qwen3-8B models. Tasks are ordered by increasing sparsity. Refer to Section F.2 for task details. 
+
+4.4. L2A ’s Conditional Global Attention Access Patterns 
+
+We now analyze the sparsity levels induced by different long-context tasks using our trained L2A -based models. In our formulation, sparsity reflects how often Global Atten-tion is triggered for a query token, that is the local context is insufficient for prediction. The task-wise sparsity order-ing shown in Figure 7 arises from how this insufficiency is distributed across queries. We additionally observe that, for a fixed task, sparsity generally decreases as the available context length increases. Tasks such as Recall and MRCR 
+
+Figure 8. Sparsity levels across different layers of Qwen2.5-1.5B 
+
+L2A model. Nearly 50% layers rely almost exclusively ( ≥ 95%) on Local Attention. 
+
+(Vodrahalli et al., 2024) concentrate long-range dependen-cies at a small number of specific positions, making local context sufficient for most tokens and resulting in high spar-sity. Retrieval and reasoning tasks like RAG and Passage Re-ranking require global access at multiple tokens for rele-vance comparison and aggregation, leading to intermediate sparsity. In contrast, In-Context Learning requires compar-ing patterns across multiple demonstrations, so local context is frequently insufficient at many query positions, resulting in lower sparsity. 
+
+4.5. Ablation Study 
+
+In this subsection, we ablate L2A ’s design choices. 
+
+Does the Router in L2A use context to decide when to invoke Global Attention? We evaluate this by comparing against a context-free routing baseline that independently triggers Global Attention at each token with Bernoulli prob-ability p, which we refer to as Context-free Sparse . We con-sider p ∈ { 0.1, 0.2, 0.5}, corresponding to 50-90% sparsity 8Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+levels. Across all settings, L2A outperforms this baseline by a large margin, providing strong evidence that the Router leverages local context to decide when Global Attention is required. For example, on Qwen2.5 1.5B, L2A achieves approximately 80% average sparsity across all long context tasks while improving performance by nearly 30% over the strongest Context-free Sparse baseline (with p = 0 .5, 50% sparsity). Results are reported in Figure 9. 
+
+What is the effect of window size in the Local Attention Module in L2A ? To study this, we vary the SWA window size from 0 to 4K. As shown in Figure 16, performance remains comparable across all configurations. Interestingly, the Router module compensates for smaller SWA windows by reducing sparsity in Global Attention invocations. In other words, as the short-term local context shrinks, L2A 
+
+increasingly relies on long-term global memory. In the extreme case, the SWA-0 configuration (which essentially has only the Router and Global Attention Modules) exhibits 0% sparsity during training (as shown in Figure 17). While accuracy remains comparable, both training and inference efficiency degrade as reliance on Global Attention increases. In particular, the SWA-0 variant incurs approximately a 2× higher time to first token (TTFT) compared to the SWA-4K configuration (Figure 18). Beyond the above ablations we also consider the effect of 
+
+λ (in (6) ) on L2A performance and efficiency. As expected, increasing λ increases sparsity at the cost of long-context performance. We discuss this in Section E.1). However, it is difficult to know a priori what level of λ to set for a desired performance and sparsity-level. Training with different value quickly adds to training cost at scale. Instead, we show that one can modulate the sparsity level at test-time by modulating the threshold of the sigmoid in Equation (3) (which is set to 0.5 during training) for different downstream tasks. Refer to Section E.1.2 for more details. 
+
+5. Discussion 
+
+This work demonstrates that conditional long-term mem-ory access provides a practical path toward efficient long-context modeling. A natural extension of L2A is to alter-natively consider State-Space Models (SSMs) (Gu & Dao, 2024; Yang et al.; Peng et al., 2025) for Local Attention module. SSMs offer linear-time compute and memory com-plexity and maintain a “fading” summary of the distant past, enabling them to model both global and local dependen-cies. However, replacing Attention layers with SSMs in a pretrained LLM typically requires an additional distilla-tion step (Wang et al., 2024a), which can increase training cost and further complicate the L2A design. We leave this exploration for future work. 
+
+Impact Statement 
+
+This paper presents work whose goal is to advance the field of Machine Learning. There are many potential societal consequences of our work, none which we feel must be specifically highlighted here. 9Learning When to Attend: Conditional Memory Access for Long-Context LLMs 8k 16k 32k 64k 128k 
+
+0
+
+20 
+
+40 
+
+60 
+
+80 
+
+100 
+
+> Score
+
+Synthetic recall 
+
+8k 16k 32k 64k 128k 
+
+30 
+
+35 
+
+40 
+
+45 
+
+50 
+
+Retrieval-Augmented Generation 
+
+8k 16k 32k 64k 128k 
+
+50 
+
+60 
+
+70 
+
+80 
+
+Many-shot in-context learning 
+
+8k 16k 32k 64k 128k 
+
+2
+
+4
+
+6
+
+8
+
+Generation w/ citations 
+
+8k 16k 32k 64k 128k 
+
+Sequence Length 
+
+0
+
+10 
+
+20 
+
+30 
+
+40 
+
+> Score
+
+Passage re-ranking 
+
+8k 16k 32k 64k 128k 
+
+Sequence Length 
+
+5
+
+10 
+
+15 
+
+20 
+
+25 
+
+Multi-round co-reference resolution 
+
+8k 16k 32k 64k 128k 
+
+Sequence Length 
+
+10 
+
+20 
+
+30 
+
+40 
+
+Fact chaining & relational reasoning 
+
+8k 16k 32k 64k 128k 
+
+Sequence Length 
+
+20 
+
+30 
+
+40 
+
+> Long Context Score
+
+Aggregate Performance 
+
+CLP 
+
+L2A (Ours) 
+
+Context-Free Sparse (p=0.5) Context-Free Sparse (p=0.2) Context-Free Sparse (p=0.1) 
+
+Figure 9. Context-free Sparse baselines that independently trigger Global Attention at each token with Bernoulli probability p ∈{0.1, 0.2, 0.5}, corresponding to 50-90% sparsity levels. L2A outperforms these by a large margin, providing crucial evidence that the Router leverages local context to decide upon the invocation of Global Attention. 
+
+10 Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+References 
+
+Amouyal, S. J., Wolfson, T., Rubin, O., Yoran, O., Herzig, J., and Berant, J. Qampari: An open-domain ques-tion answering benchmark for questions with many an-swers from multiple paragraphs, 2023. URL https: //arxiv.org/abs/2205.12665 .An, C., Huang, F., Zhang, J., Gong, S., Qiu, X., Zhou, C., and Kong, L. Training-free long-context scaling of large language models. In Proceedings of the 41st International Conference on Machine Learning , ICML’24. JMLR.org, 2024. Asai, A., Wu, Z., Wang, Y., Sil, A., and Hajishirzi, H. Self-rag: Learning to retrieve, generate, and critique through self-reflection. 2024. Bae, S., Kim, Y., Bayat, R., Kim, S., Ha, J., Schuster, T., Fisch, A., Harutyunyan, H., Ji, Z., Courville, A., and Yun, S.-Y. Mixture-of-recursions: Learning dynamic recursive depths for adaptive token-level computation, 2025. URL 
+
+https://arxiv.org/abs/2507.10524 .Bajaj, P., Campos, D., Craswell, N., Deng, L., Gao, J., Liu, X., Majumder, R., McNamara, A., Mitra, B., Nguyen, T., Rosenberg, M., Song, X., Stoica, A., Tiwary, S., and Wang, T. Ms marco: A human generated machine reading comprehension dataset, 2018. URL https://arxiv. org/abs/1611.09268 .Bengio, Y., L ´eonard, N., and Courville, A. Estimating or propagating gradients through stochastic neurons for con-ditional computation. arXiv preprint arXiv:1308.3432 ,2013. Bohnet, B., Tran, V. Q., Verga, P., Aharoni, R., Andor, D., Soares, L. B., Ciaramita, M., Eisenstein, J., Ganchev, K., Herzig, J., Hui, K., Kwiatkowski, T., Ma, J., Ni, J., Saralegui, L. S., Schuster, T., Cohen, W. W., Collins, M., Das, D., Metzler, D., Petrov, S., and Webster, K. Attributed question answering: Evaluation and modeling for attributed large language models, 2023. URL https: //arxiv.org/abs/2212.08037 .Borgeaud, S., Mensch, A., Hoffmann, J., Cai, T., Ruther-ford, E., Millican, K., van den Driessche, G., Lespiau, J., Damoc, B., Clark, A., de Las Casas, D., Guy, A., Menick, J., Ring, R., Hennigan, T., Huang, S., Maggiore, L., Jones, C., Cassirer, A., Brock, A., Paganini, M., Irving, G., Vinyals, O., Osindero, S., Simonyan, K., Rae, J. W., Elsen, E., and Sifre, L. Improving language models by retrieving from trillions of tokens. CoRR , abs/2112.04426, 2021. URL https://arxiv.org/abs/2112.04426 .Chen, S., Wong, S., Chen, L., and Tian, Y. Extending con-text window of large language models via positional in-terpolation, 2023. URL https://arxiv.org/abs/ 2306.15595 .Chen, Y., Qian, S., Tang, H., Lai, X., Liu, Z., Han, S., and Jia, J. Longlora: Efficient fine-tuning of long-context large language models. In The International Conference on Learning Representations (ICLR) , 2024. Chhikara, P., Khant, D., Aryan, S., Singh, T., and Ya-dav, D. Mem0: Building production-ready ai agents with scalable long-term memory, 2025. URL https: //arxiv.org/abs/2504.19413 .Craswell, N., Mitra, B., Yilmaz, E., Campos, D., Lin, J., Voorhees, E. M., and Soboroff, I. Overview of the trec 2022 deep learning track, 2025. URL https: //arxiv.org/abs/2507.10865 .Dao, T. Flashattention-2: Faster attention with better par-allelism and work partitioning, 2023. URL https: //arxiv.org/abs/2307.08691 .Ding, Y., Zhang, L. L., Zhang, C., Xu, Y., Shang, N., Xu, J., Yang, F., and Yang, M. Longrope: extending llm context window beyond 2 million tokens. In Proceedings of the 41st International Conference on Machine Learning ,ICML’24. JMLR.org, 2024. Gale, T., Zaharia, M., Young, C., and Elsen, E. Sparse gpu kernels for deep learning. In Proceedings of the Inter-national Conference for High Performance Computing, Networking, Storage and Analysis , SC ’20. IEEE Press, 2020. ISBN 9781728199986. Gao, T., Yen, H., Yu, J., and Chen, D. Enabling large language models to generate text with citations, 2023. URL https://arxiv.org/abs/2305.14627 .11 Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+Gao, T., Wettig, A., Yen, H., and Chen, D. How to train long-context language models (effectively). In ACL , 2025. Geva, M., Schuster, R., Berant, J., and Levy, O. Transformer feed-forward layers are key-value memories, 2021. URL 
+
+https://arxiv.org/abs/2012.14913 .Gray, S., Radford, A., and Kingma, D. P. Gpu kernels for block-sparse weights. arXiv preprint arXiv:1711.09224 ,3(2):2, 2017. Gu, A. and Dao, T. Mamba: Linear-time sequence modeling with selective state spaces. In First Conference on Lan-guage Modeling , 2024. URL https://openreview. net/forum?id=tEYskw1VY2 .Han, C., Wang, Q., Peng, H., Xiong, W., Chen, Y., Ji, H., and Wang, S. LM-infinite: Zero-shot extreme length gen-eralization for large language models. In Duh, K., Gomez, H., and Bethard, S. (eds.), Proceedings of the 2024 Con-ference of the North American Chapter of the Associa-tion for Computational Linguistics: Human Language Technologies (Volume 1: Long Papers) , pp. 3991–4008, Mexico City, Mexico, June 2024. Association for Compu-tational Linguistics. doi: 10.18653/v1/2024.naacl-long. 222. URL https://aclanthology.org/2024. naacl-long.222/ .Heakl, A., Gubri, M., Khan, S., Yun, S., and Oh, S. J. Dr.llm: Dynamic layer routing in llms, 2025. URL https:// arxiv.org/abs/2510.12773 .Jeong, S., Baek, J., Cho, S., Hwang, S. J., and Park, J. C. Adaptive-rag: Learning to adapt retrieval-augmented large language models through question complexity, 2024. URL https://arxiv.org/abs/2403.14403 .Jiang, H., Li, Y., Zhang, C., Wu, Q., Luo, X., Ahn, S., Han, Z., Abdi, A. H., Li, D., Lin, C.-Y., Yang, Y., and Qiu, L. Minference 1.0: Accelerating pre-filling for long-context llms via dynamic sparse attention, 2024a. URL 
+
+https://arxiv.org/abs/2407.02490 .Jiang, Y., Wang, H., Xie, L., Zhao, H., Zhang, C., Qian, H., and Lui, J. C. D-llm: A token adaptive computing resource allocation strategy for large language models. In Globerson, A., Mackey, L., Belgrave, D., Fan, A., Paquet, U., Tomczak, J., and Zhang, C. (eds.), Advances in Neural Information Processing Systems , volume 37, pp. 1725–1749. Curran Associates, Inc., 2024b. doi: 10.52202/079017-0055. Jimenez, C. E., Yang, J., Wettig, A., Yao, S., Pei, K., Press, O., and Narasimhan, K. Swe-bench: Can language mod-els resolve real-world github issues? arXiv preprint arXiv:2310.06770 , 2023. Jin, H., Han, X., Yang, J., Jiang, Z., Liu, Z., Chang, C.-Y., Chen, H., and Hu, X. Llm maybe longlm: Selfextend llm context window without tuning. In Proceedings of the 41st International Conference on Machine Learning ,ICML’24. JMLR.org, 2024. Kamradt, G. Needle in a haystack - pressure testing llms. 2024. URL https://github.com/gkamradt/ LLMTest_NeedleInAHaystack .Kuratov, Y., Bulatov, A., Anokhin, P., Rodkin, I., Sorokin, D., Sorokin, A., and Burtsev, M. Babilong: Testing the limits of llms with long context reasoning-in-a-haystack. In Globerson, A., Mackey, L., Belgrave, D., Fan, A., Paquet, U., Tomczak, J., and Zhang, C. (eds.), Advances in Neural Information Processing Systems , volume 37, pp. 106519–106554. Curran Associates, Inc., 2024. Lai, X., Lu, J., Luo, Y., Ma, Y., and Zhou, X. Flexpre-fill: A context-aware sparse attention mechanism for efficient long-sequence inference. In The Thirteenth International Conference on Learning Representations ,2025. URL https://openreview.net/forum? id=OfjIlbelrT .Lewis, P., Perez, E., Piktus, A., Petroni, F., Karpukhin, V., Goyal, N., K ¨uttler, H., Lewis, M., Yih, W.-t., Rockt ¨aschel, T., Riedel, S., and Kiela, D. Retrieval-augmented genera-tion for knowledge-intensive nlp tasks. In Larochelle, H., Ranzato, M., Hadsell, R., Balcan, M., and Lin, H. (eds.), 
+
+Advances in Neural Information Processing Systems ,volume 33, pp. 9459–9474. Curran Associates, Inc., 2020. URL https://proceedings.neurips. cc/paper_files/paper/2020/file/ 6b493230205f780e1bc26945df7481e5-Paper. pdf .Li, S., Min, Y., Yie, H., Kim, H., Ahn, S., Sim, J., Lee, C.-H., and Kim, J. Accelerating sparse matrix-matrix multiplication on gpus with processing near hbms. arXiv preprint arXiv:2512.12036 , 2025. Li, X. Open-source nsa implementation, 2025. URL https://github.com/XunhaoLai/ native-sparse-attention-triton .Li, Z., Li, C., Zhang, M., Mei, Q., and Bendersky, M. Retrieval augmented generation or long-context LLMs? a comprehensive study and hybrid approach. In Dernoncourt, F., Preo t¸iuc-Pietro, D., and Shimo-rina, A. (eds.), Proceedings of the 2024 Conference on Empirical Methods in Natural Language Process-ing: Industry Track , pp. 881–893, Miami, Florida, US, November 2024. Association for Computational Linguistics. doi: 10.18653/v1/2024.emnlp-industry. 66. URL https://aclanthology.org/2024. emnlp-industry.66/ .12 Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+Liu, H., Zaharia, M., and Abbeel, P. Ringattention with blockwise transformers for near-infinite context. In The Twelfth International Conference on Learning Represen-tations , 2024a. URL https://openreview.net/ forum?id=WsRHpHH4s0 .Liu, X., Yan, H., Zhang, S., An, C., Qiu, X., and Lin, D. Scaling laws of rope-based extrapolation, 2024b. URL 
+
+https://arxiv.org/abs/2310.05209 .Liu, Z., Yuan, J., Jin, H., Zhong, S., Xu, Z., Braverman, V., Chen, B., and Hu, X. Kivi: A tuning-free asym-metric 2bit quantization for kv cache. arXiv preprint arXiv:2402.02750 , 2024c. Lu, Y., Yan, J. N., Yang, S., Chiu, J. T., Ren, S., Yuan, F., Zhao, W., Wu, Z., and Rush, A. M. A controlled study on long context extension and generalization in llms, 2024. URL https://arxiv.org/abs/2409.12181 .Maharana, A., Lee, D.-H., Tulyakov, S., Bansal, M., Bar-bieri, F., and Fang, Y. Evaluating very long-term conversational memory of llm agents. arXiv preprint arXiv:2402.17753 , 2024. Mohtashami, A. and Jaggi, M. Random-access infinite context length for transformers. In Proceedings of the 37th International Conference on Neural Information Processing Systems , NIPS ’23, Red Hook, NY, USA, 2023. Curran Associates Inc. Munkhdalai, T., Faruqui, M., and Gopal, S. Leave no con-text behind: Efficient infinite context transformers with infini-attention. CoRR , 2024. Nunez, E., Zancato, L., Bowman, B., Golatkar, A., Xia, W., and Soatto, S. Expansion span: Combining fading memory and retrieval in hybrid state space models, 2025. URL https://arxiv.org/abs/2412.13328 .Peng, B., Quesnelle, J., Fan, H., and Shippole, E. Yarn: Ef-ficient context window extension of large language mod-els, 2023. URL https://arxiv.org/abs/2309. 00071 .Peng, L., Chattopadhyay, A., Zancato, L., Nunez, E., Xia, W., and Soatto, S. Gated kalmanet: A fading memory layer through test-time ridge regression. arXiv preprint arXiv:2511.21016 , 2025. Peysakhovich, A. and Lerer, A. Attention sorting combats recency bias in long context language models, 2023. URL 
+
+https://arxiv.org/abs/2310.01427 .Pope, R., Douglas, S., Chowdhery, A., Devlin, J., Bradbury, J., Heek, J., Xiao, K., Agrawal, S., and Dean, J. Efficiently scaling transformer inference. Proceedings of machine learning and systems , 5:606–624, 2023. Qwen, Yang, A., Yang, B., Zhang, B., Hui, B., Zheng, B., Yu, B., Li, C., Liu, D., Huang, F., Wei, H., Lin, H., Yang, J., Tu, J., Zhang, J., Yang, J., Yang, J., Zhou, J., Lin, J., Dang, K., Lu, K., Bao, K., Yang, K., Yu, L., Li, M., Xue, M., Zhang, P., Zhu, Q., Men, R., Lin, R., Li, T., Tang, T., Xia, T., Ren, X., Ren, X., Fan, Y., Su, Y., Zhang, Y., Wan, Y., Liu, Y., Cui, Z., Zhang, Z., and Qiu, Z. Qwen2.5 technical report, 2025. URL https: //arxiv.org/abs/2412.15115 .Raposo, D., Ritter, S., Richards, B., Lillicrap, T., Humphreys, P. C., and Santoro, A. Mixture-of-depths: Dynamically allocating compute in transformer-based language models, 2024. URL https://arxiv.org/ abs/2404.02258 .Saxena, U., Saha, G., Choudhary, S., and Roy, K. Eigen attention: Attention in low-rank space for kv cache com-pression. arXiv preprint arXiv:2408.05646 , 2024. Sharma, A., Najafi, S., Farinneya, P., Jamialahmadi, B., Tahaei, M. S., Fan, Y., Rezagholizadeh, M., Chen, B., and Jafari, A. Dtrnet: Dynamic token routing network to reduce quadratic costs in transformers, 2025. URL 
+
+https://arxiv.org/abs/2509.00925 .Shazeer, N., Mirhoseini, A., Maziarz, K., Davis, A., Le, Q. V., Hinton, G. E., and Dean, J. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. CoRR , abs/1701.06538, 2017. URL http:// arxiv.org/abs/1701.06538 .Stelmakh, I., Luan, Y., Dhingra, B., and Chang, M.-W. Asqa: Factoid questions meet long-form answers, 2023. URL 
+
+https://arxiv.org/abs/2204.06092 .Su, W., Tang, Y., Ai, Q., Wu, Z., and Liu, Y. DRA-GIN: Dynamic retrieval augmented generation based on the real-time information needs of large language models. In Ku, L.-W., Martins, A., and Srikumar, V. (eds.), Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pp. 12991–13013, Bangkok, Thailand, August 2024. Association for Computational Linguis-tics. doi: 10.18653/v1/2024.acl-long.702. URL https: //aclanthology.org/2024.acl-long.702/ .Tillet, P., Kung, H. T., and Cox, D. Triton: an inter-mediate language and compiler for tiled neural net-work computations. In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learn-ing and Programming Languages , MAPL 2019, pp. 10–19, New York, NY, USA, 2019. Association for Com-puting Machinery. ISBN 9781450367196. doi: 10. 1145/3315508.3329973. URL https://doi.org/ 10.1145/3315508.3329973 .13 Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., Kaiser, L. u., and Polosukhin, I. At-tention is all you need. In Guyon, I., Luxburg, U. V., Bengio, S., Wallach, H., Fergus, R., Vishwanathan, S., and Garnett, R. (eds.), Advances in Neural Information Processing Systems , volume 30. Curran Associates, Inc., 2017. Vodrahalli, K., Ontanon, S., Tripuraneni, N., Xu, K., Jain, S., Shivanna, R., Hui, J., Dikkala, N., Kazemi, M., Fatemi, B., Anil, R., Dyer, E., Shakeri, S., Vij, R., Mehta, H., Ramasesh, V., Le, Q., Chi, E., Lu, Y., Fi-rat, O., Lazaridou, A., Lespiau, J.-B., Attaluri, N., and Olszewska, K. Michelangelo: Long context evaluations beyond haystacks via latent structure queries, 2024. URL 
+
+https://arxiv.org/abs/2409.12640 .Wang, J., Paliotta, D., May, A., Rush, A., and Dao, T. The mamba in the llama: Distilling and accelerating hybrid models. Advances in Neural Information Processing Systems , 37:62432–62457, 2024a. Wang, L., Gao, H., Zhao, C., Sun, X., and Dai, D. Auxiliary-loss-free load balancing strategy for mixture-of-experts. 
+
+arXiv preprint arXiv:2408.15664 , 2024b. Xia, H., Li, Y., Leong, C. T., Wang, W., and Li, W. Tokenskip: Controllable chain-of-thought compression in llms, 2025. URL https://arxiv.org/abs/ 2502.12067 .Xiao, C., Zhang, P., Han, X., Xiao, G., Lin, Y., Zhang, Z., Liu, Z., and Sun, M. InfLLM: Training-free long-context extrapolation for LLMs with an efficient context mem-ory. In The Thirty-eighth Annual Conference on Neural Information Processing Systems , 2024a. URL https: //openreview.net/forum?id=bTHFrqhASY .Xiao, G., Tian, Y., Chen, B., Han, S., and Lewis, M. Effi-cient streaming language models with attention sinks. In 
+
+The Twelfth International Conference on Learning Rep-resentations , 2024b. URL https://openreview. net/forum?id=NG7sS51zVF .Yan, S.-Q., Gu, J.-C., Zhu, Y., and Ling, Z.-H. Corrective retrieval augmented generation, 2024. URL https: //arxiv.org/abs/2401.15884 .Yang, A., Yu, B., Li, C., Liu, D., Huang, F., Huang, H., Jiang, J., Tu, J., Zhang, J., Zhou, J., et al. Qwen2. 5-1m technical report. arXiv preprint arXiv:2501.15383 , 2025. Yang, S., Kautz, J., and Hatamizadeh, A. Gated delta net-works: Improving mamba2 with delta rule. In The Thir-teenth International Conference on Learning Representa-tions .Yen, H., Gao, T., Hou, M., Ding, K., Fleischer, D., Izsak, P., Wasserblat, M., and Chen, D. Helmet: How to evaluate long-context language models effectively and thoroughly. In International Conference on Learning Representations (ICLR) , 2025. Yuan, J., Gao, H., Dai, D., Luo, J., Zhao, L., Zhang, Z., Xie, Z., Wei, Y., Wang, L., Xiao, Z., Wang, Y., Ruan, C., Zhang, M., Liang, W., and Zeng, W. Na-tive sparse attention: Hardware-aligned and natively trainable sparse attention. In Che, W., Nabende, J., Shutova, E., and Pilehvar, M. T. (eds.), Proceedings of the 63rd Annual Meeting of the Association for Com-putational Linguistics (Volume 1: Long Papers) , pp. 23078–23097, Vienna, Austria, July 2025. Association for Computational Linguistics. ISBN 979-8-89176-251-0. doi: 10.18653/v1/2025.acl-long.1126. URL https:// aclanthology.org/2025.acl-long.1126/ .Zancato, L., Seshadri, A., Dukler, Y., Golatkar, A., Shen, Y., Bowman, B., Trager, M., Achille, A., and Soatto, S. B'mojo: Hybrid state space realizations of foundation models with eidetic and fading memory. In Globerson, A., Mackey, L., Belgrave, D., Fan, A., Paquet, U., Tomczak, J., and Zhang, C. (eds.), Advances in Neural Informa-tion Processing Systems , volume 37, pp. 130433–130462. Curran Associates, Inc., 2024. Zhang, Z., Sheng, Y., Zhou, T., Chen, T., Zheng, L., Cai, R., Song, Z., Tian, Y., R ´e, C., Barrett, C., et al. H2o: Heavy-hitter oracle for efficient generative inference of large language models. Advances in Neural Information Processing Systems , 36:34661–34710, 2023. Zhao, W., Zhou, Z., Su, Z., Xiao, C., Li, Y., Li, Y., Zhang, Y., Zhao, W., Li, Z., Huang, Y., Sun, A., Han, X., and Liu, Z. Infllm-v2: Dense-sparse switchable attention for seamless short-to-long adaptation, 2025. URL https: //arxiv.org/abs/2509.24663 .Zhou, Y., Liu, H., Chen, Z., Tian, Y., and Chen, B. Gsm-infinite: How do your llms behave over infinitely increas-ing context length and reasoning complexity?, 2025. URL 
+
+https://arxiv.org/abs/2502.05252 .14 Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+A. Gradient Analysis of the Routing Mechanism 
+
+We repeat the equations presented in Section 3.3 here before diving into understanding the routing decision behavior during training. Formally, given an input sequence (x1, . . . , xt):
+
+st = LocalAttn( xt, xt−1, . . . , xt−k) ∀ t = 1 , . . . , n (8) 
+
+ˆdt = σ(Ws t), dt =
+
+(
+
+1, if ˆdt ≥ 0.5,
+
+0, otherwise. (9) 
+
+at = GlobalAttn( st, st−1, . . . , s1), (10) The contribution of global attention to the residual stream can be written as 
+
+ot = dt.at + st, (11) where this term is added to the residual connection following standard Transformer conventions. Thus, when dt = 0 , the token retains its local representation st.The overall training objective is defined as: 
+
+L = LNTP + λnL 
+
+> L
+
+X
+
+> l=1
+> n
+
+X
+
+> t=1
+
+ˆd2
+
+> l,t
+
+. (12) For clarity, gradients for a single layer are derived, and the layer index l is omitted in what follows. The gradient ∂L
+
+> ∂W
+
+determines how the routing function learns to activate global attention during training. Aggregating contributions across all tokens, we have 
+
+∂L
+
+∂W =
+
+> n
+
+X
+
+> t=1
+
+∂L
+
+∂ ˆdt
+
+∂ ˆdt
+
+∂W (13) 
+
+∂ ˆdt
+
+∂W = ˆdt(1 − ˆdt)s⊤ 
+
+> t
+
+(14) The gradient of the loss with respect to ˆdt is 
+
+∂L
+
+∂ ˆdt
+
+= ∂LNTP 
+
+∂ ˆdt
+
++ ∂∂ ˆdt
+
+λL
+
+> n
+
+X 
+
+> τ=1
+
+ˆd2
+
+> τ
+
+!
+
+≈
+
+ ∂LNTP 
+
+∂ot
+
+T ∂ot
+
+∂dt
+
++ 2λL ˆdt =
+
+ ∂LNTP 
+
+∂ot
+
+T
+
+.at + 2λL ˆdt. (15) The approximation ( ≈) in the above equation reflects the use of Straight Through Estimator (STE) for backpropagation through discrete routing decisions as discussed in Section 3.3. Specifically, dt is a discrete routing decision in the forward pass, while the gradients are computed with respect to the continuous routing score ˆdt during training. Combining equations 14 and 15: 
+
+∂L
+
+∂W =
+
+> n
+
+X
+
+> t=1
+
+∂L
+
+∂ ˆdt
+
+∂ ˆdt
+
+∂W =
+
+> n
+
+X
+
+> t=1
+
+ ∂LNTP 
+
+∂ot
+
+.at ˆdt(1 − ˆdt) s⊤ 
+
+> t
+
++ 2λL ˆd2 
+
+> t
+
+(1 − ˆdt) s⊤
+
+> t
+
+
+
+(16) To interpret the effect of the gradient update on the routing decision, consider the gate logit zt := Ws t, which directly determines the routing score ˆdt = σ(zt). Under gradient descent, W ← W − η ∂L 
+
+> ∂W
+
+, the induced change in zt is 
+
+∆zt = −η
+
+ ∂L
+
+∂W
+
+
+
+st = −η
+
+ ∂LNTP 
+
+∂ot
+
+.at ˆdt(1 − ˆdt)
+
+
+
+∥st∥2 +
+
+ 2λL ˆd2 
+
+> t
+
+(1 − ˆdt)
+
+
+
+∥st∥2
+
+
+
+(17) 15 Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+The first term arises from the next token prediction loss (NTP) and provides a context-dependent learning signal that can increase or decrease zt, enabling the model to selectively activate global attention only when it improves the language modeling objective. The second term arises from the sparsity regularization and is elementwise non-negative, thus driving 
+
+zt toward smaller values, encouraging ˆdt → 0 and promoting sparse activation of global attention. For masked tokens (i.e. 
+
+at = 0 ), the NTP term in Equation (17) vanishes, and the regularization term alone favors solutions with dt → 0, causing the model to never invoke Global Attention.We refer to this behavior as router collapse and discuss it in Section 3.3, along with our strategy for invoking Global Attention across all tokens with Bernoulli sampling (probability ∼ 0.1). 
+
+B. Extended Related Works 
+
+B.1. Context Length Extrapolation 
+
+To mitigate the computational and memory cost of training LLMs on long sequences, several context length extrapolation methods have been proposed (An et al., 2024; Xiao et al., 2024a; Peng et al., 2023; Ding et al., 2024). These approaches extend a model’s native context with minimal training by rescaling or reusing positional indices learned during pretraining (Peng et al., 2023; Chen et al., 2023; Liu et al., 2024b), and can be applied directly to pretrained models or used in conjunction with long-context training. For example, Position Interpolation (Chen et al., 2023) linearly scales rotary position embedding (RoPE) indices, while YaRN (Peng et al., 2023) applies uneven frequency interpolation to better preserve high-frequency components. Another line of work compresses the input using windowed or chunk-based attention (Xiao et al., 2024b; Han et al., 2024), which restricts access to distant context. While hierarchical schemes like Dual-Chunk Attention (DCA) partially reintroduce global information (An et al., 2024; Jin et al., 2024), downstream performance often remains limited, motivating training-based approaches for improved long-context modeling. 
+
+B.2. Dynamic Routing in LLMs 
+
+Mixture-of-Experts (MoE) architectures introduced conditional computation as a scalable approach for improving the efficiency of LLM training and inference (Shazeer et al., 2017). MoE consists of multiple expert networks, typically lightweight MLPs, selectively activated for each input through a trainable gating mechanism. While effective at scale, this paradigm generally requires training the entire model from scratch. Several recent works propose training lightweight routing modules on top of frozen backbones, enabling coarse-grained conditional execution such as skipping entire layers based on input difficulty (Heakl et al., 2025). To achieve more adaptive and fine-grained conditional computation, token-level routing has emerged as a viable alternative (Raposo et al., 2024; Jiang et al., 2024b; Sharma et al., 2025). By operating at the token level, these approaches aim to focus computation on informative tokens while allowing simpler tokens to follow cheaper execution paths. Mixture-of-Depths (MoD) (Raposo et al., 2024) selects a fixed top-k subset of tokens to process at each decoder block using a learned, layer-wise router, while Mixture-of-Recursions (MoR) (Bae et al., 2025) extends this idea to recursive transformers by dynamically determining the number of recursion steps per token. However, both approaches rely on static per-layer compute budgets that route a fixed number of tokens regardless of input complexity or sequence length. In addition, their top-k routing decisions are inherently non-causal. Although auxiliary routers or losses are used to predict routing behavior during inference, they introduce a mismatch between training and inference dynamics, leading to degraded performance. D-LLM (Jiang et al., 2024b) further improves upon deterministic top-k routing by employing Gumbel-Softmax–based routing modules for each layer. Despite more flexible routing, D-LLM, similar to prior token-routing approaches, routes tokens around entire decoder blocks, causing skipped tokens to bypass both attention and MLP layers. While this design improves computational efficiency, it disrupts token interactions and limits representation capacity. These limitations are expected to become more pronounced in long-context settings, where preserving fine-grained token–token interactions over extended sequences is crucial, suggesting that block-level routing is a suboptimal design choice. 
+
+B.3. External Memory-Based Approaches 
+
+To address the limitations of fixed context windows, several approaches augment pretrained LLMs with external memory mechanisms to retrieve and incorporate relevant information into the input (Lewis et al., 2020; Chhikara et al., 2025; Borgeaud et al., 2021; Su et al., 2024). Early work in this direction focuses on Retrieval-Augmented Generation (RAG), where the model input is augmented with passages retrieved from an external knowledge corpus (Lewis et al., 2020; 16 Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+Algorithm 1 L2A Kernel Forward Pass 
+
+Require: Matrices Q, K, V ∈ Rn×d and non-zero query indices Qidx ∈ Rn
+
+1: Consolidate active (non-zero) queries into Qc ∈ Rnc×d using indices Qidx .
+
+2: Qc tiled into Tq = nc/B q blocks ( Qc, 1, . . . , Qc,T q of size Bq × d), K, V into Tk = n/B k blocks ( K1, . . . , KTk ,
+
+V1, . . . , VTk , of size Bk × d), and Qidx into Tq = n/B q blocks ( Qidx, 1, . . . , Qidx,T q of size Bq )
+
+3: Initialize O ← 0n×d. Partition Oc ∈ Rnc×d into Tq tiles ( Oc,i , . . . , Oc,T q of size Bq × d), and divide the logsumexp 
+
+Lc into Tq blocks ( Lc,i , . . . , L c,T q of size Bq ). 
+
+4: for 1 ≤ i ≤ Tq do 
+
+5: Load Qc,i and Qidx,i tiles from HBM to on-chip SRAM. 
+
+6: max k blocks = max (Qidx,i )/B k
+
+7: Initialize O(0)  
+
+> c,i
+
+= (0) Bq ×d ∈ RBq ×d, ℓ (0)  
+
+> c,i
+
+= (0) Bq ∈ RBq , m (0)  
+
+> c,i
+
+= ( −∞ )Bq ∈ RBq .
+
+8: for 1 ≤ j ≤ max k blocks do 
+
+9: Load Kj , Vj tiles from HBM to on-chip SRAM with ids Kidx .
+
+10: S(j) 
+
+> i
+
+= ( Qc,i KTj )/√d ∈ RBq ×Bk with element-wise causal mask Qidx,i >= Kidx .
+
+11: m(j) 
+
+> c,i
+
+= max( m(j−1)  
+
+> c,i
+
+, rowmax( S(j) 
+
+> i
+
+)) ∈ RBq
+
+12: ˜P(j) 
+
+> i
+
+= exp( S(j) 
+
+> i
+
+− m(j) 
+
+> c,i
+
+) ∈ RBq ×Bk
+
+13: ℓ(j) 
+
+> c,i
+
+= em(j−1)   
+
+> c,i −m(j)
+> c,i
+
+ℓ(j−1)  
+
+> c,i
+
++ rowsum( ˜P(j) 
+
+> i
+
+) ∈ RBq .
+
+14: O(j) 
+
+> c,i
+
+= diag( em(j−1)   
+
+> c,i −m(j)
+> c,i
+
+)−1O(j−1)  
+
+> c,i
+
++ ˜P(j) 
+
+> i
+
+Vj .
+
+15: end for 
+
+16: Oc,i = diag( ℓ(Tq ) 
+
+> c,i
+
+)−1O(Tq ) 
+
+> c,i
+
+.
+
+17: Lc,i = m(Tq ) 
+
+> c,i
+
++ log( ℓ(Tq ) 
+
+> c,i
+
+).
+
+18: Write Oc,i and Lc,i to HBM as the i-th tiles of Oc and Lc, respectively. 
+
+19: end for 
+
+20: Save Qc, K, V, Oc, L c, Qidx for backward. 
+
+21: Scatter Oc to O using Qidx (i.e., O[Qidx ] ← Oc). 
+
+22: return O and Lc
+
+Borgeaud et al., 2021). RAG provides an efficient complement to long-context inference, but its effectiveness is contingent upon the quality and relevance of the retrieved information (Asai et al., 2024; Yan et al., 2024). This can be mitigated through nearest-neighbor based retrieval (Borgeaud et al., 2021), self-corrective and adaptive retrieval strategies (Yan et al., 2024; Jeong et al., 2024) and context-based graphical external memory representations (Chhikara et al., 2025). Despite these advances, external memory-based approaches often lag behind models that directly operate over long contexts (Li et al., 2024; Zhou et al., 2025). This gap is commonly attributed to the limited ability of such approaches to discern complex and implicit dependencies and to attend to relevant context. In contrast, our approach treats long-term memory access as a native operation within the model, enabling conditional global attention to perform context-based retrieval directly over the input sequence. 
+
+C. L2A Kernel Forward Pass 
+
+Algorithm 1 outlines the forward pass of the L2A kernel, which extends FlashAttention-2 to support token-level conditional Global Attention. Active queries are first compacted into a contiguous buffer Qc using the index mapping Qidx , enabling efficient tiled computation. The kernel processes Qc, K, and V in blocks streamed from high-bandwidth memory into on-chip SRAM, and for each query tile iterates only over key–value tiles that lie within its causal range as determined by Qidx . Attention scores are accumulated using an online log-sum-exp scheme to ensure numerical stability without materializing the full attention matrix. After processing all relevant tiles, the compact outputs Oc and normalization statistics 
+
+Lc are written back to memory and scattered to reconstruct the full output O. This design preserves the efficiency and numerical stability of FA-2 while avoiding unnecessary computation for inactive queries. 17 Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+D. Additional Results 
+
+D.1. L2A Kernel Speedups 
+
+We benchmark the forward and backward pass of L2A kernel on NVIDIA H200 GPUs and compare it against FlashAttention-2. As shown in Figure 10, our custom kernel achieves 1.6-35 × and 1.08-45 × speedups for the forward and the backward pass across varying sparsity levels, where sparsity denotes the fraction of queries for which Global Attention is skipped. 32K 64K 128K   
+
+> Sequence Length
+> 0
+> 5
+> 10
+> 15
+> 20
+> 25
+> 30
+> 35
+> 40
+> 45
+> Speedup over FlashAttention-2
+> 1.35
+> 10.27
+> 1.48
+> 20.32
+> 1.54
+> 38.65
+> Sparsity
+> 20%
+> 50%
+> 80%
+> 90%
+> 95%
+> 99% 32K 64K 128K
+> Sequence Length
+> 0
+> 5
+> 10
+> 15
+> 20
+> 25
+> 30
+> 35
+> 40
+> 45
+> 50
+> 1.07
+> 20.56
+> 1.09
+> 30.94
+> 1.09
+> 45.80
+
+Figure 10. L2A kernel speedups over FlashAttention-2 for the forward (left) and backward (right) pass across varying sparsity levels and sequence lengths. Qwen-2.5 7B configuration is used (28 attention heads and a head dimension of 128). 
+
+E. Additional Analysis of Native Sparse Attention (NSA) 
+
+As mentioned in Section 4.1, the original NSA work (Yuan et al., 2025) does not provide an official kernel implementation. Therefore, we rely on a publicly available open-source implementation (Li, 2025) to evaluate NSA in our experiments. To verify the correctness of this implementation, we reproduce the Needle-in-a-Haystack retrieval results reported in the original paper at a sequence length of 64K. We obtain perfect retrieval accuracy, matching the results reported in the paper, indicating that the implementation faithfully realizes the NSA algorithm. We then analyze the kernel-level performance of this implementation relative to FlashAttention-2 (Dao, 2023) across varying sequence lengths. As shown in Figure 11, the evaluated NSA kernel is consistently slower than FlashAttention-2 for both the forward and backward passes. We emphasize that this observation does not contradict the claims of the original NSA paper. Specifically, the original design proposes executing the compression, top-n block selection, and Sliding Window Attention (SWA) components in parallel, whereas the available open-source kernel executes these stages sequentially. The absence of parallel execution in this implementation is likely the primary contributor to the observed performance gap. In all experiments, we follow the hyperparameters described in the original NSA paper as closely as possible. The only deviation is the choice of selected block count n, and we find the setting in the original paper ( n = 16 ) to result in degraded performance in our setup. We therefore increase n to 128 in all NSA experiments. Notably, as shown in Figure 4, even with this substantially larger n, which is more favorable to NSA than the original paper setting, L2A significantly outperforms NSA across all evaluated tasks. This highlights the advantage of learning when to invoke global attention on a per-token basis, as opposed to relying on a fixed long-range context budget. Although NSA learns which tokens to attend within the context, the amount of long-context capacity is predetermined and applied uniformly across tokens. 
+
+E.1. Ablation Study 
+
+E.1.1. A BLATION ON THE REGULARIZATION COEFFICIENT .We next study the effect of the regularization coefficient λ in the training objective (Equation (6)) on L2A ’s performance. As expected, increasing λ induces higher sparsity, leading to greater reliance on Local Attention and, in turn, degraded long-context performance (Figure 12). However, tuning λ is challenging because its values do not map directly to specific sparsity levels. To address this, we instead vary the sigmoid threshold in Equation (9), which enables direct control over Global Attention sparsity at test time. 18 Learning When to Attend: Conditional Memory Access for Long-Context LLMs 32K 64K 128K 
+
+> Sequence Length
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> 1.2
+> Speedup over FA-2
+> Forward
+> Backward
+
+Figure 11. Native Sparse Attention (NSA) kernel (Li, 2025) speedups over FlashAttention-2 for the forward and backward pass across various sequence lengths. All experiments use the Qwen 2.5 7B configuration with 28 attention heads and a head dimension of 128. 8k 16k 32k 64k 128k                                      
+
+> 40
+> 60
+> 80
+> Score
+> Synthetic recall
+> 8k 16k 32k 64k 128k
+> 30
+> 35
+> 40
+> 45
+> 50
+> Retrieval-Augmented Generation
+> 8k 16k 32k 64k 128k
+> 50
+> 60
+> 70
+> 80
+> Many-shot in-context learning
+> 8k 16k 32k 64k 128k
+> 2
+> 4
+> 6
+> 8
+> Generation w/ citations
+> 8k 16k 32k 64k 128k
+> Sequence Length
+> 10
+> 20
+> 30
+> 40
+> Score
+> Passage re-ranking
+> 8k 16k 32k 64k 128k
+> Sequence Length
+> 10
+> 15
+> 20
+> 25
+> 30
+> Multi-round co-reference resolution
+> 8k 16k 32k 64k 128k
+> Sequence Length
+> 25
+> 30
+> 35
+> 40
+> Fact chaining & relational reasoning
+> 8k 16k 32k 64k 128k
+> Sequence Length
+> 25
+> 30
+> 35
+> 40
+> 45
+> Long Context Score
+> Aggregate Performance
+> CLP L2A [ = 10 6]L2A [ = 10 7]L2A [ = 10 8]
+
+Figure 12. Ablation on the regularization coefficient λ. Increasing λ induces higher sparsity, leading to greater reliance on Local Attention and degraded long-context performance. 
+
+E.1.2. T EST -TIME COMPUTE SCALING THROUGH SIGMOID THRESHOLD .In all experiments, we apply a fixed threshold of 0.5 to the sigmoid output of the routing module to obtain discrete routing decisions, as defined in Equation 3. To examine test-time compute scaling, we vary this threshold at inference to control the sparsity of global attention. For a range of threshold values as shown in Figure 13, increasing the threshold leads to higher sparsity and lower time-to-first-token, at the cost of reduced aggregate performance, while lower thresholds recover performance at increased compute cost. This enables flexible test-time control over the compute–accuracy trade-off, allowing inference cost to be modulated without retraining. E.1.3. C OMPARING FULL -MODEL FINE -TUNING WITH ATTENTION AND LAYER NORM -ONLY TRAINING 
+
+As described in Section 4, we restrict training to the Attention and LayerNorm layers while freezing the feed-forward (FFN) layers. This design choice is motivated by prior work showing that a large fraction of the model’s pretrained parametric knowledge is encoded in FFNs (Geva et al., 2021), while attention layers primarily focus on contextual routing and composition. By preserving FFNs, we aim to retain the pretrained capabilities of the Base LLM while adapting to long-context modeling. As shown in Table 6, this strategy consistently outperforms full-model fine-tuning. 19 Learning When to Attend: Conditional Memory Access for Long-Context LLMs 0.20 0.22 0.24 0.26                         
+
+> Avg. Time-To-First-Token (secs)
+> 53.0
+> 53.5
+> 54.0
+> 54.5
+> 55.0
+> 55.5
+> 56.0
+> Aggregate Score
+> Context Length: 8k
+> 0.44 0.46 0.48 0.50 0.52
+> Avg. Time-To-First-Token (secs)
+> 50.0
+> 50.5
+> 51.0
+> 51.5
+> 52.0
+> Aggregate Score
+> Context Length: 16k
+> 1.04 1.06 1.08 1.10 1.12 1.14
+> Avg. Time-To-First-Token (secs)
+> 47.50
+> 47.75
+> 48.00
+> 48.25
+> 48.50
+> 48.75
+> 49.00
+> Aggregate Score
+> Context Length: 32k
+> 2.4 2.6 2.8 3.0
+> Avg. Time-To-First-Token (secs)
+> 44.50
+> 44.75
+> 45.00
+> 45.25
+> 45.50
+> Aggregate Score
+> Context Length: 64k
+> 678910
+> Avg. Time-To-First-Token (secs)
+> 40.8
+> 41.0
+> 41.2
+> 41.4
+> 41.6
+> Aggregate Score
+> Context Length: 128k
+> Aggregate Performance vs Throughput (on single H200 GPU)
+> CLP L2A [ 0.6] L2A [ 0.55] L2A [ 0.5] L2A [ 0.4]
+
+Figure 13. Scaling test time compute for L2A by varying the threshold of the Routing module (Equation (3)). Increasing the threshold leads to higher sparsity and lower time-to-first-token, at the cost of reduced aggregate performance. 
+
+F. Implementation Details 
+
+F.1. Training Hyperparameters 
+
+All models are trained using the AdamW optimizer with an initial learning rate of 5 × 10 −5, 5% warmup steps, cosine learning rate scheduling, and gradient clipping with a norm of 1. We use a batch size of 6M tokens for the Qwen 2.5 7B-based and Qwen3 8B-based models, and 4M tokens for the Qwen 2.5 1.5B model. All experiments are conducted with a sequence length of 128K tokens using BF16 training. We train for 25B tokens the Qwen2.5 7B- and Qwen3 8B-based models, while for the smaller Qwen2.5 1.5B-based models we train on 16.7B tokens. 
+
+F.2. Long-context Benchmarks 
+
+We consider a suite of long-context evaluation tasks drawn from HELMET (Yen et al., 2025), BabiLong (Kuratov et al., 2024), and MRCR (Vodrahalli et al., 2024), which we describe below. • Synthetic Recall : These tasks are variants of the needle-in-a-haystack setting (Kamradt, 2024), in which the model must retrieve a critical piece of information (the “needle”) from a long sequence of irrelevant or distracting tokens (the “haystack”). In addition to retrieval, these variants evaluate the model’s ability to perform multi-hop tracing and information aggregation across the context. Our Recall evaluation consists of these tasks from HELMET (Yen et al., 2025): JSON Key–Value, NIAH Multi-Key (MK) Needle, NIAH Multi-Key (MK) UUID, and NIAH Multi-Value (MV). • Multi-round Co-reference Resolution (MRCR) : MRCR (Vodrahalli et al., 2024) measures an LLM’s ability to resolve multiple reference needles distributed across a long context. The model is presented with a multi-turn, synthetically generated conversation in which the user issues repeated requests for a piece of writing on a given topic. Embedded within the conversation are a few identical requests, and the model is ultimately prompted to return a specific instance. Task difficulty increases with both the context length and the number of needles. • Retrieval Augmented Generation (RAG) : These tasks involve open-domain question answering, where the model is provided with a gold passage containing the answer, interleaved with numerous distractor passages retrieved from a large corpus. The model is required to answer the question using the provided passages. We evaluate on the following datasets from HELMET (Yen et al., 2025): Natural Questions, TriviaQA, PopQA, and HotpotQA. 20 Learning When to Attend: Conditional Memory Access for Long-Context LLMs 0.06 0.08 0.10 0.12 
+
+Avg. Time-To-First-Token (secs) 
+
+40 
+
+41 
+
+42 
+
+43 
+
+44 
+
+45 
+
+46 
+
+> Aggregate Score
+
+Context Length: 8k 
+
+0.14 0.16 0.18 0.20 
+
+Avg. Time-To-First-Token (secs) 
+
+37 
+
+38 
+
+39 
+
+40 
+
+41 
+
+> Aggregate Score
+
+Context Length: 16k 
+
+0.36 0.38 0.40 0.42 0.44 0.46 0.48 
+
+Avg. Time-To-First-Token (secs) 
+
+33 
+
+34 
+
+35 
+
+36 
+
+37 
+
+> Aggregate Score
+
+Context Length: 32k 
+
+0.8 1.0 1.2 1.4 1.6 
+
+Avg. Time-To-First-Token (secs) 
+
+28 
+
+30 
+
+32 
+
+34 
+
+> Aggregate Score
+
+Context Length: 64k 
+
+2.0 2.5 3.0 3.5 4.0 
+
+Avg. Time-To-First-Token (secs) 
+
+24 
+
+26 
+
+28 
+
+30 
+
+> Aggregate Score
+
+Context Length: 128k 
+
+Aggregate Performance vs Throughput (on single H200 GPU) 
+
+CLP L2A (Ours) FlexPrefill DCA S2-attn SelfExtend 
+
+Figure 14. Time-to-first-token (TTFT) for Qwen2.5 1.5B model for various sequence lengths. L2A becomes progressively faster as the context length increases, highlighting the need for conditional Global Attention. 0.20 0.25 0.30 
+
+Avg. Time-To-First-Token (secs) 
+
+51 
+
+52 
+
+53 
+
+54 
+
+55 
+
+56 
+
+> Aggregate Score
+
+Context Length: 8k 
+
+0.42 0.44 0.46 0.48 0.50 0.52 
+
+Avg. Time-To-First-Token (secs) 
+
+48 
+
+49 
+
+50 
+
+51 
+
+52 
+
+> Aggregate Score
+
+Context Length: 16k 
+
+1.00 1.05 1.10 1.15 1.20 1.25 
+
+Avg. Time-To-First-Token (secs) 
+
+44 
+
+45 
+
+46 
+
+47 
+
+48 
+
+49 
+
+> Aggregate Score
+
+Context Length: 32k 
+
+2.5 3.0 3.5 
+
+Avg. Time-To-First-Token (secs) 
+
+36 
+
+38 
+
+40 
+
+42 
+
+44 
+
+> Aggregate Score
+
+Context Length: 64k 
+
+5 6 7 8 9 10 
+
+Avg. Time-To-First-Token (secs) 
+
+27.5 
+
+30.0 
+
+32.5 
+
+35.0 
+
+37.5 
+
+40.0 
+
+> Aggregate Score
+
+Context Length: 128k 
+
+Aggregate Performance vs Throughput (on single H200 GPU) 
+
+CLP L2A (Ours) FlexPrefill DCA S2-attn SelfExtend 
+
+Figure 15. Time-to-first-token (TTFT) for Qwen2.5 7B model for various sequence lengths. L2A becomes progressively faster as the context length increases, highlighting the need for conditional Global Attention. 
+
+21 Learning When to Attend: Conditional Memory Access for Long-Context LLMs 8k 16k 32k 64k 128k      
+
+> Sequence Length
+> 30.0
+> 32.5
+> 35.0
+> 37.5
+> 40.0
+> 42.5
+> 45.0
+> 47.5
+> Long Context Score
+> CLP
+> L2A [w/ SWA 4K]
+> L2A [w/ SWA 2K] L2A [w/ SWA0 512] L2A [w/ SWA 0]
+> Figure 16. Aggregate long-context performance for L2A variants with varying SWA window sizes. The performance remains similar, while the Router module compensates for smaller SWA windows by reducing sparsity in Global Attention invocations.
+
+• Many-shot In-context Learning (ICL) : ICL evaluates an LLM’s ability to acquire new skills from a small number of examples provided in the prompt. In this setting, the model learns to classify inputs into different concepts based on several in-context demonstrations. We evaluate ICL performance using the following datasets from HELMET: TREC Coarse, TREC Fine, NLU, BANKING77, and CLINIC150. • Generation with Citations (Cite) : LLMs are benchmarked on a realistic question-answering setting that requires generating responses with correct attributions (Bohnet et al., 2023). Given multi-faceted questions and a set of relevant passages, models are tasked with producing long-form answers while citing supporting passage identifiers (Gao et al., 2023). This evaluates the model’s ability to reason over the provided context and its adherence to citation instructions. We consider the ASQA (Stelmakh et al., 2023) and QAMPARI (Amouyal et al., 2023) subsets, and the outputs are evaluated for both answer correctness and citation quality. • Passage Re-ranking (Re-rank) : We evaluate passage re-ranking performance using the MS MARCO benchmark (Bajaj et al., 2018) and annotated datasets from the TREC Passage Re-ranking challenge (Craswell et al., 2025). Each instance consists of a query and a set of candidate passages labeled by relevance. For a given input length L, we select k
+
+passages as context, balance label distributions, and randomize passage order to mitigate positional bias, generating three permutations per instance. Performance is measured using NDCG@10, which balances evaluation fidelity with the computational cost of inference. • Fact Chaining & Relational Reasoning (FCRR) : We evaluate long-context fact chaining and relational reasoning using the QA1–QA5 tasks from the BabiLong benchmark (Kuratov et al., 2024). These tasks are designed to assess progressively more challenging reasoning capabilities, ranging from single-fact retrieval (QA1) to multi-hop fact chaining (QA2 and QA3) and relational reasoning over two- and three-argument relations (QA4 and QA5). Relevant facts are sparsely distributed across long sequences containing a large number of distractor tokens, requiring models to selectively retrieve and compose information over extended contexts. Performance on these tasks reflects a model’s ability to handle long-range dependencies, multi-step reasoning, and structured relational inference under long-context noise. 22 Learning When to Attend: Conditional Memory Access for Long-Context LLMs 0 500 1000 1500 2000 2500 3000 3500 4000 
+
+Training Iteration 
+
+0
+
+20 
+
+40 
+
+60 
+
+80 
+
+100 
+
+> Router Sparsity
+
+L2A [w/ SWA 4K] 
+
+L2A [w/ SWA 2K] 
+
+L2A [w/ SWA 512] 
+
+L2A [w/ SWA 0] 
+
+Figure 17. Sparsity levels for L2A variants with different SWA sizes. As the short-term local context shrinks, L2A increasingly relies on long-term global memory. In the extreme case, the SWA-0 configuration exhibits 0% sparsity during training. 0.06 0.08 0.10 0.12 0.14 0.16 
+
+> Avg. Time-To-First-Token (secs)
+> 45.0
+> 45.5
+> 46.0
+> 46.5
+> Aggregate Score
+
+Context Length: 8k      
+
+> 0.14 0.15 0.16 0.17 0.18 0.19
+> Avg. Time-To-First-Token (secs)
+> 39.5
+> 40.0
+> 40.5
+> 41.0
+> 41.5
+> Aggregate Score
+
+Context Length: 16k     
+
+> 0.33 0.34 0.35 0.36 0.37
+> Avg. Time-To-First-Token (secs)
+> 36.6
+> 36.8
+> 37.0
+> 37.2
+> 37.4
+> 37.6
+> Aggregate Score
+
+Context Length: 32k    
+
+> 0.8 0.9 1.0 1.1
+> Avg. Time-To-First-Token (secs)
+> 33.0
+> 33.5
+> 34.0
+> 34.5
+> 35.0
+> Aggregate Score
+
+Context Length: 64k    
+
+> 2.0 2.5 3.0 3.5
+> Avg. Time-To-First-Token (secs)
+> 28.8
+> 29.0
+> 29.2
+> 29.4
+> 29.6
+> 29.8
+> Aggregate Score
+
+Context Length: 128k 
+
+Aggregate Performance vs Throughput (on single H200 GPU)     
+
+> CLP L2A [w/ SWA 4K] L2A [w/ SWA 2K] L2A [w/ SWA0 512] L2A [w/ SWA 0]
+
+Figure 18. Time-to-first token (TTFT) for L2A variants with varying SWA context window from 0-4K. These results reveal a clear tradeoff: as the short-term local context shrinks, L2A increasingly relies on long-term global memory resulting into higher TTFT as shown. 
+
+23 Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+Table 3. Task-wise performance comparison of L2A and baseline methods across long-context benchmarks on Qwen 2.5 7B model. L2A 
+
+remains close to CLP performance while outperforming baselines on most tasks. All scores are reported on a 0–100 scale. 
+
+Task Model Context Length 8k 16k 32k 64k 128k 
+
+Synthetic recall CLP 99.1 98.5 98.7 95.4 76.4 L2A (Ours) 98.7 97.3 96.5 93.9 79.2 
+
+FlexPrefill 98.1 96.5 91.8 88.9 69.8 DCA 98.6 96.7 94.0 71.9 43.9 S2-attn 99.1 98.8 97.6 74.6 29.0 SelfExtend 98.6 96.4 78.2 55.3 25.9 NSA 97.9 75.0 29.1 13.8 6.2 Base 98.6 97.1 95.9 45.1 13.9 Retrieval-Augmented Generation CLP 64.7 62.1 59.9 57.3 50.0 
+
+L2A (Ours) 62.0 60.4 57.7 55.1 50.0 
+
+FlexPrefill 59.9 58.9 55.0 53.9 49.7 DCA 62.6 60.3 53.9 48.8 43.1 S2-attn 63.2 60.3 56.9 53.6 44.1 SelfExtend 62.9 60.5 52.5 46.8 38.1 NSA 61.7 55.1 48.9 45.0 39.2 Base 62.5 60.1 54.3 43.7 27.5 Many-shot in-context learning CLP 73.6 79.4 81.7 84.5 87.4 L2A (Ours) 71.4 79.6 83.5 87.0 88.6 
+
+FlexPrefill 74.2 78.5 82.3 84.2 85.2 DCA 70.0 75.6 78.7 81.2 82.4 S2-attn 61.8 67.0 71.5 76.7 77.0 SelfExtend 70.2 75.0 78.0 81.2 81.8 NSA 66.6 71.0 74.2 78.2 78.6 Base 70.1 75.1 78.4 78.5 71.5 Generation w/ citations CLP 24.2 18.3 8.6 4.8 2.8 
+
+L2A (Ours) 17.2 10.5 8.5 4.1 1.9 FlexPrefill 13.3 6.8 5.1 3.6 2.4 DCA 21.9 15.5 9.5 2.1 1.2 S2-attn 20.9 14.9 8.4 2.9 2.5 SelfExtend 22.5 16.3 5.9 2.5 2.3 NSA 15.3 6.4 2.8 2.1 1.5 Base 21.7 16.3 8.2 2.2 1.3 Passage re-ranking CLP 48.1 32.5 25.1 18.1 8.4 L2A (Ours) 44.0 26.8 20.1 12.5 9.6 
+
+FlexPrefill 50.5 30.8 19.4 9.2 5.0 DCA 46.3 33.5 23.2 9.6 1.8 S2-attn 46.7 32.7 24.2 14.0 3.8 SelfExtend 47.3 33.2 18.1 6.8 0.6 NSA 42.0 9.4 4.5 0.3 0.2 Base 46.3 33.2 22.7 1.5 0.0 Multi-round co-reference resolution CLP 34.6 30.4 28.9 26.3 21.3 
+
+L2A (Ours) 32.9 31.5 25.8 24.2 19.3 FlexPrefill 29.7 27.0 28.3 24.5 17.0 DCA 32.0 30.9 29.9 22.4 14.8 S2-attn 32.5 31.8 26.9 25.9 19.0 SelfExtend 32.4 30.7 30.8 21.0 11.4 NSA 35.0 26.1 16.6 13.7 8.7 Base 32.4 31.5 29.6 25.8 11.6 Fact chaining & relational reasoning CLP 47.4 43.6 40.0 31.4 38.6 L2A (Ours) 44.6 42.2 40.6 33.4 40.4 
+
+FlexPrefill 47.6 42.6 37.8 33.4 35.8 DCA 51.6 47.8 44.8 39.8 35.2 S2-attn 45.2 43.8 35.2 38.2 39.2 SelfExtend 52.2 47.6 41.8 38.2 34.6 NSA 42.2 39.2 31.2 24.0 17.6 Base 51.6 47.8 43.0 41.8 21.4 Average across tasks CLP 56.0 52.1 49.0 45.4 40.7 L2A (Ours) 53.0 49.7 47.5 44.3 41.3 
+
+FlexPrefill 53.3 48.7 45.7 42.5 37.8 DCA 54.7 51.5 47.7 39.4 31.8 S2-attn 52.8 49.9 45.8 40.9 30.7 SelfExtend 55.2 51.4 43.6 36.0 27.8 NSA 51.5 40.3 29.6 25.3 21.7 Base 54.7 51.6 47.4 34.1 21.0 
+
+24 Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+Table 4. Task-wise performance comparison of L2A and baseline methods across long-context benchmarks on Qwen 2.5 1.5B model. L2A 
+
+remains close to CLP performance while outperforming baselines on most tasks.All scores are reported on a 0–100 scale. 
+
+Task Model Context Length 8k 16k 32k 64k 128k 
+
+Synthetic recall CLP 93.6 84.4 74.0 69.6 45.8 L2A (Ours) 95.9 83.1 66.8 64.7 47.1 
+
+FlexPrefill 90.4 77.4 60.2 54.9 31.9 DCA 85.9 81.1 60.8 32.7 18.3 S2-attn 93.5 81.1 64.8 41.2 16.3 SelfExtend 85.1 80.7 52.1 33.9 21.7 NSA 76.2 29.7 14.2 9.3 4.1 Base 85.4 80.1 64.5 19.4 3.4 Retrieval-Augmented Generation CLP 53.7 51.6 50.7 44.8 36.7 
+
+L2A (Ours) 49.1 48.9 47.1 41.2 34.8 FlexPrefill 52.0 51.0 47.2 43.0 35.8 DCA 49.7 46.0 42.2 36.3 28.8 S2-attn 51.8 50.6 48.6 39.6 27.4 SelfExtend 49.4 45.9 39.8 33.6 27.4 NSA 48.5 44.0 39.0 32.3 30.2 Base 49.8 46.1 41.8 30.2 22.8 Many-shot in-context learning CLP 49.5 60.2 66.2 72.3 77.4 L2A (Ours) 54.6 65.8 72.3 77.0 80.3 
+
+FlexPrefill 39.2 53.0 63.0 68.9 72.0 DCA 54.7 64.8 69.8 74.2 76.3 S2-attn 54.2 62.4 68.8 73.8 72.8 SelfExtend 54.4 65.2 70.2 73.6 74.4 NSA 61.5 65.0 65.4 65.3 65.0 Base 54.5 65.2 69.4 68.1 43.6 Generation w/ citations CLP 8.3 5.2 2.3 2.3 1.5 L2A (Ours) 6.9 2.6 2.7 2.8 1.3 FlexPrefill 5.5 3.1 3.3 1.9 1.6 
+
+DCA 7.9 5.3 3.2 1.4 0.9 S2-attn 8.9 3.8 3.5 3.0 1.4 SelfExtend 7.4 5.0 2.9 1.4 1.0 NSA 7.1 3.4 2.6 1.6 0.8 Base 8.1 4.9 4.4 0.7 0.9 Passage re-ranking CLP 45.0 26.0 14.3 9.0 3.4 L2A (Ours) 46.7 27.9 17.0 8.7 4.3 
+
+FlexPrefill 25.7 13.0 8.4 3.5 2.0 DCA 33.6 20.0 9.2 1.7 0.0 S2-attn 41.4 31.1 12.3 8.0 2.2 SelfExtend 34.4 20.3 8.9 0.4 0.0 NSA 32.8 16.3 10.0 1.5 1.4 Base 33.5 21.6 10.0 4.3 0.0 Multi-round co-reference resolution CLP 26.3 22.8 19.7 19.1 14.3 
+
+L2A (Ours) 26.4 20.7 16.0 15.6 9.4 FlexPrefill 24.0 19.4 16.5 13.0 12.1 DCA 26.7 22.8 17.6 13.9 11.0 S2-attn 26.8 22.2 19.0 17.8 12.8 SelfExtend 26.3 23.1 18.6 18.7 8.9 NSA 25.6 18.7 8.3 9.7 6.1 Base 26.4 22.7 18.0 15.4 5.6 Fact chaining & relational reasoning CLP 43.6 39.8 35.8 28.2 29.4 L2A (Ours) 41.4 36.0 33.8 29.2 30.0 
+
+FlexPrefill 43.2 37.6 36.0 32.0 27.4 DCA 37.0 35.0 35.6 27.8 23.4 S2-attn 43.4 40.2 36.2 31.6 26.4 SelfExtend 37.0 35.6 34.0 26.2 23.4 NSA 40.4 30.6 23.0 18.0 11.0 Base 38.2 35.2 31.0 24.0 13.0 Average across tasks CLP 45.7 41.4 37.6 35.0 29.8 
+
+L2A (Ours) 45.9 40.7 36.5 34.2 29.6 FlexPrefill 40.0 36.4 33.5 31.0 26.1 DCA 42.2 39.3 34.1 26.9 22.7 S2-attn 45.7 41.6 36.2 30.7 22.8 SelfExtend 42.0 39.4 32.4 26.8 22.4 NSA 41.7 29.7 23.2 19.7 17.0 Base 42.3 39.4 34.2 23.2 12.8 
+
+25 Learning When to Attend: Conditional Memory Access for Long-Context LLMs 
+
+Table 5. Task-wise performance comparison of L2A and baseline methods across long-context benchmarks on Qwen3 8B model. L2A 
+
+remains close to CLP performance while outperforming baselines on most tasks.All scores are reported on a 0–100 scale. 
+
+Task Model Context Length 8k 16k 32k 64k 128k 
+
+Synthetic recall CLP 100.0 99.9 99.7 98.8 87.9 L2A (Ours) 99.8 99.8 99.4 98.2 87.1 FlexPrefill 99.4 99.5 99.0 98.4 88.6 
+
+DCA 99.2 99.4 95.4 52.7 40.0 Base 99.1 99.4 97.4 40.0 0.0 Retrieval-Augmented Generation CLP 65.4 63.6 60.5 59.1 52.2 
+
+L2A (Ours) 63.2 61.2 60.5 58.0 51.0 FlexPrefill 63.0 60.2 58.0 56.8 46.5 DCA 63.5 61.2 57.3 52.8 47.9 Base 63.5 61.5 58.0 47.9 7.0 Many-shot in-context learning CLP 70.8 74.7 79.1 82.8 85.4 L2A (Ours) 64.4 67.3 74.4 80.2 85.7 
+
+FlexPrefill 71.2 75.8 80.2 83.7 85.1 DCA 65.4 68.5 70.5 72.9 76.2 Base 65.5 68.9 70.1 68.8 9.3 Generation w/ citations CLP 32.6 26.6 17.0 12.3 5.9 
+
+L2A (Ours) 30.4 27.1 15.2 5.2 2.1 FlexPrefill 19.3 7.7 5.7 5.0 3.6 DCA 33.3 26.8 16.4 3.9 1.6 Base 34.8 27.3 15.2 6.4 0.7 Passage re-ranking CLP 50.0 36.3 30.1 20.4 11.2 
+
+L2A (Ours) 49.0 36.7 25.9 15.6 7.5 FlexPrefill 42.3 32.4 24.3 12.1 7.0 DCA 47.5 37.4 27.6 13.9 9.3 Base 46.3 37.8 32.8 20.7 2.1 Multi-round co-reference resolution CLP 38.5 33.9 31.9 33.9 30.1 
+
+L2A (Ours) 36.3 34.1 31.2 34.6 26.7 FlexPrefill 34.0 29.8 31.9 31.6 25.5 DCA 35.7 35.5 33.4 29.2 17.2 Base 35.7 34.9 32.5 29.9 8.9 Fact chaining & relational reasoning CLP 43.4 43.6 46.6 37.8 35.6 L2A (Ours) 47.2 47.6 47.6 38.6 37.8 
+
+FlexPrefill 44.8 39.0 39.0 34.2 31.0 DCA 52.8 47.0 46.0 40.8 30.0 Base 52.8 47.2 44.0 27.6 0.4 Average across tasks CLP 57.2 54.1 52.1 49.3 44.0 
+
+L2A (Ours) 55.7 53.4 50.6 47.2 42.5 FlexPrefill 53.4 49.2 48.3 46.0 41.0 DCA 56.8 53.7 49.5 38.0 31.7 Base 56.8 53.9 50.0 34.5 4.1 
+
+Table 6. Zero-shot performance on standard short-context benchmarks for Qwen 2.5 models at different scales. In these set of results, we compare CLP for Attention and LayerNorm parameters only vs. training all parameters. At both model scales, training Attn + LayerNorm parameters only is the better choice.                                                                
+
+> Scale Method BoolQ CommSenseQA PIQA Winogrande ARC-E ARC-C MMLU SWDE Avg
+> acc ↑acc ↑acc n ↑acc ↑acc n ↑acc n ↑acc ↑contains ↑
+> 1.5B CLP (Attn + Norm) 73.36 74.45 75.95 64.72 88.72 73.81 60.46 86.50 74.74
+> CLP (Full Model) 63.67 72.65 76.01 64.80 88.05 72.53 59.29 87.58 73.07 7B CLP (Attn + Norm) 82.57 84.52 79.43 76.01 96.09 88.65 73.39 91.00 83.95
+> CLP (Full Model) 79.60 82.88 79.76 74.03 95.54 87.88 72.76 89.56 82.75
+
+26

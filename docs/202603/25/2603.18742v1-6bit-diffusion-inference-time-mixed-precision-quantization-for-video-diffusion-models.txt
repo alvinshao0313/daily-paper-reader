@@ -1,0 +1,555 @@
+Title: 6Bit-Diffusion: Inference-Time Mixed-Precision Quantization for Video Diffusion Models
+
+URL Source: https://arxiv.org/pdf/2603.18742v1
+
+Published Time: Fri, 20 Mar 2026 01:09:15 GMT
+
+Number of Pages: 19
+
+Markdown Content:
+# 6Bit-Diffusion: Inference-Time Mixed-Precision Quantization for Video Diffusion Models 
+
+Rundong Su 1,2,∗,‡, Jintao Zhang 2,∗, Zhihang Yuan 2, Haojie Duanmu 3,Jianfei Chen 2, Jun Zhu 2
+
+> 1
+
+Fudan University 2Tsinghua University 3Shanghai Jiao Tong University 
+
+surd.scholar@gmail.com, dcszj@tsinghua.edu.cn 
+
+Abstract. Diffusion transformers have demonstrated remarkable ca-pabilities in generating videos. However, their practical deployment is severely constrained by high memory usage and computational cost. Post-Training Quantization provides a practical way to reduce memory usage and boost computation speed. Existing quantization methods typ-ically apply a static bit-width allocation, overlooking the quantization difficulty of activations across diffusion timesteps, leading to a subopti-mal trade-off between efficiency and quality. In this paper, we propose a inference time NVFP4/INT8 Mixed-Precision Quantization framework. We find a strong linear correlation between a block’s input-output differ-ence and the quantization sensitivity of its internal linear layers. Based on this insight, we design a lightweight predictor that dynamically allocates NVFP4 to temporally stable layers to maximize memory compression, while selectively preserving INT8 for volatile layers to ensure robustness. This adaptive precision strategy enables aggressive quantization without compromising generation quality. Beside this, we observe that the resid-ual between the input and output of a Transformer block exhibits high temporal consistency across timesteps. Leveraging this temporal redun-dancy, we introduce Temporal Delta Cache (TDC) to skip computations for these invariant blocks, further reducing the computational cost. Ex-tensive experiments demonstrate that our method achieves 1.92 × end-to-end acceleration and 3.32 × memory reduction, setting a new baseline for efficient inference in Video DiTs. 
+
+Keywords: Video DiTs · Mixed-precision quantization · Efficient Infer-ence 
+
+1 Introduction 
+
+Diffusion Transformers (DiTs) [24] have revolutionized video generation, achiev-ing remarkable fidelity and temporal consistency [2,18,21]. However, this perfor-mance comes with heavy memory and computational costs. For instance, large models like HunyuanVideo will directly cause Out-Of-Memory on consumer de-vices due to massive parameters [50]. Furthermore, even for relatively smaller  
+
+> *
+
+Equal contribution.  
+
+> ‡
+
+This work was done during an internship at the TSAIL Group, Tsinghua University.  
+
+> arXiv:2603.18742v1 [cs.CV] 19 Mar 2026 2
+> Fig. 1: Relative L2 quantization error(defined in Eq. 4) of individual linear layers in CogVideoX [38] across denoising timesteps. The severe temporal fluctuations demon-strate that activation sensitivity to quantization is highly dynamic, highlighting the limitations of static mixed-precision policies.
+
+models like CogVideoX [38] with two billion parameters generating a 49-frame 1080p video still takes about 22 minutes on an NVIDIA RTX-5090. Such heavy overheads severely limit the fast generation and practical deployment of video DiTs. Model quantization [10] serves as a practical method to reduce the memory and computational costs by compressing the weight and activation into low bit-width formats. In particular, Post-training quantization (PTQ) offers a training-free and deployment-friendly solution [6, 14], but existing methods face significant limits. Uniform quantization [3,13] applies a single bit-width to all layers, causing precision loss or insufficient compression. Static mixed-precision methods [35,51] assign layer-specific precision offline and keep these settings fixed during infer-ence. We observe that activation sensitivity to quantization changes drastically across denoising timesteps(as Fig 1 shows). A static policy either causes severe temporal flickering in sensitive steps or wastes compression opportunities in sta-ble steps. To address this, we analyze the denoising process of video DiTs and gain two key insights regarding dynamic quantization sensitivity and temporal redundancy. First, we find a strong linear correlation between a block’s input-output differ-ence at the previous timestep and the quantization error of its internal linear layers at the current timestep. If a block shows a large relative input-output dif-ference, its internal layers are highly sensitive to quantization and require higher precision (e.g., INT8). Conversely, layers within stable blocks can safely use ultra-low bit-widths (e.g., NVFP4). This simple linear relationship allows us to predict dynamic precision requirements online with minimal overhead. Second, the residual between the input and output of a Transformer block are highly similar across adjacent timesteps. This temporal consistency indicates heavy computational redundancy, allowing us to skip redundant block computations without degrading video quality. 3
+
+Driven by these insights, we propose a unified, training-free acceleration frame-work that systematically exploits these dynamic characteristics. Specifically, we integrate Dynamic Mixed-Precision Quantization (DMPQ) with a Temporal Delta Cache (TDC). DMPQ dynamically allocates NVFP4 or INT8 precision to activations based on the feature differences from the previous timestep. Com-plementarily, TDC reuses cached delta updates when temporal similarity is high, skipping redundant block computations. Together, they achieve extreme infer-ence acceleration while maintaining high visual fidelity. Experimental results show that our framework achieves a 1.92 × speedup and a 3.32 × GPU memory reduction on CogVideoX [38], while preserving comparable video quality to the full-precision baseline. Our main contributions are summarized as follows: 
+
+– We propose DMPQ, the first dynamic mixed-precision quantization frame-work utilizing NVFP4 and INT8 for modern GPU architectures (e.g., NVIDIA Blackwell). It allocates precision online based on temporal sensitivity, achiev-ing highly efficient, lossless generation. 
+
+– We introduce TDC, a complementary caching mechanism that exploits tem-poral redundancy. By selectively skipping expensive block updates, TDC seamlessly synergizes with DMPQ to form a unified spatiotemporal acceler-ation framework for video DiTs. 
+
+– Extensive experiments on state-of-the-art Video DiTs (e.g., CogVideoX) demonstrate the superiority of our framework. Our method achieves signifi-cant inference speedup and memory reduction while maintaining comparable visual quality and temporal consistency to the uncompressed baseline. 
+
+2 Related Works 
+
+2.1 Video Diffusion Transformers (DiTs) 
+
+Diffusion Transformers (DiTs) [24] have replaced U-Net [26] becoming the stan-dard backbone for visual generation. Unlike U-Net, DiTs use self-attention [32] to better capture long-range dependencies and complex structural relationships. This shift has led to powerful open-source video models. For example, Open-Sora [25,52] uses a Spatial-Temporal DiT with a 3D autoencoder for high-quality video generation. CogVideoX [38] uses a 3D full attention mechanism to align text and video well. HunyuanVideo [30] uses a hybrid architecture with smart attention designs to improve efficiency and video quality. However, despite the good video quality, video DiTs still facing a lot challenges. The huge number of parameters in these models necessitate huge memory allocation, which signifi-cantly strains hardware resources. Beside this, the large matrix multiplications, quadratic self-attention, and iterative denoising steps cause high computational costs. These challenges led to a lot of research in community to improve DiT’ efficiency, such as model quantization [3, 13, 35, 51], efficient attention [39–49], caching [4, 16, 22] and efficient sampling [15, 19, 20, 28, 50] 4
+
+2.2 Model Quantization 
+
+Post-Training Quantization (PTQ) effectively reduces memory and compute costs for DiTs. By compressing full-precision weights and activations into low-bit formats, it reduce the memory footprint and accelerates computation on modern GPUs without retraining. Early methods primarily focused on Large Language Models (LLMs) or U-Nets. For example, SmoothQuant [37] addressed the channel outlier in activations by transfer quantization difficulty from activations to weights using channel-wise scaling. QuaRot [1] smoothing outlizers by apply randomized Hadamard rota-tions to weights and activations. Recently, researchers adapted these to DiTs. Q-Diffusion [14] and PTQ4DiT [36] design calibration methods for the denois-ing process. Q-DiT [3] uses fine-grained group quantization. ViDiT-Q [51] uses a mixed-precision strategy, giving different bit-widths to different layers using metric-decoupled sensitivity. Although these methods improve quantization quality, they have two main limits. First, most methods [35,51] use static precision policies. They fix the bit-widths across all timesteps. However, we observe that a model’s sensitivity changes over time. Static policies cause flickering in sensitive stages or waste compression chances in stable stages. Second, many low-bit formats (like INT4) lack hardware support on the newest GPUs. For example, the NVIDIA Blackwell architecture removes INT4 Tensor Core support and introduces FP4. Currently, no video DiT quantization methods have integrated this new hardware-native format. 
+
+2.3 Diffusion Caching 
+
+Feature caching accelerates DiTs by exploiting the high temporal redundancy of feature maps and attention states across adjacent timesteps. It reuses these cached features to skip redundant computations without retraining. Early methods like DeepCache [22] and FORA [27] use fixed schedules to skip redundant blocks. Later methods improve this by dynamically deciding when to skip computations based on step-to-step changes. For instance, AdaCache [11] skips redundant steps by checking feature differences. TeaCache [16] estimates output differences using timestep embeddings to determine when to reuse the cache. EasyCache [33] monitors runtime stability to make the same cache-reuse decision. ∆-DiT [4] caches feature residuals (deltas) instead of direct features to prevent information loss. While effective, these caching methods typically operate in isolation from model quantization. They treat caching and quantization as orthogonal things, missing the strong link between temporal stability and quantization sensitivity. Further-more, simply combining them causes accumulated quantization errors (drift), which ruins video quality. Therefore, we need a unified framework that consid-ers both caching and model quantization together. 5
+
+3 Preliminaries of Quantization 
+
+Quantization [23] compresses weights and activations into low bit-width formats to reduce memory footprints and computational overhead. Given a full-precision tensor X, the general quantization and dequantization processes are formulated as: 
+
+Quant : Xq = clip 
+
+ Xs
+
+
+
++ z, q min , q max 
+
+
+
+Dequant : ˆX = ( Xq − z) · s (1) where Xq and ˆX denote the quantized and dequantized tensors, respectively. Here s is quantization scaling factor, z is the zero-point, and [qmin , q max ] defines the representable range of the target bit-width. The specific calculation of s and 
+
+z depends on the chosen quantization scheme: 
+
+Integer Quantization. For unsymmetrical INT8 quantization, the tensor is mapped to an unsigned range [0 , 255] to accommodate skewed distributions. The scaling factor and zero-point are calculated as s = ( Xmax − Xmin )/255 and z =
+
+−⌊ Xmin /s ⌉. When the tensor distribution is roughly symmetric around zero (e.g., neural network weights), symmetrical INT8 quantization is employed. It drops the zero-point ( z = 0 ) and maps values to [−128 , 127] with s = max( |X|)/127 .
+
+NVFP4 Quantization. Recent hardware architectures introduce micro-scaling block-level formats like NVFP4 for extreme compression. NVFP4 consists of 1 sign bit, 2 exponent bits, and 1 mantissa bit (E2M1), with a maximum repre-sentable value of 6.0. It projects continuous values into a discrete FP4 set using a shared FP8 scaling factor s = max( |X|)/6.0 for a contiguous block (e.g., 16 elements): 
+
+Quant : Xq = CastToFP4 E2M1 
+
+ Xs
+
+
+
+Dequant : ˆX = Xq · s (2) where CastToFP4 maps normalized values to the nearest representable FP4 magnitude. 
+
+4 Methods 
+
+4.1 Dynamic Mixed-Precision Quantization (DMPQ) Motivation and Observation. While full NVFP4 activation quantization suf-fers from severe quality degradation due to outliers, uniformly employing INT8 underutilizes the acceleration capabilities of modern GPUs. Although a mixed-precision approach balances 8-bit and 4-bit assignments, existing static mix pre-cision methods are suboptimal for Video DiTs due to the severe fluctuation of individual layer sensitivities across timesteps (Fig. 1). We address this by leverag-ing a novel observation: a linear layer’s quantization sensitivity exhibits a strong linear relationship with the previous timestep relative difference between the in-put and output of its located block. Specifically, within a transformer block, the 6W4A8(INT8) 
+
+> W4A4(NVFP4)
+
+...... 
+
+...... 
+
+> W4A4(NVFP4)
+> W4A8(INT8)
+> W4A4(NVFP4)
+
+...... 
+
+> DMPQ
+> TDC
+> DMPQ
+> TDC
+> DMPQ
+> TDC
+> W4A8(INT8)
+> W4A8(INT8)
+> W4A8(INT8)
+
+......  
+
+> DMPQ
+> TDC
+> No Skip No Skip
+> Skip No Skip
+
+t-1 t t+1 
+
+layer l -1
+
+layer l ∆!"#
+
+> $
+
+𝑋 %&! ,! 
+
+> $
+
+= 𝑋 () ,! 
+
+> $
+
++ ∆!"#
+
+> $
+
+𝑋 () ,!           
+
+> $
+> Γ!"#
+> k_proj
+> (y=𝛼 !𝑥 +𝛽 !)
+> k_proj
+> o_proj
+> 𝜏 "
+> #
+> o_proj
+> (y=𝛼 $𝑥 +𝛽 $)
+> 𝜏 "
+> $
+> Weight
+> NVFP4
+> linear layer: o_proj
+> 𝚪 𝒕 "𝟏 >𝝉 𝚪
+> 𝒐
+> Cast to Int8
+> Quantize
+> to Int8
+> Y
+> N
+> Act
+> (16bit)
+> Out
+
+...... 
+
+Dynamic Mixed -Precision Quant ( DMPQ )
+
+> ∆!"1
+> 2
+> ∆!"#
+> 2
+
+𝒟 ∑ 𝜺 𝒂𝒄𝒄    
+
+> 𝒍 >𝝉
+
+compute 
+
+state 
+
+skip state 
+
+>𝜏 
+
+≤ 𝜏 
+
+𝜀 !$
+
+> "
+
+Reset 
+
+𝜀 #$$ 
+
+> "
+
+Compare 
+
+Similarity 
+
+Error 
+
+Accumulator 
+
+Temporal Delta -Cache ( TDC )    
+
+> Quantize
+> to NVFP4
+> ∆𝒕
+> 𝒍 *𝟏 ,𝚪 𝒕
+> 𝒍 *𝟏
+> Cache
+> ∆𝒕 *𝟏
+> 𝒍 *𝟏 ,𝚪 𝒕 *𝟏
+> 𝒍 *𝟏
+> Cache
+> ∆𝒕 *𝟏
+> 𝒍 ,𝚪 𝒕 *𝟏
+> 𝒍
+> Cache Retrieve ∆𝒕 *𝟏
+> 𝒍
+> W4A8(INT8)
+> W4A4(NVFP4)
+
+...... 
+
+> W4A4(NVFP4)
+> W4A8(INT8)
+
+......  
+
+> W4A4(NVFP4)
+> W4A8(INT8)
+> W4A8(INT8)
+> W4A4(NVFP4)
+> W4A8(INT8)
+> high bit linear layer
+> low bit linear layer
+> skip state
+
+layer l -1
+
+layer l layer l 
+
+layer l -1
+
+Fig. 2: Overview of our proposed methods. We using DMPQ to decide the quantization bits of each linear layer activation based on the block preceding timestep input output relative L1 loss Γ . And using TDC to decide whether to skip block computation based on preceding two timesteps block updates ∆.
+
+relative quantization error of a linear layer at timestep t is linearly correlated with the relative L1 distance between the block’s output and input at timestep 
+
+t − 1. As illustrated in Fig. 3, the relative quantization errors across different linear layers can be roughly modeled as a simple linear function of the previous timestep’s block-level transformation magnitude. 
+
+Formulation of Metrics. To formalize this, we use the relative L1 distance between the block input Xt−1 and output Yt−1 at timestep t − 1 to define the block-level transformation magnitude, termed as Γt−1:
+
+Γt−1 = || Yt−1 − Xt−1|| 1
+
+|| Xt−1|| 1
+
+(3) To decouple the quantization sensitivity from the varying activation magnitudes across timesteps and layers, we adopt a scale-invariant metric. Specifically, the relative quantization error Erel for a specific linear layer inside this block is measured by the normalized L2 distance between the block full-precision output 
+
+O and quantized output Oq (where only this specific layer is quantized): 
+
+Erel = || O − Oq || 2
+
+|| O|| 2
+
+(4) 
+
+Layer-wise Linear Predictive Modeling. Building on this observation, for any specific linear layer (e.g., attention Q/K/V/O proj or FFN layers) within a 70.2 0.4 0.6 0.8 1.0                     
+
+> relative-L1 loss
+> 0.005
+> 0.010
+> 0.015
+> 0.020
+> 0.025
+> 0.030
+> relative quant error
+> attn1.to_q
+> Data Points
+> Fit: y=0.021x+0.001
+> 0.2 0.4 0.6 0.8 1.0
+> relative-L1 loss
+> 0.005
+> 0.010
+> 0.015
+> 0.020
+> 0.025
+> relative quant error
+> attn1.to_k
+> Data Points
+> Fit: y=0.018x+0.000
+> 0.2 0.4 0.6 0.8 1.0
+> relative-L1 loss
+> 0.00
+> 0.01
+> 0.02
+> 0.03
+> 0.04
+> 0.05
+> relative quant error
+> attn1.to_v
+> Data Points
+> Fit: y=0.046x+-0.003
+> 0.2 0.4 0.6 0.8 1.0
+> relative-L1 loss
+> 0.00
+> 0.01
+> 0.02
+> 0.03
+> 0.04
+> 0.05
+> 0.06
+> relative quant error
+> attn1.to_out.0
+> Data Points
+> Fit: y=0.050x+-0.000
+> 0.2 0.4 0.6 0.8 1.0
+> relative-L1 loss
+> 0.01
+> 0.02
+> 0.03
+> 0.04
+> 0.05
+> relative quant error
+> ff.net.0.proj
+> Data Points
+> Fit: y=0.052x+0.001
+> 0.2 0.4 0.6 0.8 1.0
+> relative-L1 loss
+> 0.00
+> 0.01
+> 0.02
+> 0.03
+> 0.04
+> 0.05
+> relative quant error
+> ff.net.2
+> Data Points
+> Fit: y=0.056x+-0.003
+
+Fig. 3: The linear relationship between the block-level input-output relative L1 dis-tance at the previous timestep ( Γt−1) and the layer-wise relative quantization error (Erel ) at the current timestep. The data points are collected by executing the diffusion model over a calibration set. For each block, we extract the time-shifted valid data pairs across all timesteps to perform linear regression ( y = αx + β) for each internal linear layer. 
+
+block, its relative quantization error Erel can be modeled as a linear function of the block’s input-output relative difference Γt−1:
+
+Erel = α · Γt−1 + β (5) where the layer-specific slope α and intercept β are pre-fitted offline using a small calibration set. Computing Γt−1 once per block to determine the precision routing for all its internal layers introduces negligible runtime overhead. 
+
+Dynamic Mixed-Precision Routing. During inference, we predefine an ac-ceptable relative error threshold τrel . Using our linear model, we derive a layer-specific relative L1 distance threshold τΓ for each projection by inverting the equation: 
+
+τΓ = τrel − βα (6) At timestep t, we compare the block’s computed Γt−1 against τΓ for each of its internal linear layers to assign quantization bits to the activation. This routing mechanism is formulated as Eq. 7: 
+
+Abits =
+
+(
+
+INT8 if Γt−1 > τ Γ
+
+NVFP4 if Γt−1 ≤ τΓ
+
+(7) 8
+
+To strictly minimize the memory footprint, all weights are quantized to NVFP4 offline. During the forward pass, if a layer’s Abits is routed to INT8, its corre-sponding weights are cast to INT8 on-the-fly solely to satisfy GEMM data type requirements. 
+
+Outlier Smoothing. To mitigate severe activation outliers, we utilize an online Block Hadamard Transform. Traditional global Hadamard transformations are often disrupted by non-linear operations (e.g., GELU [7]) due to their reliance on offline weight fusion. To avoid this limitation, we apply a Fast Hadamard Transform (FHT) [5, 31] over local activation blocks ( B = 128 ). This localized design restricts the rotation complexity to O(log B) per element and allows the operation to be seamlessly fused into our custom quantization kernels. Conse-quently, activation outliers are effectively redistributed on-the-fly with negligible overhead, after which the smoothed activations are quantized using either the NVFP4 format or per-block symmetric INT8. 
+
+4.2 Temporal Delta Cache Empirical Observation. In Video DiTs, the residual deltas of transformer blocks exhibit significant similarity across adjacent timesteps. Let Xlin,t denote the unified input (concatenated text and visual hidden states) of the l-th block at timestep t. The block’s forward pass can be abstracted as: 
+
+Xlout,t = Xlin,t + ∆lt, (8) where ∆lt represents the residual delta at timestep t. As illustrated in Fig. 4, we visualize the Cosine Similarity and Relative L2 Difference between adja-cent deltas ( ∆lt and ∆lt−1). The results demonstrate strong temporal consis-tency throughout the majority of the diffusion process, where the deltas remain highly correlated ( ∆lt ≈ ∆lt−1). Furthermore, we observe that this temporal re-dundancy inherently varies across different transformer layers. This consistent yet layer-dependent temporal similarity directly motivates our adaptive caching mechanism to skip redundant block computations. 
+
+Theoretical Insight. Diffusion sampling corresponds to solving a Probability Flow ODE (PF-ODE) [29]. As denoising progresses, the ODE trajectory curva-ture decreases, leading to a smoother velocity field [12, 19]. Consequently, the network outputs become locally linear across adjacent timesteps. This inherent smoothness physically explains our observation that ∆lt ≈ ∆lt−1, and justifies us-ing the historical discrepancy D(∆lt−1, ∆ lt−2) to estimate the current prediction error Elt .
+
+Predictive caching mechanism. Building upon this observation, when a block’s update trajectory exhibits high stability, we can reuse the historical up-date to significantly reduce the computational overhead. However, since the dif-fusion inference is strictly online, the current update ∆lt is inaccessible prior to computation. Therefore, we utilize the similarity between the previous two up-dates to predict the stability of the current step. We define the prediction error 90                      
+
+> 2
+> 4
+> 6
+> 8
+> 10
+> 12
+> 14
+> 16
+> 18
+> 20
+> 22
+> 24
+> 26
+> 28
+> 30
+> 32
+> 34
+> 36
+> 38
+> 40
+> 42
+> 44
+> 46
+> 48
+> Denoising Steps (Time)
+> 0 2 4 6 8 10  12  14  16  18  20  22  24  26  28
+> Transformer Block Index (Depth)
+> Cosine Similarity of ltand lt1
+> 0
+> 2
+> 4
+> 6
+> 8
+> 10
+> 12
+> 14
+> 16
+> 18
+> 20
+> 22
+> 24
+> 26
+> 28
+> 30
+> 32
+> 34
+> 36
+> 38
+> 40
+> 42
+> 44
+> 46
+> 48
+> Denoising Steps (Time)
+> 0 2 4 6 8 10  12  14  16  18  20  22  24  26  28
+> Relative L2 Difference of ltand lt1
+> 0.5 0.6 0.7 0.8 0.9 1.0 0.000 0.025 0.050 0.075 0.100 0.125 0.150 0.175 0.200
+
+Fig. 4: Temporal redundancy of Transformer block updates in Video DiTs. We visualize the Cosine Similarity (left) and Relative L2 Difference (right) of the residual updates (∆lt and ∆lt−1) between adjacent timesteps. The inherently high similarity across most timesteps and layers motivates our adaptive Temporal Delta Cache. 
+
+Elt using a generalized distance function D to measure the discrepancy between the historical updates: 
+
+Elt = D(∆lt−1, ∆ lt−2) (9) In our default implementation, we use 1 − CosSim (∆lt−1, ∆ lt−2) as D, though other metrics such as relative-L2 distance can also be applied depending on the speed-quality trade-off. 
+
+Error-Guided Cache Switching. While adjacent timesteps updates are highly consistent, continuous caching inevitably introduces approximation drift. To con-trol this theoretical error and safely refresh the cache, we propose an Error-Guided Cache Switching mechanism governed by an accumulated error metric 
+
+Elacc .Let tp denote the most recent timestep at which the block was fully com-puted, and Eltp be the exact prediction error calculated at that step. At the end of any timestep t − 1, we dynamically update the accumulated error to evaluate the cache viability for the next timestep t:
+
+Elacc ←
+
+(
+
+Eltp if Slt−1 = Compute 
+
+Elacc + Eltp + ρ if Slt−1 = Skip  (10) where ρ is a constant penalty factor. This formulation guarantees that the penalty ρ is strictly excluded when evaluating the initial skip ( t = tp + 1 ), and is only introduced to penalize unobserved drift during continuous caching.Based on this metric, the execution state Slt for the current timestep t is strictly deter-mined by: 
+
+Slt =
+
+(
+
+Skip Elacc ≤ τ and t − tp ≤ Nmax 
+
+Compute otherwise  (11) 10 
+
+where τ is the global cache threshold, and t − tp represents the consecutive skip count.When Slt = Skip, the block computation is skipped, and the output is approximated by reusing the cached delta: Xlout,t ≈ Xlin,t + ∆ltp . Caching these residual deltas introduces only a small memory overhead, as they can be quantized to ultra-low precision formats such as NVFP4. Conversely, when 
+
+Slt = Compute, the system executes the full Transformer block. This action auto-matically refreshes the cache and resets the accumulated error in the subsequent step, effectively clearing the approximation drift. 
+
+4.3 Purified Cache Refresh Quality Degradation in Naive DMPQ-TDC Combination. While DMPQ and TDC independently yield substantial acceleration, naively combining them into Video DiTs causes severe video quality degradation. This degradation funda-mentally comes from the temporal accumulation of quantization noise. Regard-less of the dynamically assigned bit-width (NVFP4 or INT8), DMPQ inherently introduces a single-step quantization error ϵq into the computed delta. 
+
+Formulation of Error Accumulation. To formalize this, let the actual com-puted residual with quantization noise be ˜∆ltp = ∆ltp + ϵq . As introduced in Sec. 4.2, if a block is skipped for N consecutive steps, the approximated output becomes: 
+
+Xlout,t +N ≈ Xlin,t +N + N · ˜∆ltp = Xlin,t +N + N · ∆ltp + N · ϵq (12) Eq. 12 reveals that the single-step error ϵq is linearly amplified by skip count N .To prevent this accumulation, it is critical to minimize quantization noise in the computed ∆t before it is cached. 
+
+Outlier-Aware Cache Purification. To fully mitigate the temporal accumu-lation of quantization noise, the ∆t written into the cache must be as pure as possible. Since extreme outliers easily corrupt the cache, we first evaluate quan-tization difficulty by spatially sampling the input to estimate its outlier ratio 
+
+Routlier (X) = max( |X|)mean( |X|) . If Routlier exceeds a threshold τoutlier , the layer skips quantization and uses full precision (FP16/BF16), ensuring the cache is refreshed with purified, high-fidelity features. Conversely, if the activation is quantization-friendly, we allocate lower precision formats via DMPQ (Sec. 4.1). However, when a block resumes computation after a skip ( Slt−1 = Skip), the metric Γt−1
+
+is missing, which disables the dynamic routing in Eq. 7. As a safe fallback for this specific timestep, we simply assign INT8 precision to all linear layers in the block. This mechanism effectively isolates temporal recurrence from quantization errors. 
+
+5 Experiments 
+
+5.1 Experiments Setup Models and Datasets. We evaluate our framework on two scale variants of CogVideoX [38]. To model the relationship between layer-wise quantization sen-11 
+
+sitivity and the preceding block’s variation magnitude, we use a calibration set of 100 randomly sampled prompts from EvalCrafter [17]. 
+
+Baselines. We compare our framework against widely adopted quantization techniques, including SmoothQuant [37] and QuaRot [1], as well as the current state-of-the-art post-training quantization (PTQ) method for video generation, ViDiT-Q [51]. 
+
+Evaluation Metrics. To comprehensively assess generation quality, visual fi-delity, and spatial-temporal consistency, we utilize two standardized benchmark-ing frameworks: VBench [9] and EvalCrafter [17]. For the VBench suite, following prior works [51], we select 8 major dimensions to ensure a thorough assessment. From the EvalCrafter pipeline, we report CLIPSIM and CLIP-Temp to measure text-video alignment and temporal semantic consistency, respectively. Further-more, we employ DOVER [34] to evaluate video quality from both aesthetic and technical perspectives, and compute the Flow-score to assess fine-grained temporal consistency. 
+
+Implementation Details. For all evaluations, we follow the official CogVideoX configurations to ensure a fair comparison. Videos are generated using the DDIM scheduler [28] with 50 denoising timesteps and a classifier-free guidance (CFG) [8] scale of 6.0. All experiments are conducted on a single NVIDIA RTX-5090 GPU.For our proposed framework, we set the dynamic routing threshold τΓ =0.015 , the TDC penalty factor ρ = 0 .001 , the maximum consecutive cache steps 
+
+Nmax = 2 , and the global cache threshold τ = 0 .003 . To strictly prevent quan-tization noise accumulation during generation, the outlier threshold τoutlier in Sec. 4.3 is set to 25 .
+
+5.2 Effectiveness Results Quantitative Evaluation : We evaluate our framework on the VBench bench-mark [9] using both CogVideoX-2B and the larger CogVideoX-5B models. As shown in Table 1 under the aggressive W4A6 setting, traditional static quantiza-tion methods suffer from severe performance degradation, especially on the larger 5B model (e.g., ViDiT-Q drops to an Aesthetic Quality of 0.4433). In contrast, our Dynamic Mixed-Precision Quantization (DMPQ) demonstrates remarkable robustness. For the 2B model, DMPQ achieves an Aesthetic Quality of 0.5437, significantly outperforming all W4A6 baselines and even matching or exceeding state-of-the-art static W4A8 methods like SmoothQuant (0.5332) and ViDiT-Q (0.5332). By leveraging the linear correlation between temporal instability and quantization sensitivity, DMPQ adaptively protects volatile layers with INT8 while aggressively compressing stable layers to NVFP4. This dynamic allocation allows us to maintain a superior Overall Consistency of 0.2474 on the 2B model and 0.2492 on the 5B model, closing the gap with the full-precision baselines. To further maximize acceleration without degrading visual fidelity, we combine DMPQ with TDC using our proposed method. The evaluation results are shown in Table 2. While standalone DMPQ achieves a 1.36 × speedup, combining it with TDC achieves a 1.92 × speedup with almost no degradation in generation quality. 12  
+
+> Fig. 5: Visual comparisons between ours and FP16 baseline [38]), together with quan-tization methods [1], SmoothQuant [37] and ViDiT-Q [51]
+
+Qualitative Comparison. Fig 5 compares our method against state-of-the-art PTQ baselines (Quarot [1], SmoothQuant [37], and ViDiT-Q [51]) at W4A8 and W4A6. Existing methods suffer from severe visual degradation. Specifically, Quarot and SmoothQuant exhibit semantic drift and hallucination (e.g., gen-erating non-existent pandas), with SmoothQuant further losing spatiotempo-ral consistency at W4A6. While ViDiT-Q avoids gross hallucinations, it intro-duces significant local geometric distortions, such as the structural deformation of the guitar. In contrast, our DMPQ method, and DMPQ interged with TDC and PDR, effectively mitigates these quantization errors. It preserves both fine-grained details and global spatiotemporal consistency, achieving visual fidelity comparable to the original FP16 model even under W4A6. 13 
+
+Table 1: Performance comparison of various quantization methods on VBench using CogVideo-2B and CogVideo-5B. Method Bit-width Aesthetic BG. Overall Dynamic Subject Imaging Scene Motion (W/A) Quality Consist. Consist. Degree Consist. Quality Consist. Smooth. 
+
+CogVideo-2B 
+
+Original W16/A16 0.5464 0.9500 0.2423 0.7639 0.9491 0.5713 0.3590 0.9714 SmoothQuant W4A8 0.5332 0.9441 0.2473 0.6806 0.9319 0.5460 0.3343 0.9680 QuaRot W4A8 0.5158 0.9427 0.2383 0.5139 0.9202 0.5258 0.2682 0.9715 ViDiT-Q W4A8 0.5332 0.9449 0.2464 0.6528 0.9272 0.5534 0.3372 0.9692 SmoothQuant W4A6 0.5010 0.9444 0.2348 0.4444 0.9141 0.5118 0.2391 0.9714 QuaRot W4A6 0.5300 0.9408 0.2455 0.6805 0.9277 0.5406 0.3481 0.9667 ViDiT-Q W4A6 0.4745 0.9470 0.2202 0.3750 0.9086 0.4701 0.1766 0.9725 Ours (DMPQ) W4A6 0.5437 0.9455 0.2474 0.6806 0.9282 0.5511 0.3307 0.9691 
+
+CogVideo-5B 
+
+Original W16/A16 0.5922 0.9570 0.2595 0.6944 0.9505 0.6079 0.4608 0.9760 SmoothQuant W4A8 0.5148 0.9502 0.2355 0.4722 0.9230 0.5115 0.2522 0.9796 QuaRot W4A8 0.5371 0.9496 0.2448 0.5278 0.9347 0.5428 0.3685 0.9779 ViDiT-Q W4A8 0.4525 0.9606 0.2036 0.2222 0.9111 0.4355 0.0879 0.9818 SmoothQuant W4A6 0.4950 0.9499 0.2351 0.4167 0.9162 0.5009 0.1933 0.9791 QuaRot W4A6 0.5345 0.9485 0.2435 0.4861 0.9304 0.5377 0.3517 0.9775 ViDiT-Q W4A6 0.4433 0.9617 0.2034 0.1667 0.9110 0.4260 0.0784 0.9819 Ours (DMPQ) W4A6 0.5724 0.9598 0.2492 0.6389 0.9454 0.5637 0.4513 0.9705 
+
+Table 2: Performance evaluation of integrating TDC into DMPQ on VBench [9]. Method Bit-width Speedup Aesthetic BG. Overall Dynamic Subject Imaging Scene Motion (W/A) Quality Consist. Consist. Degree Consist. Quality Consist. Smooth. Original W16A16 1.00 × 0.5464 0.9500 0.2423 0.7639 0.9491 0.5713 0.3590 0.9714 Ours(DMPQ) W4A6 1.36 × 0.5437 0.9455 0.2474 0.6806 0.9282 0.5511 0.3307 0.9691 Ours(Full) W4A6 ∗ 1.92 × 0.5366 0.9421 0.2492 0.7083 0.9255 0.5369 0.3307 0.9691    
+
+> ∗Note: With TDC, activations in skipped blocks are treated as 0-bit width, resulting in an overall average activation bit-width of 6.035 ( ≈6 bits).
+
+5.3 Memory and Latency Analysis 
+
+Our proposed framework significantly reduces the model memory footprint by 
+
+3.32 × compared to the BF16/FP16 baseline while accelerating inference. To eliminate the computational overhead caused by online activation quantization and the block Hadamard transform, we develop custom hardware CUDA kernels to fuse these operations directly into the preceding layers. This makes the quan-tization overhead practically negligible, achieving a 1.36 × end-to-end speedup. Note that this acceleration is naturally bounded by the attention mechanism, which consumes over half of the total execution time. Furthermore, integrating our Temporal Delta Cache (TDC) to skip redundant block computations further boosts the overall speedup to 1.92 × with minimal degradation in visual quality. 14 
+
+5.4 Ablation Study 
+
+We conduct an ablation study on the EvalCrafter [17] benchmark to evaluate the individual contributions of Dynamic Mixed Precision Quantization (DMPQ), Temporal Delta Cache (TDC), and Purified Delta Refresh (PDR). Table 3 sum-marizes the results across visual ( VQA-A/T ), semantic ( CLIPSIM/TEMP ), and temporal ( FLOW SCORE ) metrics. The results are summarized in Table 3. 
+
+Impact of Dynamic Mixed Precision Quantization (DMPQ). As shown in Table 3, naive uniform W4A4 quantization leads to severe degradation across multiple dimensions, notably causing the Flow Score to drop from 5.8389 to 4.2518. Uniform W4A8 mitigates this but yields suboptimal memory compres-sion. Ablation 1 introduces our DMPQ strategy. By dynamically routing lay-ers to NVFP4 or INT8 based on their temporal instability ( ∥Output −Input ∥1 
+
+> ∥Input ∥1
+
+), DMPQ effectively protects volatile layers. This mechanism achieves a VQA-A of 75.5332, successfully outperforming the FP16 baseline in static visual fidelity, thereby demonstrating the necessity of instability-aware precision allocation. 
+
+Table 3: Ablation Study of Proposed Components. Evaluation of Dynamic Mixed Precision Quantization (DMPQ), Temporal Delta Cache (TDC), and Purified Delta Refresh (PDR).                                                              
+
+> Method DMPQ TDC PDR VQA-A ↑VQA-T ↑CLIP ↑CLIP-T ↑Flow Score ↑
+> Original (FP16) ---74.6175 77.7548 0.1824 0.9973 5.8389 Uniform W4A4 ---68.9105 73.6116 0.1818 0.9974 4.2518 Uniform W4A8 ---71.2093 78.6070 0.1859 0.9972 5.3140 Ablation 1 ✓75.5332 77.8404 0.1814 0.9976 5.3266 Ablation 2 ✓72.2671 78.1517 0.1838 0.9975 5.7602 Ablation 3 ✓✓73.7243 77.2833 0.1835 0.9978 4.7271 Ablation 4 ✓✓✓76.1173 76.6990 0.1848 0.9973 5.5417
+
+Integration of Temporal Delta Cache and Purified Delta Refresh. Ab-lation 2 evaluates TDC in an unquantized (FP16) setting. While maintaining high temporal consistency (Flow Score 5.7602) by skipping redundant compu-tations, it offers no memory relief. Ablation 3 naively combines TDC with Dy-namic Mixed Precision Quantization (DMPQ). This induces severe error drift, as quantization noise compounds with cached deltas across frames, plummeting the Flow Score to 4.7271. Ablation 4 resolves this critical issue via the Purified Delta Refresh (PDR). By selectively routing hard-to-quantize or temporally un-certain layers to higher precision, PDR effectively breaks the error accumulation chain. This targeted fallback preserves the memory benefits of quantization, re-stores the Flow Score to 5.5417, and achieves the highest visual quality (VQA-A 76.1173), demonstrating an optimal efficiency-fidelity trade-off. 15 
+
+6 Conclusion 
+
+In this paper, we propose 6Bit-Diffusion to reduce the high memory and com-putational costs of Video Diffusion Transformers. Our framework consists of three main parts. First, we introduce Dynamic Mixed-Precision Quantization (DMPQ), which dynamically allocates NVFP4 to stable layers and INT8 to sen-sitive layers based on their temporal instability. Second, we design a Temporal Delta Cache (TDC) to skip redundant block computations across adjacent time steps. Third, to prevent quantization errors from accumulating in the cache, we propose a Purified Delta Refresh (PDR) mechanism. Extensive experiments on CogVideoX show that our method is highly effective, accelerating inference by 1.92x and reducing memory usage by 3.32x, while maintaining the original video quality. 16 
+
+References 
+
+1. Ashkboos, S., Mohtashami, A., Croci, M.L., Li, B., Cameron, P., Jaggi, M., Al-istarh, D., Hoefler, T., Hensman, J.: Quarot: Outlier-free 4-bit inference in ro-tated llms. Advances in Neural Information Processing Systems 37 , 100213–100240 (2024) 2. Blattmann, A., Dockhorn, T., Kulal, S., Mendelevitch, D., Kilian, M., Lorenz, D., Levi, Y., English, Z., Voleti, V., Letts, A., et al.: Stable video diffusion: Scaling latent video diffusion models to large datasets. arXiv preprint arXiv:2311.15127 (2023) 3. Chen, L., Meng, Y., Tang, C., Ma, X., Jiang, J., Wang, X., Wang, Z., Zhu, W.: Q-dit: Accurate post-training quantization for diffusion transformers. In: Proceedings of the Computer Vision and Pattern Recognition Conference. pp. 28306–28315 (2025) 4. Chen, P., Shen, M., Ye, P., Cao, J., Tu, C., Bouganis, C.S., Zhao, Y., Chen, T.: ∆-DiT: A training-free acceleration method tailored for diffusion transformers. arXiv preprint arXiv:2406.01125 (2024) 5. Fino, Algazi: Unified matrix treatment of the fast walsh-hadamard transform. IEEE Transactions on Computers 100 (11), 1142–1146 (1976) 6. He, Y., Liu, L., Liu, J., Wu, W., Zhou, H., Zhuang, B.: Ptqd: Accurate post-training quantization for diffusion models. Advances in Neural Information Processing Sys-tems 36 , 13237–13249 (2023) 7. Hendrycks, D., Gimpel, K.: Gaussian error linear units (gelus). arXiv preprint arXiv:1606.08415 (2016) 8. Ho, J., Salimans, T.: Classifier-free diffusion guidance. arXiv preprint arXiv:2207.12598 (2022) 9. Huang, Z., He, Y., Yu, J., Zhang, F., Si, C., Jiang, Y., Zhang, Y., Wu, T., Jin, Q., Chanpaisit, N., et al.: Vbench: Comprehensive benchmark suite for video gener-ative models. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 21807–21818 (2024) 10. Jacob, B., Kligys, S., Chen, B., Zhu, M., Tang, M., Howard, A., Adam, H., Kalenichenko, D.: Quantization and training of neural networks for efficient integer-arithmetic-only inference. In: Proceedings of the IEEE conference on computer vision and pattern recognition. pp. 2704–2713 (2018) 11. Kahatapitiya, K., Liu, H., He, S., Liu, D., Jia, M., Zhang, C., Ryoo, M.S., Xie, T.: Adaptive caching for faster video generation with diffusion transformers. In: Proceedings of the IEEE/CVF International Conference on Computer Vision. pp. 15240–15252 (2025) 12. Karras, T., Aittala, M., Aila, T., Laine, S.: Elucidating the design space of diffusion-based generative models. Advances in neural information processing systems 35 ,26565–26577 (2022) 13. Li, M., Lin, Y., Zhang, Z., Cai, T., Li, X., Guo, J., Xie, E., Meng, C., Zhu, J.Y., Han, S.: Svdquant: Absorbing outliers by low-rank components for 4-bit diffusion models. arXiv preprint arXiv:2411.05007 (2024) 14. Li, X., Liu, Y., Lian, L., Yang, H., Dong, Z., Kang, D., Zhang, S., Keutzer, K.: Q-diffusion: Quantizing diffusion models. In: Proceedings of the IEEE/CVF Inter-national Conference on Computer Vision. pp. 17535–17545 (2023) 15. Lipman, Y., Chen, R.T., Ben-Hamu, H., Nickel, M., Le, M.: Flow matching for generative modeling. arXiv preprint arXiv:2210.02747 (2022) 17 16. Liu, F., Zhang, S., Wang, X., Wei, Y., Qiu, H., Zhao, Y., Zhang, Y., Ye, Q., Wan, F.: Timestep embedding tells: It’s time to cache for video diffusion model. In: Proceedings of the Computer Vision and Pattern Recognition Conference. pp. 7353–7363 (2025) 17. Liu, Y., Cun, X., Liu, X., Wang, X., Zhang, Y., Chen, H., Liu, Y., Zeng, T., Chan, R., Shan, Y.: Evalcrafter: Benchmarking and evaluating large video generation models. In: Proceedings of the IEEE/CVF conference on computer vision and pattern recognition. pp. 22139–22149 (2024) 18. Liu, Y., Zhang, K., Li, Y., Yan, Z., Gao, C., Chen, R., Yuan, Z., Huang, Y., Sun, H., Gao, J., et al.: Sora: A review on background, technology, limitations, and opportunities of large vision models. arXiv preprint arXiv:2402.17177 (2024) 19. Lu, C., Zhou, Y., Bao, F., Chen, J., Li, C., Zhu, J.: Dpm-solver: A fast ode solver for diffusion probabilistic model sampling in around 10 steps. Advances in neural information processing systems 35 , 5775–5787 (2022) 20. Lu, C., Zhou, Y., Bao, F., Chen, J., Li, C., Zhu, J.: Dpm-solver++: Fast solver for guided sampling of diffusion probabilistic models. Machine Intelligence Research 
+
+22 (4), 730–751 (2025) 21. Ma, X., Wang, Y., Chen, X., Jia, G., Liu, Z., Li, Y.F., Chen, C., Qiao, Y.: Latte: Latent diffusion transformer for video generation. arXiv preprint arXiv:2401.03048 (2024) 22. Ma, X., Fang, G., Wang, X.: Deepcache: Accelerating diffusion models for free. In: Proceedings of the IEEE/CVF conference on computer vision and pattern recog-nition. pp. 15762–15772 (2024) 23. Nagel, M., Fournarakis, M., Amjad, R.A., Bondarenko, Y., Van Baalen, M., Blankevoort, T.: A white paper on neural network quantization. arXiv preprint arXiv:2106.08295 (2021) 24. Peebles, W., Xie, S.: Scalable diffusion models with transformers. In: Proceedings of the IEEE/CVF international conference on computer vision. pp. 4195–4205 (2023) 25. Peng, X., Zheng, Z., Shen, C., Young, T., Guo, X., Wang, B., Xu, H., Liu, H., Jiang, M., Li, W., et al.: Open-sora 2.0: Training a commercial-level video generation model in $200 k. arXiv preprint arXiv:2503.09642 (2025) 26. Ronneberger, O., Fischer, P., Brox, T.: U-net: Convolutional networks for biomedi-cal image segmentation. In: International Conference on Medical image computing and computer-assisted intervention. pp. 234–241. Springer (2015) 27. Selvaraju, P., Ding, T., Chen, T., Zharkov, I., Liang, L.: Fora: Fast-forward caching in diffusion transformer acceleration. arXiv preprint arXiv:2407.01425 (2024) 28. Song, J., Meng, C., Ermon, S.: Denoising diffusion implicit models. arXiv preprint arXiv:2010.02502 (2020) 29. Song, Y., Sohl-Dickstein, J., Kingma, D.P., Kumar, A., Ermon, S., Poole, B.: Score-based generative modeling through stochastic differential equations. arXiv preprint arXiv:2011.13456 (2020) 30. Team, T.H.F.M.: Hunyuanvideo 1.5 technical report (2025), https://arxiv.org/ abs/2511.18870 
+
+31. Tseng, A., Chee, J., Sun, Q., Kuleshov, V., De Sa, C.: Quip#: Even better llm quantization with hadamard incoherence and lattice codebooks. Proceedings of machine learning research 235 , 48630 (2024) 32. Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A.N., Kaiser, Ł., Polosukhin, I.: Attention is all you need. Advances in neural information pro-cessing systems 30 (2017) 18 33. Wang, W., Liu, Z., Jiang, Y., Yuan, X., Wei, J.: Easycache: a transparent in-memory data caching approach for internetware. In: Proceedings of the 6th Asia-Pacific Symposium on Internetware. pp. 35–44 (2014) 34. Wu, H., Zhang, E., Liao, L., Chen, C., Hou, J., Wang, A., Sun, W., Yan, Q., Lin, W.: Exploring video quality assessment on user generated contents from aesthetic and technical perspectives. In: Proceedings of the IEEE/CVF international conference on computer vision. pp. 20144–20154 (2023) 35. Wu, J., Li, Z., Hui, Z., Zhang, Y., Kong, L., Yang, X.: Quantcache: Adaptive importance-guided quantization with hierarchical latent and layer caching for video generation. In: Proceedings of the IEEE/CVF International Conference on Com-puter Vision. pp. 15035–15044 (2025) 36. Wu, J., Wang, H., Shang, Y., Shah, M., Yan, Y.: Ptq4dit: Post-training quantiza-tion for diffusion transformers. Advances in neural information processing systems 
+
+37 , 62732–62755 (2024) 37. Xiao, G., Lin, J., Seznec, M., Wu, H., Demouth, J., Han, S.: Smoothquant: Accurate and efficient post-training quantization for large language models. In: International conference on machine learning. pp. 38087–38099. PMLR (2023) 38. Yang, Z., Teng, J., Zheng, W., Ding, M., Huang, S., Xu, J., Yang, Y., Hong, W., Zhang, X., Feng, G., et al.: Cogvideox: Text-to-video diffusion models with an expert transformer. arXiv preprint arXiv:2408.06072 (2024) 39. Zhang, H., Su, R., Yuan, Z., Chen, P., Shen, M., Fan, Y., Yan, S., Dai, G., Wang, Y.: Ditfastattnv2: Head-wise attention compression for multi-modality diffusion trans-formers. In: Proceedings of the IEEE/CVF International Conference on Computer Vision. pp. 16399–16409 (2025) 40. Zhang, J., Chen, M., Wang, H., Jiang, K., Stoica, I., Gonzalez, J.E., Chen, J., Zhu, J.: Sagebwd: A trainable low-bit attention. arXiv preprint arXiv:2603.02170 (2026) 41. Zhang, J., Huang, H., Zhang, P., Wei, J., Zhu, J., Chen, J.: Sageattention2: Efficient attention with thorough outlier smoothing and per-thread int4 quantization. In: International Conference on Machine Learning (ICML) (2025) 42. Zhang, J., Jiang, K., Xiang, C., Feng, W., Hu, Y., Xi, H., Chen, J., Zhu, J.: Spargeattention2: Trainable sparse attention via hybrid top-k+ top-p masking and distillation fine-tuning. arXiv preprint arXiv:2602.13515 (2026) 43. Zhang, J., Su, R., Liu, C., Wei, J., Wang, Z., Wang, H., Zhang, P., Jiang, H., Huang, H., Xiang, C., et al.: Efficient attention methods: Hardware-efficient, sparse, compact, and linear attention (2025) 44. Zhang, J., Wang, H., Jiang, K., Yang, S., Zheng, K., Xi, H., Wang, Z., Zhu, H., Zhao, M., Stoica, I., et al.: Sla: Beyond sparsity in diffusion transformers via fine-tunable sparse-linear attention. arXiv preprint arXiv:2509.24006 (2025) 45. Zhang, J., Wang, H., Jiang, K., Zheng, K., Jiang, Y., Stoica, I., Chen, J., Zhu, J., Gonzalez, J.E.: Sla2: Sparse-linear attention with learnable routing and qat. arXiv preprint arXiv:2602.12675 (2026) 46. Zhang, J., Wei, J., Zhang, P., Xu, X., Huang, H., Wang, H., Jiang, K., Zhu, J., Chen, J.: Sageattention3: Microscaling fp4 attention for inference and an explo-ration of 8-bit training. arXiv preprint arXiv:2505.11594 (2025) 47. Zhang, J., Wei, J., Zhang, P., Zhu, J., Chen, J.: Sageattention: Accurate 8-bit attention for plug-and-play inference acceleration. In: International Conference on Learning Representations (ICLR) (2025) 48. Zhang, J., Xiang, C., Huang, H., Wei, J., Xi, H., Zhu, J., Chen, J.: Spargeattention: Accurate and training-free sparse attention accelerating any model inference. arXiv preprint arXiv:2502.18137 (2025) 19 49. Zhang, J., Xu, X., Wei, J., Huang, H., Zhang, P., Xiang, C., Zhu, J., Chen, J.: Sageattention2++: A more efficient implementation of sageattention2. arXiv preprint arXiv:2505.21136 (2025) 50. Zhang, J., Zheng, K., Jiang, K., Wang, H., Stoica, I., Gonzalez, J.E., Chen, J., Zhu, J.: Turbodiffusion: Accelerating video diffusion models by 100-200 times. arXiv preprint arXiv:2512.16093 (2025) 51. Zhao, T., Fang, T., Huang, H., Liu, E., Wan, R., Soedarmadji, W., Li, S., Lin, Z., Dai, G., Yan, S., et al.: Vidit-q: Efficient and accurate quantization of diffu-sion transformers for image and video generation. arXiv preprint arXiv:2406.02540 (2024) 52. Zheng, Z., Peng, X., Yang, T., Shen, C., Li, S., Liu, H., Zhou, Y., Li, T., You, Y.: Open-sora: Democratizing efficient video production for all. arXiv preprint arXiv:2412.20404 (2024)
