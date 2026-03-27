@@ -1,0 +1,335 @@
+Title: Sparton: Fast and Memory-Efficient Triton Kernel for Learned Sparse Retrieval
+
+URL Source: https://arxiv.org/pdf/2603.25011v1
+
+Published Time: Fri, 27 Mar 2026 00:34:53 GMT
+
+Number of Pages: 5
+
+Markdown Content:
+# Sparton: Fast and Memory-Efficient Triton Kernel for Learned Sparse Retrieval 
+
+# Thong Nguyen 
+
+University of Amsterdam Amsterdam, Netherlands t.nguyen2@uva.nl 
+
+# Cosimo Rulli 
+
+ISTI-CNR Pisa, Italy cosimo.rulli@isti.cnr.it 
+
+# Franco Maria Nardini 
+
+ISTI-CNR Pisa, Italy francomaria.nardini@isti.cnr.it 
+
+# Rossano Venturini 
+
+University of Pisa Pisa, Italy rossano.venturini@unipi.it 
+
+# Andrew Yates 
+
+Johns Hopkins University, HLTCOE Baltimore, MD, USA andrew.yates@jhu.edu 
+
+## Abstract 
+
+State-of-the-art Learned Sparse Retrieval (LSR) models, such as 
+
+Splade , typically employ a Language Modeling (LM) head to project latent hidden states into a lexically-anchored logit matrix. This in-termediate matrix is subsequently transformed into a sparse lexical representation through element-wise operations (ReLU, log1p) and max-pooling over the sequence dimension. Despite its effectiveness, the LM head creates a massive memory bottleneck due to the sheer size of the vocabulary ( V), which can range from 30,000 to over 250,000 tokens in recent models. Materializing this matrix creates a significant memory bottleneck, limiting model scaling. The result-ing I/O overhead between operators further throttles throughput and runtime performance. In this paper, we propose Sparton , a fast—memory-efficient—Triton kernel tailored for the LM head in LSR models. Sparton utilizes a fused approach that integrates the tiled matrix multiplication, ReLU, log1p, and max-reduction into a single GPU kernel. By performing an early online reduction di-rectly on raw logit tiles, Sparton avoids materializing the full logit matrix in memory. Our experiments demonstrate that the Sparton 
+
+kernel, in isolation, achieves up to a 4.8× speedup and an order-of-magnitude reduction in peak memory usage compared to PyTorch baselines. Integrated into Splade (| V | ≈ 30 k ), Sparton enables a 33% larger batch size and 14% faster training with no effectiveness loss. On a multilingual backbone ( |V | ≈ 250 k), these gains jump to a 26 × larger batch size and 2.5× faster training. 
+
+§ https://github.com/thongnt99/sparton 
+
+## 1 Introduction 
+
+Learned Sparse Retrieval (LSR) [ 6, 8, 9 , 11 , 14 ] has emerged as a powerful paradigm for producing sparse, high-dimensional repre-sentations aligned with the vocabulary of a pretrained language model. By capturing rich semantic relationships between terms, LSR bridges the gap between lexical and neural retrieval, rivaling the effectiveness of dense and multivector encoders. Moreover, thanks to tailored inverted indexes for learned sparse representations [ 1, 2 ], LSR embeddings can be retrieved as efficiently as dense embeddings served by advanced data structures such as HNSW [12]. The main gap between LSR methods and their dense or multi-vector counterparts lies in training efficiency. A key bottleneck is the Language Model (LM) head, a module that projects the hidden states produced by the transformer backbone into a sparse vector Matmul             
+
+> HELReLU Log1P L1 L2 Max O
+> Matmul
+> HELReLU + Log1P + Max O
+> HEMatmul + Max + ReLU + Log1P O
+> Torch
+> Torch Compile
+> Our Kernel
+> HBM SMs + SRAM
+
+Figure 1: LM implementations in PyTorch and Sparton . Data in HBM (grey) is loaded into SRAM per block for parallel computation in Streaming Multiprocessors (green). 
+
+representation anchored in a lexical vocabulary. In state-of-the-art LSR models such as Splade [4 , 9], this component introduces substantial computational and memory overhead. As a first step, considering a batch of 𝐵 input sequences of size 
+
+𝑆 on a token vocabulary V, the LM head computes and materi-alizes the logits matrix 𝐿 ∈ R𝐵 ×𝑆 × | V | . Then, two element-wise operations—ReLU and log1p—followed by max-pooling over the sequence dimension, extract the salience scores of the most relevant terms, yielding a sparse output vector of |V | dimensions. The bottleneck arises due to how this pipeline is implemented in standard frameworks such as PyTorch [ 16 ]. These operations execute sequentially: the logit matrix is computed block-wise in fast on-chip memory (SRAM) via an optimized matmul kernel, but must be written back to slower global memory (HBM) due to its large size. It is then repeatedly transferred between SRAM and HBM for each subsequent operation (ReLU, log1p, max-pooling). Moving data back and forth between SRAM and HBM is a highly suboptimal approach that fails to account for the memory-bound na-ture of the problem. First, materializing the full logit matrix in HBM creates an unwanted memory peak; on a BERT-like architecture, considering 𝐵 = 𝑆 = 512 and |V | ≈ 30 𝑘 , the logit matrix requires 16 
+
+GB to be stored. Observe that while modern GPUs can have up to 80 Gbytes of HBM, the SRAM is in the order of hundreds of kilobytes. This limits the maximum batch size, which is known to positively correlate with training speed and the effectiveness of the model [ 5]. In terms of speed, repeatedly reading this large logit matrix from HBM for processing in SMs and writing intermediate results back introduces significant delays due to data movement. This limits the exploitation of massive arithmetic throughput enabled by the thousands of parallel cores available on A100 or H100 [7, 10].  
+
+> 1
+> arXiv:2603.25011v1 [cs.IR] 26 Mar 2026 SIGIR 26, June 03–05, 2018, Woodstock, NY Thong Nguyen, Cosimo Rulli, Franco Maria Nardini, Rossano Venturini, and Andrew Yates
+
+In this paper, we introduce Sparton , a fast—memory-efficient— kernel implemented in Triton [ 18 ] tailored for the LM head in LSR models. Specifically, Sparton fuses all operations performed by the LM head, i.e., matmul, max, ReLU, and log1p, on the logit matrix into a single Triton kernel (Figure 1). During the forward pass, we perform on-chip, online max-reduction, fused with ReLU and log1p, so that we write only the max values and their indices to HBM. This eliminates the need to store the full intermediate logit matrix, dramatically reducing both memory usage and data movement overhead. For the backward pass, we reuse the stored max values and their indices to compute gradients for the hidden states and vocabulary embeddings. By doing so, we require only the hidden states at the max indices to be loaded and differentiated, saving additional compute and memory bandwidth. Our experiments demonstrate that our Sparton kernel, in iso-lation, achieves up to a 4.8× speedup and an order-of-magnitude reduction in peak memory usage compared to a PyTorch baseline. When integrated into the full Splade model ( |V | ≈ 32 k ) , Sparton ,despite replacing only the final component, enables training with a 33% larger batch size (512 vs. 384), while simultaneously achieving 14% faster training with no accuracy loss compared to a compiled PyTorch baseline. On a multilingual backbone ( xlm-roberta-base ,
+
+|V | ≈ 250 k ), we even see higher gains with a 26 × larger batch size and 2.5× training speedup. 
+
+## 2 LM Sparse Encoder 
+
+Sparse Encoders encode queries and documents into sparse lexical-grounded representations; While several architectures exist, such as Binary and MLP encoders [ 15 ], the Language Model (LM) encoder is arguably the most effective and is therefore commonly adopted in state-of-the-art LSR models like Splade . The LM encoder comprises the pre-trained transformer backbone (e.g., Bert ) and the LM head. The backbone encodes raw text into a hidden state tensor 𝐻 ∈
+
+R𝐵 ×𝑆 ×𝐷 , where 𝐵 is the batch size, 𝑆 is the sequence length, and 𝐷 is the hidden dimension. The LM sparse head consists of the standard language modeling head, which produces logits over a vocabulary, followed by several element-wise operators (ReLU, log1p) and a max pooling operator. The final output is a batch of vocabulary-sized lexical vectors whose sparsity (i.e., ratio of zeros) is induced by sparse regularizers during training. Formally, let 𝐸 ∈ R| V | × 𝐷 denote the vocabulary embedding matrix, 𝑏 the bias vector, and 𝑀 ∈ { 0, 1}𝐵 ×𝑆 the attention mask. The sparse output embeddings Y ∈ R𝐵 × | V | is computed as: 
+
+Y = max 
+
+> 𝑠
+
+log  1 + ReLU (𝐻𝐸 ⊤ + 𝑏 ) ⊙ 𝑀 ′  (1) where 𝑀 ′ ∈ R𝐵 ×𝑆 × | V | is the broadcasted over the vocabulary di-mension, ⊙ is the Hadamard product, and the max operation ag-gregates over the sequence dimension 𝑆 .In the standard Pytorch Eager mode, the LM head computation is executed sequentially as described in Algorithm 1. As mentioned in Section 1, the matrix 𝐿 can require up to 16 GByte to be stored with common values of batch size and sequence length ( 𝐵 = 𝑆 = 512 ) on a BERT-like architecture. Recent LLMs can process much longer sequences (e.g., 1024) and have larger vocabularies (e.g., 250k), which could lead to a massive memory bottleneck due to 𝐿 . In every one of the next operators 
+
+Algorithm 1 Standard LM Head implementation. 
+
+Require: 𝐻 ∈ R𝐵 ×𝑆 ×𝐷 , 𝐸 ∈ R| V | × 𝐷 , 𝑏 ∈ R| V | , 𝑀 ∈ { 0, 1}𝐵 ×𝑆  
+
+> 1:
+
+Read 𝐻, 𝐸 from HBM, compute 𝐿 = 𝐻𝐸 T, write 𝐿 to HBM  
+
+> 2:
+
+Read 𝐿, 𝑏 from HBM, compute 𝐿 = 𝐿 + 𝑏 , write 𝐿 to HBM  
+
+> 3:
+
+Read 𝐿, 𝑀 from HBM, compute 𝐿 = 𝐿 ⊙ 𝑀 , write 𝐿 to HBM  
+
+> 4:
+
+Read 𝐿 from HBM, compute 𝐿 = 𝑅𝑒𝐿𝑈 (𝐿 ), write 𝐿 to HBM  
+
+> 5:
+
+Read 𝐿 from HBM, compute 𝐿 = 𝑙𝑜𝑔 (𝐿 + 1), write 𝐿 to HBM  
+
+> 6:
+
+Read 𝐿 from HBM, compute 𝑌 = max 𝑠 𝐿 , write 𝑌 to HBM 
+
+Algorithm 2 Forward Pass of Sparton .
+
+Require: 𝐻 ∈ R𝐵 ×𝑆 ×𝐷 , 𝐸 ∈ R| V | × 𝐷 , 𝑏 ∈ R| V | , 𝑀 ∈ { 0, 1}𝐵 ×𝑆 
+
+Ensure: 𝑌 ∈ R𝐵 × | V | and max indices 𝐼 ∈ { 0, . . . , 𝑆 − 1}𝐵 × | V |  
+
+> 1:
+
+for each vocab tile 𝐸 tile ∈ R| V 𝑡 | × 𝐷 and 𝑏 tile ∈ R| V 𝑡 | of 𝑏 do  
+
+> 2:
+
+Read 𝐻, 𝐸 tile , 𝑏 tile from HBM  
+
+> 3:
+
+Compute 𝐿 tile = 𝐻𝐸 T 
+
+> tile
+
++ 𝑏 tile by a GEMM kernel  
+
+> 4:
+
+Write 𝐿 tile to HBM  
+
+> 5:
+
+Read 𝐿 tile , 𝑀 from HBM  
+
+> 6:
+
+Compute 𝑌 tile , 𝐼 tile = log (1 + ReLU (max 𝑠 (𝐿 tile ⊙ 𝑀 )))  
+
+> 7:
+
+Write 𝑌 tile , 𝐼 tile to HBM  
+
+> 8:
+
+end for 
+
+(steps 2 to 6), this logit matrix is repeatedly loaded and/or stored in the HBM, which entails a large number of memory accesses, resulting in significant runtime overhead. Recent PyTorch versions ( ≥ 2.0) offer automatic compilation of Python code into a fused Triton [ 18 ] kernel to reduce data move-ment overhead. Our investigation shows that this automatic com-pilation could fuse element-wise operators from step 2 to step 6. However, it does not fuse the matmul operation in step 1. For effi-ciency, PyTorch relies on third-party matrix-matrix multiplication black-box libraries (e.g., cuBLAS, rocBLAS) [ 13 , 16 ], which do not allow customization. Therefore, the intermediate matrix 𝐿 is still materialized to the HBM, leaving the memory bottleneck unsolved. A similar memory bottleneck is also observed in the backward pass. 
+
+## 3 Sparton : Efficient LM Head in Triton 
+
+This section details Sparton ’s algorithms, which leverage the monotonicity of the involved operators and the sparse activation of the logits to reduce computation and alleviate the memory bot-tleneck in both the forward and backward passes of the LM head. 
+
+Forward Pass . In the sparse representation formulation (Eq. 1), the pointwise mapping 𝑓 (𝑥 ) = log (1 + ReLU (𝑥 )) is monotoni-cally non-decreasing. Therefore, for each (𝑏, 𝑣 ), max 𝑠 𝑓 (ℓ𝑏,𝑠,𝑣 ) =
+
+𝑓 (max 𝑠 ℓ𝑏,𝑠,𝑣 ), where ℓ𝑏,𝑠,𝑣 denotes the (masked, biased) logit. This allows us to move the max reduction immediately after masking (step 3 in Alg. 1) without changing the output. As a result, ReLU 
+
+and log1p are applied to a 𝐵 × |V | tensor instead of a 𝐵 × 𝑆 × |V | 
+
+tensor, reducing both arithmetic and data movement by a factor of 
+
+𝑆 . For example, with 𝐵 = 𝑆 = 512 , |V | = 30522 , and half precision, activation I/O drops from 16 GB per pass to approximately 31 MiB. More importantly, the monotonicity reordering lets us accumu-late the max on the raw logits, enabling a streaming max-reduction over the sequence dimension where only the running maxima (and optionally argmax indices) are kept on-chip; ReLU and log1p are applied once after reduction. Ideally, one would fuse GEMM, bias,  
+
+> 2Sparton: Fast and Memory-Efficient Triton Kernel for Learned Sparse Retrieval SIGIR 26, June 03–05, 2018, Woodstock, NY
+
+masking, and max reduction into a single kernel that performs this streaming reduction and writes only the reduced 𝐵 × |V | outputs. We implemented this fully fused approach in Triton; while it is strictly more memory efficient as it avoids intermediate writes, the computational throughput of a custom Triton GEMM lags behind highly tuned GPU vendor libraries [ 13 ]. We therefore adopt a hybrid design: we compute tiled logits 𝐿 ∈ R𝐵 ×𝑆 ×𝐶 using cuBLAS/rocBLAS over vocabulary tiles 𝐸 𝑣 0:𝑣 1 , and immediately apply a Triton kernel to perform masked max 𝑠 reduction (and optionally argmax) for each tile. We tile along the batch and vocabulary dimensions for block-wise kernel parallelism. Finally, we apply ReLU and log1p to the reduced maxima on the same fused Triton kernel. This ensures the full 𝐵 × 𝑆 × |V | matrix is never materialized while retaining op-timized GEMM throughput. This approach is detailed in Algorithm 2. 
+
+Backward Pass . Algorithm 3 computes gradients by exploiting the sparsity induced by the max 𝑠 operator. The forward pass stores only the reduced outputs per (𝑏, 𝑣 )—the max score 𝑠 max and the argmax index 𝑖 max = arg max 𝑠 ℓ𝑏,𝑠,𝑣 . During backward, the up-stream gradient 𝛿 = ∇𝐿 [𝑏, 𝑣 ] is multiplied by the derivative of 
+
+𝑓 (𝑥 ) = log (1 + ReLU (𝑥 )) , yielding 𝑔 = 1[𝑠 max > 0] · 𝛿 · exp (− 𝑠 max ).The gradient then routes to a single hidden state per (𝑏, 𝑣 ), namely 
+
+𝐻 [𝑏, 𝑖 max ], and to the corresponding embedding vector 𝐸 [𝑣 ], up-dating ∇𝐸 [𝑣 ] + = 𝑔 · 𝐻 [𝑏, 𝑖 max ] and ∇𝐻 [𝑏, 𝑖 max ] + = 𝑔 · 𝐸 [𝑣 ] (with atomic accumulation across parallel blocks). Notably, our backward pass is implemented as a single fused kernel that combines the chain rule through log (1 + ReLU (·)) , argmax routing, and gradient accu-mulation, and requires only (𝑠 max , 𝑖 max ) rather than the dense logits. The kernel is launched in parallel across (𝑏, 𝑣 ) blocks tiled along the batch and vocabulary dimensions. In contrast, both the standard eager PyTorch implementation and its auto-compiled variants (e.g., torch.compile) treat GEMM as a black-box library call (cuBLAS/rocBLAS) and do not fuse the subsequent max 𝑠 reduction into the GEMM output. Consequently, the dense logit tensor 𝐿 ∈ R𝐵 ×𝑆 × | V | must be materialized in HBM so that masking and the elementwise nonlinearity can be applied, and these intermediates are typically retained for autograd. This incurs activation storage and bandwidth proportional to O( 𝐵𝑆 |V |) 
+
+even though max 𝑠 ultimately selects only one sequence position per 
+
+(𝑏, 𝑣 ). By saving only (𝑠 max , 𝑖 max ) and scattering gradients directly to the selected positions, our backward pass reduces the saved forward state to O( 𝐵 |V |) and avoids excessive redundant activation storage, and its incurred I/O overhead. 
+
+## 4 Experiments 
+
+Experimental Setup. We implement Sparton in Triton with op-timal block tuning via Triton’s autotune feature [ 18 ]. We com-pare it against PyTorch (Eager/Compiled) LM heads on NVIDIA A100/H100/200 GPUs. Metrics include latency ( 𝑚𝑠 , via perf_counter 
+
+function of the time Python module) and peak memory (MiB, via 
+
+torch.cuda.max_memory_allocated() ), averaged over 20 itera-tions after 5 warm-up runs to exclude compilation overhead. 
+
+RQ1: What is the computational cost of the LM head in an LSR model? As a first step in our evaluation, we break down the impact of the two main modules in a sparse encoder: (i) the transformer 
+
+Algorithm 3 Backward Pass of Sparton .
+
+Require: Upstream gradient ∇𝐿 ∈ R𝐵 × | V | , Max scores and indices from forward pass, Inputs 𝐻 ∈ R𝐵 ×𝑆 ×𝐷 , 𝐸 ∈ R| V | × 𝐷 
+
+Ensure: Gradients ∇𝐻 , ∇𝐸  
+
+> 1:
+
+for all batch block 𝑏 and vocab block 𝑣 in parallel do  
+
+> 2:
+
+Read 𝛿 ← ∇ 𝐿 [𝑏, 𝑣 ] from HBM  
+
+> 3:
+
+Read 𝑠 max , 𝑖 max from saved tensors on HBM  
+
+> 4:
+
+Compute gradient through log1p-relu: 
+
+𝑔 ←
+
+(
+
+𝛿 /exp (𝑠 max ), if 𝑠 max > 00, otherwise  
+
+> 5:
+
+Read embedding vector 𝑒 ← 𝐸 [𝑣 ] from HBM.  
+
+> 6:
+
+Read hidden state at max index: ℎ ← 𝐻 [𝑏, 𝑖 max ] from HBM.  
+
+> 7:
+
+Update sparse gradients: ∇𝐸 [𝑣 ] + = 𝑔 ·ℎ ; ∇𝐻 [𝑏, 𝑖 max ] + = 𝑔 ·𝑒  
+
+> 8:
+
+end for Table 1: Runtime ( 𝑚𝑠 ) and peak memory usage (MiB) of 
+
+Splade -V3 on a single H100 GPU ( 𝐵 = 320 , 𝑆 = 512 ). Eager Execution Compiled Execution Component Time (ms) Mem (MiB) Time (ms) Mem (MiB)                                   
+
+> Fwd  Backbone 84.4 2,893.7 99.7 3,083.6 + LM Head 162.1 28,885.1 122.1 10,126.0 + Tiled Head 140.3 5,310.7 123.1 3,101.3 +Sparton 113.7 2,955.4 129.0 3,146.0 Fwd + Bwd  Backbone 293.0 50,942.8 387.0 50,218.1 + LM Head 498.1 88,875.0 473.0 70,007.2 + Tiled Head 473.5 61,000.1 482.3 65,178.7 +Sparton 330.1 51,651.2 423.9 51,349.8
+
+backbone and (ii) the Language Model (LM) head. We use the state-of-the-art sparse encoder Splade -V3 as a case study and measure its runtime and memory in both Pytorch eager mode and compiled mode (automatic compiling torch code to Triton kernel). Results reported in Table 1 show that the LM head induces a significant computational burden in both runtime and memory. In PyTorch’s standard eager execution, the LM head overhead accounts for about the 48% of the total latency, and it causes a drastic surge in memory usage, which jumps from 2,893.7 MiB (backbone only) to 28,885.1 MiB (full model), a 9.9-fold increase. In the backward pass, the LM overhead accounts for 41% in terms of latency and the 42% in terms of memory. Switching to torch.compile does not resolve these bottlenecks. While compilation provides some memory reduction for the for-ward pass (dropping to ∼10 GB), it fails to effectively alleviate the memory pressure during the backward pass, where usage remains critically high at ∼65 GB (15GB larger than the backbone). Fur-thermore, the runtime improvements are limited; the compiled full model (0.473s, fwd + bwd pass) is still significantly slower than the backbone alone. In fact, torch.compile slows down all back-ward passes, including on the backbone. These results indicate that automatic Pytorch’s compliation optimizations are insufficient to mitigate the overhead of the LM head, highlighting the critical need for specialized techniques to optimize the LM head. 
+
+RQ2: Does tiling the Language Model head help? We investi-gate the impact of tiling the logit computation alone (Algorithm 2,          
+
+> 3SIGIR 26, June 03–05, 2018, Woodstock, NY Thong Nguyen, Cosimo Rulli, Franco Maria Nardini, Rossano Venturini, and Andrew Yates 29212
+> 0
+> 2000
+> Time (ms)
+> 29212
+> 0
+> 500
+> 1000
+> 50000 100000
+> 500
+> 1000
+> 29212
+> Batch Size
+> 0
+> 20
+> Peak VRAM (GB)
+> 29212
+> Sequence Length
+> 0
+> 20
+> 50000 100000
+> Vocab Size
+> 0
+> 20
+> Sparton Torch (Compiled) Torch (Eager)
+
+Figure 2: Scaling Sparton (without backbone) across three di-mensions: Batch Size ( 𝑆 = 512 , |V | = 30522 ), Sequence Length (𝐵 = 128 , |V | = 30522 ), Vocabulary Size ( 𝐵 = 256 , 𝑆 = 512 ). 
+
+line 1) to mitigate memory pressure. As shown in Table 1, our tiling proves to be highly effective for the forward pass in both execution modes. In the eager forward mode, it reduces total memory usage by a factor of 5.8× (from 29GB to 5GB), with similar gains observed in the compiled version. The reason is that, with tiling, maximum memory usage is limited by the maximum tile size, which can be kept in the order of thousands. Yet, in the backward pass, using Py-Torch’s autograd on the tiled forward computation fails to provide significant memory relief, with memory consumption remaining prohibitively high (over 61 GB in eager mode and 65 GB in compiled mode). Furthermore, it introduces a slight computational penalty in the compiled executions; the tiled head is slower than the vanilla LM head in both backward and forwards pass. These results confirm that neither tiling alone nor automatic PyTorch compilation can sufficiently resolve the training bottlenecks, motivating the need for a fully-fused custom kernel. 
+
+RQ3: How does our Sparton kernel perform compare to the tiled-only approach? Beyond tiling, Sparton reorders the max 
+
+operator ahead of the activation functions, reducing both I/O and computation on the subsequent operators. In principle, this early reduction shrinks the stored activations by a factor of 𝑆 , since only one value per sequence position needs to be retained for backprop-agation. In practice, however, PyTorch’s autograd treats matmul 
+
+as an opaque library call and still keeps its full output in HBM. 
+
+Sparton tackles this limitation with a fully-fused backward kernel that stores only the max-reduced activations and computes gra-dients exclusively at the kept sequence positions, eliminating all redundant intermediate storage and I/O. As shown in Table 1, these optimizations make Sparton the fastest and most memory-efficient implementation, nearly eliminating the LM head overhead relative to the backbone in both the forward and backward passes. Figure 2 reports latency (first row) and peak memory usage (second row) of the LM head (without the backbone) as a function of batch size ( 𝐵 ), sequence length ( 𝑆 ), and vocabulary size ( |V | ), respectively, measured on an A100 40GB. Sparton outperforms the PyTorch baselines by a wide margin, with the gap widening as the input ( 𝐵 , 𝑆 , or |𝑉 |) grows. While the baselines exhibit steep, linear (or worse) scaling, Sparton maintains a flat profile, making it increasingly superior for larger workloads. At its best operating point, Sparton achieves up to a 4.8× speedup and 12 × reduction in peak memory compared to compiled baseline. We explicitly report some results in Table 2, where we compare the latency and the 
+
+Table 2: Sparton vs. Tiled LM with varying sequence lengths (𝐵 = 128 , |𝑉 | = 30522 ) in the backward pass (on A100 GPU). Seq Length Tiled LM (Eager) Tiled LM (Compiled) Sparton (Ours)                              
+
+> Time (ms) Mem (GB) Time (ms) Mem (GB) Time (ms) Mem (GB) 1024 279.5 8.51 150.6 14.75 71.2 0.99
+> 2048 531.1 16.82 294.2 29.37 118.6 1.55
+> 4096 1031.0 33.44 OOM OOM 212.7 2.68
+> 8192 OOM OOM OOM OOM 399.6 5.13
+
+peak memory usage as a function of the sequence length, while maintaining the batch size and the vocabulary size fixed to 128 
+
+and 30522 , respectively. The table shows how Sparton is the only method that can handle input sequences of 8192 values, while the other method fails. Both baselines hit a hard scalability wall: Tiled LM (compiled) encounters an out-of-memory (OOM) error at sequence length 4096, and Tiled LM (Eager) fails at 8192. In contrast, Sparton successfully scales to a sequence length of 8192 and beyond, utilizing only 5.13 GB of memory. Overall, Sparton not only provides a significant speedup but also fundamentally solves the memory bottleneck, enabling much larger inputs where standard solutions fail. 
+
+## 4.1 End-to-End Training 
+
+In this section, we use our Sparton kernel to implement the LM head in an end-to-end real-world sparse encoder. In doing so, we plug two different implementations of the LM head, namely the Sparton head and the PyTorch compiled head, downstream to the same backbone to compose our sparse encoder. We initialize the backbone using the same checkpoint that Splade -v3 was initialized from ( splade-cocondenser-selfdistil , |V | ≈ 
+
+30 𝑘 ). We train our model on the Mistral-Splade data [ 3], using the InfoNCE loss [ 19 ], on a H200 GPU. To measure the kernel’s correctness, we benchmark our encoders on a subset of the Beir 
+
+datasets [ 17 ] (small-Beir ) collection consisting of the Arguana, FiQA, NFCorpus, SciDocs, and SciFact. We calculate and report the average NDCG@10 across the five datasets. We report the results in Table 3. When using the same batch size as the compiled LM, Sparton yields a similar retrieval effective-ness, confirming the correctness of our implementation. In terms of efficiency, Sparton is 14% faster (12.24 hours vs. 14.24 hours) and uses nearly 30GB less memory than the compiled Pytorch version. Hence, we can scale the batch size up to 512 with Sparton . The increased batch-size leads to a slightly higher effectiveness for Spar-ton , matching the performance of Splade -V3 trained using a much more complex training recipe, involving knowledge distillation. When switching to a multilingual backbone ( xlm-roberta-base ,
+
+|V | ≈ 250 𝑘 ) while keeping the training setup the same, we observe 
+
+Table 3: Training efficiency and effectiveness (NDCG@10 on small-Beir ) of Sparton in LSR training on NVIDIA H200. 
+
+Method Batch Steps Time (h) Mem (GB) Avg. NDCG@10 
+
+Splade -V3 - - - - 0.422 Compiled LM 384 67528 14.24 125.78 0.421 
+
+Sparton 384 67528 12.38 96.83 0.416 
+
+Sparton 512 50646 12.24 128.63 0.427 
+
+> 4
+
+Sparton: Fast and Memory-Efficient Triton Kernel for Learned Sparse Retrieval SIGIR 26, June 03–05, 2018, Woodstock, NY 
+
+even a larger gain where Sparton enables 26 × larger batch size (420 vs 16) and 2.5× faster training (67 vs. 25 hours) on an H100. 
+
+## 5 Conclusions and Future Work 
+
+In this work, we present Sparton , an optimized Triton kernel that leverages tiled matrix multiplication, operator re-ordering, and sparse activation to alleviate memory bottlenecks and accelerate the LM head in LSR models. Our experiments demonstrate that 
+
+Sparton provides a significant speedup while nearly eliminating the memory overhead of the LM head. This enables the processing of substantially larger batch sizes, sequence lengths, and vocabular-ies—scenarios where standard PyTorch implementations are either inefficient or encounter out-of-memory errors. Future work could extend Sparton to leverage hardware-specific features like Tensor Memory Accelerator (TMA) or lower-precision formats (e.g., FP8) to further exploit modern GPU capabilities. 
+
+## References 
+
+[1] Sebastian Bruch, Franco Maria Nardini, Cosimo Rulli, and Rossano Venturini. 2024. Efficient Inverted Indexes for Approximate Retrieval over Learned Sparse Representations. In Proceedings of the 47th International ACM SIGIR Conference on Research and Development in Information Retrieval (SIGIR) . ACM, 152–162. doi:10.1145/3626772.3657769 [2] Sebastian Bruch, Franco Maria Nardini, Cosimo Rulli, and Rossano Venturini. 2024. Pairing Clustered Inverted Indexes with 𝜅 -NN Graphs for Fast Approxi-mate Retrieval over Learned Sparse Representations. In Proceedings of the 33rd International ACM Conference on Information and Knowledge Management (CIKM) .ACM, 3642–3646. doi:10.1145/3627673.3679977 [3] Meet Doshi, Vishwajeet Kumar, Rudra Murthy, Jaydeep Sen, et al . 2024. Mistral-splade: Llms for better learned sparse retrieval. arXiv preprint arXiv:2408.11119 
+
+(2024). [4] Thibault Formal, Benjamin Piwowarski, and Stéphane Clinchant. 2021. SPLADE: Sparse lexical and expansion model for first stage ranking. In Proceedings of the 44th International ACM SIGIR Conference on Research and Development in Information Retrieval . 2288–2292. [5] Luyu Gao, Yunyi Zhang, Jiawei Han, and Jamie Callan. 2021. Scaling Deep Contrastive Learning Batch Size under Memory Limited Setup. In Proceedings of the 6th Workshop on Representation Learning for NLP (RepL4NLP-2021) . 316–321. [6] Zhichao Geng, Yiwen Wang, Dongyu Ru, and Yang Yang. 2024. Towards compet-itive search relevance for inference-free learned sparse retrievers. arXiv preprint arXiv:2411.04403 (2024). [7] Rodrigo Huerta, Mojtaba Abaie Shoushtary, José-Lorenzo Cruz, and Antonio Gonzalez. 2025. Dissecting and modeling the architecture of modern GPU cores. In Proceedings of the 58th IEEE/ACM International Symposium on Microarchitecture .369–384. [8] Carlos Lassance and Stéphane Clinchant. 2022. An Efficiency Study for SPLADE Models. In Proceedings of the 45th International ACM SIGIR Conference on Research and Development in Information Retrieval (Madrid, Spain). 2220–2226. [9] Carlos Lassance, Hervé Déjean, Thibault Formal, and Stéphane Clinchant. 2024. SPLADE-v3: New baselines for SPLADE. arXiv preprint arXiv:2403.06789 (2024). [10] Weile Luo, Ruibo Fan, Zeyu Li, Dayou Du, Qiang Wang, and Xiaowen Chu. 2024. Benchmarking and dissecting the nvidia hopper gpu architecture. In 2024 IEEE International Parallel and Distributed Processing Symposium (IPDPS) . IEEE, 656–667. [11] Sean MacAvaney, Franco Maria Nardini, Raffaele Perego, Nicola Tonellotto, Nazli Goharian, and Ophir Frieder. 2020. Expansion via Prediction of Importance with Contextualization. In Proceedings of the 43rd International ACM SIGIR Conference on Research and Development in Information Retrieval (Virtual Event, China). 1573–1576. [12] Yu A. Malkov and D. A. Yashunin. 2020. Efficient and Robust Approximate Nearest Neighbor Search Using Hierarchical Navigable Small World Graphs. 
+
+IEEE Transactions on Pattern Analysis and Machine Intelligence 42, 4 (2020), 824– 836. doi:10.1109/TPAMI.2018.2889473 [13] Stefano Markidis, Steven Wei Der Chien, Erwin Laure, Ivy Bo Peng, and Jeffrey S Vetter. 2018. Nvidia tensor core programmability, performance & precision. In 
+
+2018 IEEE international parallel and distributed processing symposium workshops (IPDPSW) . IEEE, 522–531. [14] Thong Nguyen, Yibin Lei, Jia-Huei Ju, Eugene Yang, and Andrew Yates. 2025. Milco: Learned Sparse Retrieval Across Languages via a Multilingual Connector. 
+
+arXiv preprint arXiv:2510.00671 (2025). [15] Thong Nguyen, Sean MacAvaney, and Andrew Yates. 2023. A unified framework for learned sparse retrieval. In European Conference on Information Retrieval .Springer, 101–116. [16] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, et al . 2019. Pytorch: An imperative style, high-performance deep learning library. Advances in neural information processing systems 32 (2019). [17] Nandan Thakur, Nils Reimers, Andreas Rücklé, Abhishek Srivastava, and Iryna Gurevych. [n. d.]. BEIR: A Heterogeneous Benchmark for Zero-shot Evaluation of Information Retrieval Models. In Thirty-fifth Conference on Neural Information Processing Systems Datasets and Benchmarks Track (Round 2) .[18] Philippe Tillet, Hsiang-Tsung Kung, and David Cox. 2019. Triton: an intermediate language and compiler for tiled neural network computations. In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Program-ming Languages . 10–19. [19] Aaron van den Oord, Yazhe Li, and Oriol Vinyals. 2019. Representation Learning with Contrastive Predictive Coding. arXiv:1807.03748 [cs.LG] https://arxiv.org/ abs/1807.03748 5
