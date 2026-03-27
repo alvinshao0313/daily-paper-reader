@@ -6,73 +6,85 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-03-26
-- 运行时间：2026-03-26 20:20:59 UTC
+- 最新运行日期：2026-03-27
+- 运行时间：2026-03-27 19:46:58 UTC
 - 运行状态：成功
-- 本次总论文数：17
-- 精读区：6
-- 速读区：11
+- 本次总论文数：21
+- 精读区：12
+- 速读区：9
 
 ### 今日简报（AI）
-今日聚焦大模型边缘化部署，深度解析自适应混合精度量化与软硬协同设计的前沿突破。
-重点推荐 APreQEL 方案与全栈能效优化研究，揭示了从 TinyML 到 LLM 实现极致推理性能的关键。
-建议关注低比特量化在 KAN 等新架构上的适配，探索模型轻量化与端侧落地的最佳实践。
-- 详情：[/202603/26/README](/202603/26/README)
+今日精选 21 篇前沿论文，深度解析模型剪枝的底层逻辑与多模态大模型的高效加速方案。
+重点推荐通过表示层次结构揭示剪枝机制的理论突破，以及兼顾相关性与多样性的多模态 Token 剪枝技术 ReDiPrune。
+建议优先研读两篇满分论文，掌握模型轻量化从经验驱动转向理论指导的核心趋势。
+- 详情：[/202603/27/README](/202603/27/README)
 
 ### 精读区论文标签
-1. [APreQEL: Adaptive Mixed Precision Quantization For Edge LLMs](/202603/26/2603.23575v1-apreqel-adaptive-mixed-precision-quantization-for-edge-llms)  
+1. [Demystifying When Pruning Works via Representation Hierarchies](/202603/27/2603.24652v1-demystifying-when-pruning-works-via-representation-hierarchies)  
    标签：评分：10.0/10、query:mc
-   evidence：用于高效LLM部署的自适应混合精度量化
-2. [Energy Efficient Software Hardware CoDesign for Machine Learning: From TinyML to Large Language Models](/202603/26/2603.23668v1-energy-efficient-software-hardware-codesign-for-machine-learning-from-tinyml-to-large-language-models)  
+   evidence：语言模型中的网络剪枝
+2. [ReDiPrune: Relevance-Diversity Pre-Projection Token Pruning for Efficient Multimodal LLMs](/202603/27/2603.24680v1-rediprune-relevance-diversity-pre-projection-token-pruning-for-efficient-multimodal-llms)  
    标签：评分：10.0/10、query:mc
-   evidence：能效协同设计、量化与大语言模型服务
-3. [Self-Distillation for Multi-Token Prediction](/202603/26/2603.23911v1-self-distillation-for-multi-token-prediction)  
+   evidence：用于高效多模态LLM的免训练标记剪枝
+3. [Mechanistically Interpreting Compression in Vision-Language Models](/202603/27/2603.25035v1-mechanistically-interpreting-compression-in-vision-language-models)  
    标签：评分：10.0/10、query:mc
-   evidence：用于LLM多标记预测的自蒸馏
-4. [Attention-aware Inference Optimizations for Large Vision-Language Models with Memory-efficient Decoding](/202603/26/2603.23914v1-attention-aware-inference-optimizations-for-large-vision-language-models-with-memory-efficient-decoding)  
+   evidence：VLM中的剪枝与量化
+4. [SliderQuant: Accurate Post-Training Quantization for LLMs](/202603/27/2603.25284v1-sliderquant-accurate-post-training-quantization-for-llms)  
    标签：评分：10.0/10、query:mc
-   evidence：VLM的推理优化与内存高效解码技术
-5. [Diet Your LLM: Dimension-wise Global Pruning of LLMs via Merging Task-specific Importance Score](/202603/26/2603.23985v1-diet-your-llm-dimension-wise-global-pruning-of-llms-via-merging-task-specific-importance-score)  
+   evidence：大语言模型的训练后量化
+5. [GlowQ: Group-Shared LOw-Rank Approximation for Quantized LLMs](/202603/27/2603.25385v1-glowq-group-shared-low-rank-approximation-for-quantized-llms)  
    标签：评分：10.0/10、query:mc
-   evidence：LLM 的维度级全局剪枝
-6. [Why Does Self-Distillation (Sometimes) Degrade the Reasoning Capability of LLMs?](/202603/26/2603.24472v1-why-does-self-distillation-sometimes-degrade-the-reasoning-capability-of-llms)  
+   evidence：量化LLM的低秩近似
+6. [F2LLM-v2: Inclusive, Performant, and Efficient Embeddings for a Multilingual World](/202603/27/2603.19223v1-f2llm-v2-inclusive-performant-and-efficient-embeddings-for-a-multilingual-world)  
    标签：评分：9.0/10、query:mc
-   evidence：分析了LLM中的自蒸馏及其对推理性能的影响
+   evidence：LLM嵌入模型的剪枝与知识蒸馏
+7. [DFLOP: A Data-driven Framework for Multimodal LLM Training Pipeline Optimization](/202603/27/2603.25120v1-dflop-a-data-driven-framework-for-multimodal-llm-training-pipeline-optimization)  
+   标签：评分：9.0/10、query:mc
+   evidence：多模态大语言模型训练流水线效率优化
+8. [Photon: Speedup Volume Understanding with Efficient Multimodal Large Language Models](/202603/27/2603.25155v1-photon-speedup-volume-understanding-with-efficient-multimodal-large-language-models)  
+   标签：评分：9.0/10、query:mc
+   evidence：通过Token调度实现高效多模态大语言模型
+9. [How Pruning Reshapes Features: Sparse Autoencoder Analysis of Weight-Pruned Language Models](/202603/27/2603.25325v1-how-pruning-reshapes-features-sparse-autoencoder-analysis-of-weight-pruned-language-models)  
+   标签：评分：9.0/10、query:mc
+   evidence：使用稀疏自编码器分析权重剪枝的语言模型
+10. [Large Language Model as Token Compressor and Decompressor](/202603/27/2603.25340v1-large-language-model-as-token-compressor-and-decompressor)  
+   标签：评分：9.0/10、query:mc
+   evidence：大语言模型作为Token压缩器
+11. [CLIP-RD: Relational Distillation for Efficient CLIP Knowledge Distillation](/202603/27/2603.25383v1-clip-rd-relational-distillation-for-efficient-clip-knowledge-distillation)  
+   标签：评分：9.0/10、query:mc
+   evidence：CLIP的关系蒸馏
+12. [Multimodal Dataset Distillation via Phased Teacher Models](/202603/27/2603.25388v1-multimodal-dataset-distillation-via-phased-teacher-models)  
+   标签：评分：9.0/10、query:mc
+   evidence：多模态数据集蒸馏
 
 ### 速读区论文标签
-1. [KANtize: Exploring Low-bit Quantization of Kolmogorov-Arnold Networks for Efficient Inference](/202603/26/2603.17230v1-kantize-exploring-low-bit-quantization-of-kolmogorov-arnold-networks-for-efficient-inference)  
+1. [ReLope: KL-Regularized LoRA Probes for Multimodal LLM Routing](/202603/27/2603.24787v1-relope-kl-regularized-lora-probes-for-multimodal-llm-routing)  
    标签：评分：8.0/10、query:mc
-   evidence：用于高效推理的低比特量化
-2. [Tiny Inference-Time Scaling with Latent Verifiers](/202603/26/2603.22492v2-tiny-inference-time-scaling-with-latent-verifiers)  
+   evidence：多模态LLM路由以平衡成本与性能
+2. [Prune as You Generate: Online Rollout Pruning for Faster and Better RLVR](/202603/27/2603.24840v1-prune-as-you-generate-online-rollout-pruning-for-faster-and-better-rlvr)  
    标签：评分：8.0/10、query:mc
-   evidence：使用MLLM作为验证器的高效推理
-3. [AgentRVOS: Reasoning over Object Tracks for Zero-Shot Referring Video Object Segmentation](/202603/26/2603.23489v1-agentrvos-reasoning-over-object-tracks-for-zero-shot-referring-video-object-segmentation)  
+   evidence：大语言模型的在线Rollout剪枝
+3. [Sparton: Fast and Memory-Efficient Triton Kernel for Learned Sparse Retrieval](/202603/27/2603.25011v1-sparton-fast-and-memory-efficient-triton-kernel-for-learned-sparse-retrieval)  
    标签：评分：8.0/10、query:mc
-   evidence：用于零样本视频对象分割的多模态大模型
-4. [Action Draft and Verify: A Self-Verifying Framework for Vision-Language-Action Model](/202603/26/2603.18091v1-action-draft-and-verify-a-self-verifying-framework-for-vision-language-action-model)  
+   evidence：稀疏检索与内存高效算子
+4. [Sparse Visual Thought Circuits in Vision-Language Models](/202603/27/2603.25075v1-sparse-visual-thought-circuits-in-vision-language-models)  
+   标签：评分：8.0/10、query:mc
+   evidence：视觉语言模型中的稀疏自编码器
+5. [Investigating the Fundamental Limit: A Feasibility Study of Hybrid-Neural Archival](/202603/27/2603.25526v1-investigating-the-fundamental-limit-a-feasibility-study-of-hybrid-neural-archival)  
+   标签：评分：8.0/10、query:mc
+   evidence：基于LLM的无损压缩
+6. [RVLM: Recursive Vision-Language Models with Adaptive Depth](/202603/27/2603.24224v1-rvlm-recursive-vision-language-models-with-adaptive-depth)  
    标签：评分：7.0/10、query:mc
-   evidence：VLM在视觉-语言-动作模型中选择动作候选
-5. [Optimal low-rank stochastic gradient estimation for LLM training](/202603/26/2603.20632v1-optimal-low-rank-stochastic-gradient-estimation-for-llm-training)  
-   标签：评分：7.0/10、query:mc
-   evidence：大语言模型训练中的内存高效低秩梯度估计
-6. [A Theoretical Framework for Energy-Aware Gradient Pruning in Federated Learning](/202603/26/2603.22465v1-a-theoretical-framework-for-energy-aware-gradient-pruning-in-federated-learning)  
-   标签：评分：7.0/10、query:mc
-   evidence：联邦学习中的能耗感知梯度剪枝
-7. [Tiny Inference-Time Scaling with Latent Verifiers](/202603/26/2603.22492v1-tiny-inference-time-scaling-with-latent-verifiers)  
-   标签：评分：7.0/10、query:mc
-   evidence：使用多模态大模型作为验证器并优化推理成本
-8. [ARGENT: Adaptive Hierarchical Image-Text Representations](/202603/26/2603.23311v1-argent-adaptive-hierarchical-image-text-representations)  
-   标签：评分：7.0/10、query:mc
-   evidence：视觉语言模型中的层次化表示
-9. [Spectral Tempering for Embedding Compression in Dense Passage Retrieval](/202603/26/2603.19339v1-spectral-tempering-for-embedding-compression-in-dense-passage-retrieval)  
+   evidence：递归视觉语言模型
+7. [WWW.Serve: Interconnecting Global LLM Services through Decentralization](/202603/27/2603.20661v1-wwwserve-interconnecting-global-llm-services-through-decentralization)  
    标签：评分：6.0/10、query:mc
-   evidence：检索系统的嵌入向量压缩
-10. [Centrality-Based Pruning for Efficient Echo State Networks](/202603/26/2603.20684v1-centrality-based-pruning-for-efficient-echo-state-networks)  
+   evidence：通过去中心化互连全球 LLM 服务
+8. [IGV-RRT: Prior-Real-Time Observation Fusion for Active Object Search in Changing Environments](/202603/27/2603.21887v1-igv-rrt-prior-real-time-observation-fusion-for-active-object-search-in-changing-environments)  
    标签：评分：6.0/10、query:mc
-   evidence：基于中心性的回声状态网络剪枝
-11. [DA-VAE: Plug-in Latent Compression for Diffusion via Detail Alignment](/202603/26/2603.22125v1-da-vae-plug-in-latent-compression-for-diffusion-via-detail-alignment)  
+   evidence：源自视觉语言模型 (VLM) 的在线目标相关性估计
+9. [Sparse Autoencoders for Interpretable Medical Image Representation Learning](/202603/27/2603.23794v1-sparse-autoencoders-for-interpretable-medical-image-representation-learning)  
    标签：评分：6.0/10、query:mc
-   evidence：用于高效扩散模型的潜空间压缩
+   evidence：用于视觉模型降维的稀疏自编码器
 
 
 <div class="dpr-home-promo-card">
