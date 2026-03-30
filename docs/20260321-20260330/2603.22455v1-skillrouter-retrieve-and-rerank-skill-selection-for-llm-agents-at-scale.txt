@@ -1,0 +1,689 @@
+Title: SkillRouter: Retrieve-and-Rerank Skill Selection for LLM Agents at Scale
+
+URL Source: https://arxiv.org/pdf/2603.22455v1
+
+Published Time: Wed, 25 Mar 2026 00:12:53 GMT
+
+Number of Pages: 26
+
+Markdown Content:
+Preprint. Under review. 
+
+# SkillRouter: Retrieve-and-Rerank Skill Selection for LLM Agents at Scale 
+
+YanZhao Zheng ZhenTao Zhang Chao Ma YuanQiang Yu JiHuan Zhu Baohua Dong ∗ Hangcheng Zhu 
+
+Alibaba Group, Hangzhou, China 
+
+{zhengyanzhao.zyz, zhangzhentao.zzt, mc524716, yuyuanqiang.yyq, zhujihuai.zjh, baohua.dbh, linran.lr09 }@alibaba-inc.com 
+
+## Abstract 
+
+As LLM agent ecosystems grow, the number of available skills (tools, plug-ins) has reached tens of thousands, making it infeasible to inject all skills into an agent’s context. This creates a need for skill routing —retrieving the most relevant skills from a large pool given a user task. The problem is compounded by pervasive functional overlap in community skill repos-itories, where many skills share similar names and purposes yet differ in implementation details. Despite its practical importance, skill routing remains under-explored. Current agent architectures adopt a progressive disclosure design—exposing only skill names and descriptions to the agent while keeping the full implementation body hidden—implicitly treating metadata as sufficient for selection. We challenge this assumption through a systematic empirical study on a benchmark of ∼80K skills and 75 expert-verified queries. Our key finding is that the skill body (full implementation text) is the decisive signal: removing it causes 29–44 percentage point degra-dation across all retrieval methods, and cross-encoder attention analysis reveals 91.7% of attention concentrating on the body field. Motivated by this finding, we propose S KILL ROUTER , a two-stage retrieve-and-rerank pipeline totaling only 1.2B parameters (0.6B encoder + 0.6B reranker). S KILL -ROUTER achieves 74.0% top-1 routing accuracy and delivers the strongest average result among the compact and zero-shot baselines we evaluate, while remaining deployable on consumer hardware. 
+
+## 1 Introduction 
+
+LLM-based coding and personal assistants—such as Claude Code (Anthropic, 2025), Codex CLI (OpenAI, 2025), and open-source alternatives—have become an integral part of modern software development workflows. A key factor in their effectiveness is the skill (also referred to as tool or plugin) ecosystem: community-contributed skill packages that extend an agent’s capabilities with specialized functionality, from database migration to code linting to API integration. As these ecosystems mature, the number of available skills has grown rapidly, reaching tens of thousands in popular registries. However, this growth brings a critical challenge: community-contributed skill repositories exhibit pervasive functional overlap— many skills share similar names and purposes while differing only in implementation details, creating a highly homogeneous pool that is difficult to navigate. Injecting all available skills into an agent’s context window is infeasible. Context length constraints, inference cost, and the sheer diversity of skill quality and relevance make it impractical to present every skill to the agent for every task. This creates a fundamental need for skill routing : given a user’s task description, automatically selecting the most relevant skill(s) from a large pool. The routing component operates under a distinctive hidden-body 
+
+> ∗
+
+Corresponding author. 
+
+1
+
+> arXiv:2603.22455v1 [cs.LG] 23 Mar 2026
+
+Preprint. Under review. 
+
+asymmetry —the agent that ultimately uses a skill can only see its name and description (due to context constraints), but the routing system can access the complete skill text, including its full implementation body. Despite the practical importance of this problem, skill routing remains under-explored. Cur-rent agent architectures adopt a progressive disclosure design: when presenting available skills, they expose only names and descriptions to the agent while keeping the full imple-mentation body hidden from the context window. This design implicitly treats metadata as sufficient for selection—an assumption that, to our knowledge, has never been system-atically verified. Existing benchmarks such as SkillBench (Huang et al., 2025), ToolBench (Qin et al., 2023), and MetaTool (Huang et al., 2024) evaluate how well agents use tools that are already provided to them, but do not study the upstream problem of retrieving the right tool from a large pool in the first place. On the retrieval side, ToolRerank (Zheng et al., 2024) and CRAFT (Yuan et al., 2024a) explore tool retrieval with reranking and context-aware retrieval respectively, but operate on tool-level metadata (name and description) in pools of hundreds to thousands, without investigating which textual components of a tool actually drive accurate selection. In this work, we conduct a systematic study of skill routing at scale ( ∼80K skills), organized around three research questions: • RQ1 : Is skill routing in large-scale skill pools a genuinely challenging retrieval problem? • RQ2 : Which components of a skill’s text (name, description, body) are decisive for accurate selection? • RQ3 : Can a compact, fine-tuned retrieve-and-rerank pipeline effectively leverage these signals? Our investigation yields several findings. First, we demonstrate that skill routing is indeed challenging: even the best 8B base encoder achieves only 64.0% top-1 routing accuracy, and BM25 drops to near-zero when skill bodies are excluded ( RQ1 ). Second, we reveal that the skill body —the full implementation text—is the decisive signal for selection, not the name or description as conventionally assumed. Removing the body causes 29–44pp degradation across all methods, and cross-encoder attention analysis shows 91.7% of at-tention concentrating on the body field ( RQ2 ). Third, motivated by these findings, we propose S KILL ROUTER , a two-stage retrieve-and-rerank pipeline that uses full skill text in both stages. With only 1.2B total parameters (0.6B encoder + 0.6B reranker), S KILL ROUTER 
+
+achieves 74.0% top-1 routing accuracy and compares favorably with much larger zero-shot alternatives ( RQ3 ). The compact design is deliberate: as personal agent products like OpenClaw gain popularity, skill routing must run on consumer hardware without requiring cloud APIs or large GPU clusters. S KILL ROUTER ’s 0.6B models can be deployed on a laptop CPU, making on-device skill routing practical in the compact setting we target. The same recipe scales to 8B, reaching 76.0% Hit@1, confirming that the approach generalizes beyond the compact setting. Our contributions are: 1. We conduct the first systematic empirical study of skill routing in large-scale skill pools, revealing the decisive role of skill body—a finding that overturns the “name+description suffices” assumption prevalent in current agent frameworks. 2. We construct a standardized evaluation benchmark with ∼80K skills and 75 expert-verified queries at two difficulty levels, including 24 single-skill and 51 multi-skill queries, building on the high-quality task–skill mappings of SkillBench (Huang et al., 2025). 3. We propose S KILL ROUTER , a 1.2B-parameter retrieve-and-rerank pipeline whose compact 0.6B+0.6B configuration reaches 74.0% Hit@1 and compares favorably with much larger zero-shot baselines. The compact design enables on-device deployment for personal agent products and highlights the value of task-specific adaptation for skill routing. 4. We provide detailed ablation analyses showing that false negative filtering and list-wise ranking loss are critical for training in homogeneous skill pools, offering practical guidance for future work. 2Preprint. Under review. 
+
+## 2 Problem Definition and Benchmark 
+
+2.1 Problem Formulation 
+
+We consider the skill routing problem: given a user task query q and a large skill pool 
+
+S = {s1, . . . , sN }, select the skill(s) most relevant to accomplishing the task. Each skill si is a structured text unit comprising three fields: • Name : a short identifier (e.g., pdf-merger ). • Description : a one-sentence summary of the skill’s purpose. • Body : the full implementation or detailed specification, typically hundreds to thousands of tokens. The pool size N can range from tens of thousands to hundreds of thousands in real-world agent ecosystems, making brute-force evaluation infeasible. The goal is to retrieve a ranked list of candidate skills, with the ground-truth skill(s) Gq ⊆ S ranked as highly as possible. 
+
+Hidden-body asymmetry. A distinctive feature of the skill routing setting is what we term 
+
+hidden-body asymmetry : the agent that ultimately uses a selected skill typically operates under context-window constraints and can only see the skill’s name and description. However, the routing component (retriever and reranker) can access the full skill text, including the body. This creates an information asymmetry between the selector (which has full access) and the 
+
+consumer (which sees only metadata). As we demonstrate in Section 3, this asymmetry is not merely a design convenience but a necessity—body access is critical for accurate selection. 
+
+Evaluation metrics. We evaluate with standard retrieval metrics: Hit@1 (top-1 routing accuracy, our primary metric), MRR@10 (mean reciprocal rank in top-10), nDCG@10 
+
+(normalized discounted cumulative gain), Recall@ K (K ∈ { 10, 20, 50 }, proportion of ground-truth skills retrieved), and FC@10 (fraction of queries where all ground-truth skills appear in top-10). For multi-skill queries, Hit@1 counts success when any required skill is ranked first. We therefore report Recall@ K and FC@10 as complementary coverage metrics. Throughout the paper, our headline results should be read as routing-quality results rather than direct end-to-end task-completion measurements. 
+
+2.2 Benchmark Construction 
+
+Evaluating skill routing requires a benchmark with two properties: (1) high task–skill affinity —each query must have clearly defined ground-truth skills that are necessary and sufficient for the task, and (2) realistic pool scale —the skill pool must be large enough that retrieval is non-trivial. 
+
+Task–skill pairs from SkillBench. We build our evaluation queries on top of SkillBench (Huang et al., 2025), a benchmark designed for evaluating LLM agents on complex tasks that require specific skills. SkillBench provides expert-curated task–skill mappings where each task is paired with the specific skills needed to complete it. This strong task–skill affinity—verified by domain experts—makes SkillBench an ideal source for high-quality ground-truth annotations. We extract 87 task queries and their ground-truth skill mappings, then apply a consistency filter to remove queries with ambiguous or annotator-disagreed skill assignments, yielding 75 core queries . These comprise 24 single-skill queries and 
+
+51 multi-skill queries. Further details on single- vs. multi-skill evaluation and metric computation are provided in Appendix A. 
+
+Skill pool construction. To create a realistic retrieval challenge, we construct a skill pool of ∼80K skills by combining the SkillBench skills with a large collection of community-contributed skills from open-source repositories. The resulting pool spans 51 functional categories and exhibits the natural characteristics of real-world skill ecosystems: high inter-skill homogeneity (many skills with similar names and overlapping functionality), diverse body lengths (mean 952 words, median 703), and long-tail category distributions. 3Preprint. Under review. Table 1: Impact of skill body on retrieval accuracy (Hit@1). Encoder rows use the Easy tier; reranking rows use the Easy+Hard average. Removing the body (nd) causes catastrophic degradation across all method types. 
+
+Method Type nd full ∆
+
+BM25 Sparse .000 .347 +34.7 Qwen3-Emb-0.6B Encoder .227 .587 +36.0 Qwen3-Emb-8B Encoder .307 .653 +34.6 
+
+Reranking (Avg Easy+Hard) 
+
+Qwen3-Emb-8B × Qwen3-Rank-8B Cross-Enc. .240 .680 +44.0 Qwen3-Emb-8B × GPT-5.4-mini LLM Judge .307 .594 +28.7 
+
+Difficulty tiers. We define two difficulty tiers to probe different aspects of retrieval robust-ness: • Easy (78,361 skills): the base pool augmented with ground-truth skills. All skill metadata (name, description, body) is fully intact. This tier tests retrieval under standard conditions. • Hard (79,141 skills): the Easy pool augmented with 780 LLM-generated distractor skills— synthetic skills that are topically related to the ground-truth skills but functionally distinct. These distractors increase inter-skill confusion and test whether models can distinguish genuinely relevant skills from plausible alternatives. All evaluation results report performance on both tiers, with average (Easy + Hard) as the primary aggregate. 
+
+## 3 What Signals Drive Skill Selection? 
+
+Before presenting our pipeline, we investigate a fundamental question: which components of a skill’s text actually matter for accurate selection? Each skill consists of three fields—name, description, and body—and the prevailing assumption in current agent frameworks is that name and description provide sufficient information for skill matching. We challenge this assumption through controlled experiments and attention analysis, revealing that the skill body is the decisive signal for accurate selection. 
+
+3.1 Name+Description vs. Full Skill Text 
+
+We compare two input configurations across retrieval methods: nd (name + description only) and full (name + description + body). Table 1 presents the results in the evaluation regimes where nd data is available for each method family: encoder rows use the Easy tier, while reranking rows use the average of Easy and Hard from Table 5. 
+
+Body removal causes catastrophic failure. BM25 with nd input achieves exactly zero across all metrics: ground-truth skills’ names and descriptions share virtually no lexical overlap with user queries, making keyword matching completely ineffective. Adding the skill body restores BM25 to 34.7% Hit@1—a result that is itself modest but demonstrates that the dominant discriminative signal resides in the body. 
+
+The effect is universal across model families. Dense encoders show the same pattern: Qwen3-Emb-0.6B drops from 58.7% (full) to 22.7% (nd), a 36.0pp collapse . Even the 8B model cannot compensate—Qwen3-Emb-8B nd (30.7%) is far below the 0.6B full model (58.7%), meaning a 13 × increase in parameters recovers less than one-quarter of the body’s contribution. 
+
+Rerankers without body are actively harmful. Rerankers operating on nd input degrade performance below the encoder-only baseline. The best nd cross-encoder combination (Qwen3-Emb-0.6B × Qwen3-Rank-8B-nd) achieves only 30.7% average Hit@1—compared 4Preprint. Under review. 0.0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8      
+
+> Hit@1 (ALL)
+> BM25 (Sparse)
+> Encoder
+> Reranker
+> +31.4pp
+> +23.0pp
+> +44.0pp
+> Encoder-only (full)
+> (a) Impact of Skill Body on Retrieval
+> Name+Desc only
+> Full skill text
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Mean Attention Proportion
+> Body
+> Name
+> Desc
+> 91.7%
+> 7.3%
+> 1.0%
+> peaks at L19: 26.3%
+> (b) Cross-Encoder Attention by Field
+
+Figure 1: Skill body is the decisive signal. Left: Removing body (nd) causes 29–44pp Hit@1 drops across all methods. Right: Cross-encoder attention distribution shows 91.7% of attention on body, 7.3% on name, 1.0% on description. to 56.0% for the same encoder without reranking, a 25.3pp degradation . Even LLM judges with nd input fare no better (best: 33.3%). This counterintuitive result arises because nd rerankers confidently re-sort candidates based on surface-level name/description similarity, overriding the encoder’s more informative full-body ranking with a worse one. 
+
+3.2 Attention Analysis: Where Does the Model Look? 
+
+To understand why the body matters, we analyze the attention patterns of the cross-encoder reranker (SR-Rank-0.6B). Since Qwen3 is a causal (decoder-only) model, we examine the attention from the final prediction token to all input tokens, aggregated across 28 layers ×
+
+16 heads and 75 core queries. We partition the attention weights by field (name, description, body) and normalize to sum to 1. Figure 1 (right panel) summarizes the results: body receives 91.7% of total attention , name receives 7.3%, and description receives only 1.0%. 
+
+Layer-wise pattern: body →name →body. The attention distribution evolves across layers. Early layers (0–6) focus almost exclusively on body content (97.3%), likely performing token-level content understanding. Middle layers (7–20) allocate increasing attention to name, peaking at 26.3% in layer 19—suggesting that these layers perform name-based semantic matching against the query. Late layers (21–27) return to body dominance (91.7%), using the body’s detailed information for the final relevance decision. Description attention remains negligible ( ≤1.4%) at all layers, indicating that the information it carries is entirely subsumed by the body. 
+
+3.3 Implications 
+
+These findings overturn the common assumption that skill name and description suffice for selection, and have direct consequences for system design: 1. Retrieval and reranking must access the full body. Any skill-routing system that operates only on name and description is fundamentally limited—not just less accurate, but catastrophically so (30–40pp degradation). 2. Hidden-body asymmetry is a real design constraint. In typical agent architectures, the agent itself cannot see skill bodies (they are too long for the context window). Our findings show that the retrieval/reranking layer must have body access, creating an inherent information asymmetry between the agent and its routing component. 3. These findings directly motivate our pipeline design. In Section 4, we design S KILL -ROUTER to use full skill text in both the encoder and reranker stages—a choice that the above evidence shows is not merely beneficial but necessary. 5Preprint. Under review. 
+
+Figure 2: S KILL ROUTER pipeline architecture. Stage 1: bi-encoder retrieval reduces ∼80K skills to top-20 candidates. Stage 2: cross-encoder reranking produces the final ranking. Both stages use full skill text (name + description + body). 
+
+## 4 SkillRouter: A First Practical Pipeline 
+
+Motivated by the findings in Section 3—that skill body is the decisive signal and must be accessible to both retrieval and reranking—we design S KILL ROUTER , a compact two-stage retrieve-and-rerank pipeline. The pipeline totals only 1.2B parameters (0.6B encoder + 0.6B reranker), making it suitable for on-device deployment in personal agent products. 
+
+4.1 Overview 
+
+Given a user query q and a skill pool S = {s1, . . . , sN } where N ≈ 80K, S KILL ROUTER 
+
+operates in two stages: 1. Bi-encoder retrieval. SR-Emb-0.6B encodes the query and all skills into a shared em-bedding space using full skill text (name + description + body). The top-K candidates (K=20) are retrieved via cosine similarity, reducing the candidate set from ∼80K to 20. 2. Cross-encoder reranking. SR-Rank-0.6B jointly processes each (query, candidate) pair through cross-attention over the full skill text, producing a refined relevance score. The 20 candidates are re-sorted to produce the final ranking. Both stages use full skill text as input—a design choice that Section 3 shows is not merely ben-eficial but necessary. Skills are pre-encoded offline; at inference time, only query encoding, ANN search, and reranking of 20 candidates are required. 
+
+4.2 Bi-Encoder Retrieval Base model. We fine-tune Qwen3-Emb-0.6B (Qwen Team, 2025), a decoder-based embed-ding model that supports variable-length inputs and instruction-prefixed encoding. The 0.6B scale is chosen to enable on-device deployment while providing sufficient capacity for skill-routing semantics. 
+
+Training data. We construct a training set of 37,979 (query, skill) pairs. Skills are sampled from a community skill repository comprising ∼80K open-source skills across 51 categories, with stratified sampling to ensure category diversity. For each sampled skill, we generate 6Preprint. Under review. Table 2: Query generation prompt template (simplified). The LLM receives the skill’s metadata and produces a realistic task description without mentioning the skill name. 
+
+System: You are an experienced user of AI assistants. You write clear, realistic task requests that describe what you need to accomplish. 
+
+User: Given the following skill specification, write a realistic task description that someone would ask an AI assistant to help with. The task should naturally require the capabilities described in this skill. Skill name: {name }
+
+Category: {category }
+
+Description: {description }
+
+Skill body: {body preview }
+
+Requirements: (1) Describe a concrete scenario with specific inputs/outputs. (2) Include enough detail that the skill would be clearly useful. (3) Do NOT mention the skill name “{name }” anywhere in the task. Output ONLY the task description. synthetic user queries using an LLM (GPT-4o-mini) prompted with the skill’s metadata and body content (Table 2). The prompt instructs the model to produce a realistic task description that would naturally require the given skill, without revealing the skill name— ensuring that the generated query reflects the functional need rather than the skill’s identity. The generated queries have a mean length of 160 words. Importantly, the training skill pool and query set are fully disjoint from the evaluation benchmark: no evaluation query or ground-truth skill appears in the training data. 
+
+Hard negative mining. Effective contrastive learning requires informative negatives that are challenging but not false positives. We employ a multi-source mining strategy that produces 10 negatives per query from four complementary sources: • Semantic negatives (4 per query): We pre-compute embeddings for all skills using the base Qwen3-Emb-0.6B model, retrieve the top-50 most similar skills by cosine similar-ity, and sample 4 non-positive skills from this set. These are the hardest negatives— semantically close but functionally distinct. • Lexical negatives (3 per query): BM25 scoring over skill text (name + description + body) on the same top-50 candidate set, capturing term-overlap confounders that semantic search may miss. • Taxonomy negatives (2 per query): randomly sampled from the same category as the positive skill but with a different name, providing same-domain distractors. • Random negatives (1 per query): uniformly sampled from a different category, serving as easy negatives for calibration. 
+
+False negative filtering. Community skill repositories exhibit extensive functional overlap—many skills with different names provide near-identical capabilities. In con-trastive learning, these duplicates become false negatives that corrupt the training signal. We apply a three-layer filtering pipeline: 1. Name deduplication : removing negatives that share the same name as any ground-truth skill for the query. 2. Body overlap : removing negatives whose body text has trigram Jaccard similarity > 0.6 with a ground-truth skill’s body. 3. Embedding similarity : removing negatives with cosine similarity > 0.92 to a ground-truth skill’s embedding, catching semantic duplicates missed by lexical matching. In total, approximately 10% of mined negative pairs are removed. The impact of this filtering is validated in Section 5.4.1, where removing it degrades Hit@1 by 4.0pp. 
+
+Loss function. We train with in-batch InfoNCE loss (Karpukhin et al., 2020). For a batch of B queries, we concatenate each query’s positive and negative skill embeddings, compute 7Preprint. Under review. a scaled cosine similarity matrix, and apply cross-entropy with the positive as the target: 
+
+Lenc = − 1
+
+B
+
+> B
+
+# ∑
+
+> i=1
+
+log exp (sim (qi, s+ 
+
+> i
+
+)/τ)
+
+∑j exp (sim (qi, sj)/τ) (1) where sim (·, ·) denotes cosine similarity and τ=0.05 is a temperature hyperparameter that sharpens the similarity distribution, encouraging the model to make fine-grained distinctions among candidates. 
+
+Training configuration. We train on a single GPU with batch size 8, gradient accumulation 4 (effective batch size 32), learning rate 2 × 10 −5 with cosine schedule and 5% warmup, using BF16 mixed precision and gradient checkpointing. Training runs for 1 epoch; longer training leads to overfitting as validated by our hyperparameter sweep. 
+
+4.3 Cross-Encoder Reranking Base model. We fine-tune Qwen3-Reranker-0.6B (Qwen Team, 2025), a decoder-based cross-encoder that processes concatenated (query, document) pairs and outputs a relevance score. 
+
+Input format. Each candidate skill is presented to the reranker as a flat concatenation of its name, description, and body (denoted flat-full ). This format provides the cross-encoder with complete skill information, enabling the token-level cross-attention that Section 3.2 shows is concentrated on the body field (91.7% of attention). 
+
+Training data. For each of the 32,283 training queries, we retrieve the top-20 candidates using the trained SR-Emb-0.6B encoder. Each candidate list contains 20 skills with binary relevance labels (positive or negative), forming one training group. The same three-layer false negative filtering (Section 4.2) is applied to the reranker training data. 
+
+Loss function. We compare two loss formulations for reranker training: 
+
+Listwise cross-entropy (LW) applies softmax over the relevance scores of all K candidates in a list and optimizes the log-probability of the positive skill: 
+
+LLW = − log exp ( f (q, s+)/τ)
+
+∑Kj=1 exp ( f (q, sj)/τ) (2) where f (q, s) is the cross-encoder’s relevance score, s+ is the positive skill, and τ is a tem-perature parameter. This formulation directly models relative ordering among candidates. 
+
+Pointwise binary cross-entropy (PW) independently scores each (query, skill) pair via sigmoid and optimizes the binary classification loss: 
+
+LPW = − 1
+
+K
+
+> K
+
+# ∑
+
+> j=1
+
+yj log σ( fj) + ( 1−yj) log (1−σ( fj))  (3) where yj ∈ { 0, 1 } and σ is the sigmoid function. Our ablation study (Section 5.4.2) reveals that listwise CE dramatically outperforms point-wise BCE (+30.7pp Hit@1), as skill routing requires modeling inter-candidate comparisons that pointwise scoring cannot capture. All results reported in this paper use listwise CE unless otherwise noted. 
+
+Training configuration. We train on a single GPU with batch size 1 (one candidate list of 20 skills per forward pass) and gradient accumulation of 16 steps, so that each parameter update aggregates ranking signals from 16 distinct query–candidate lists. Other settings (optimizer, precision, learning rate) follow the encoder configuration. 8Preprint. Under review. 
+
+## 5 Evaluation 
+
+5.1 Experimental Setup Evaluation protocol. All experiments are conducted on our benchmark (Section 2.1), which comprises 75 expert-verified queries (24 single-skill, 51 multi-skill) across two difficulty tiers: 
+
+Easy (78,361 candidate skills) and Hard (79,141 candidate skills). We report seven metrics: Hit@1 (our primary top-1 routing metric), MRR@10 (mean reciprocal rank), nDCG@10 (normalized discounted cumulative gain), Recall@10, Recall@20, Recall@50, and FC@10. For multi-skill queries, Hit@1 counts success when any required skill is ranked first, while Recall@10 and FC@10 provide complementary coverage views. Unless otherwise noted, results are averaged across Easy and Hard tiers. 
+
+Input formats. Each skill s consists of three text fields: name , description , and body . We denote two input configurations: full (name + description + body) and nd (name + descrip-tion only, without body). As established in Section 3, including the full skill body is critical for accurate skill selection. All our fine-tuned models are therefore trained and evaluated with full inputs. We additionally evaluate baselines under both configurations to quantify the impact of skill body access. 
+
+Encoder baselines. We compare against a diverse set of retrieval methods spanning four categories: • Sparse retrieval: BM25 with full skill text as the document. • Traditional encoders: E5-Large-v2 (Wang et al., 2024) (335M), GTE-Large-v1.5 (Li et al., 2024) (434M), and BGE-Large-v1.5 (Xiao et al., 2024) (335M). • Decoder-based encoders: Qwen3-Emb in two sizes—0.6B and 8B (Qwen Team, 2025)— and NV-Embed-v2 (Lee et al., 2024) (7B). • Proprietary models: OpenAI text-embedding-3-large (OpenAI, 2024) and Google gemini-embedding-001 (Google, 2025). All encoder baselines use full skill text as input and retrieve candidates via cosine similarity over the entire skill pool. 
+
+Reranker baselines. For the reranking stage, we evaluate: • Cross-encoder rerankers: Qwen3-Reranker-0.6B and Qwen3-Reranker-8B (Qwen Team, 2025), both zero-shot, tested with both full and nd inputs. • LLM-as-judge rerankers: GPT-4o-mini and GPT-5.4-mini, prompted in listwise mode to select the most relevant skill from the full candidate list, tested with both full and nd 
+
+inputs (see Appendix C for exact prompts). All reranking experiments use the encoder’s top-20 retrieved candidates as input unless otherwise specified. 
+
+Our models. SKILL ROUTER consists of two fine-tuned components: • SR-Emb-0.6B : Qwen3-Emb-0.6B fine-tuned on 37,979 skill-routing queries with hard-negative mining and three-layer false-negative filtering (Section 4.2). • SR-Emb-8B : The same fine-tuning recipe applied to Qwen3-Emb-8B, demonstrating scalability. • SR-Rank-0.6B : Qwen3-Reranker-0.6B fine-tuned with listwise cross-entropy loss on top-20 candidates from SR-Emb-0.6B (Section 4.3). • SR-Rank-8B : The same reranker recipe applied to Qwen3-Reranker-8B, demonstrating scalability. The primary S KILL ROUTER pipeline (SR-Emb-0.6B → SR-Rank-0.6B) totals 1.2B parame-ters, designed for on-device deployment. We additionally evaluate 8B-scale variants to demonstrate recipe scalability. 9Preprint. Under review. Table 3: Single- vs. multi-skill evaluation on the core benchmark (24 single-skill and 51 multi-skill queries; averages over Easy and Hard tiers). End-to-end systems rerank the top-20 encoder candidates. The table contrasts top-1 routing accuracy (Hit@1) with coverage metrics (R@10, FC@10) across representative encoder-only and end-to-end systems. 
+
+Group System Single-Skill Multi-Skill Hit@1 R@10 FC@10 Hit@1 R@10 FC@10 
+
+Encoder-only Qwen3-Emb-8B .604 .750 .750 .657 .616 .324 Encoder-only SR-Emb-0.6B .708 .833 .833 .628 .614 .314 End-to-end Qwen3-Emb-8B × Qwen3-Rank-8B .667 .812 .812 .686 .636 .382 End-to-end SR-Emb-0.6B × SR-Rank-0.6B .729 .875 .875 .745 .624 .353 Table 4: Encoder retrieval results on the full skill pool ( ∼80K skills, 75 queries per tier). All models use full input (name + description + body). Best baseline is underlined . Shaded =our primary model; gray = scaling variant. Models are sorted by Avg Hit@1, our primary routing metric; Table 3 provides complementary single- vs. multi-skill coverage context.                                                                                                                                                   
+
+> Easy Hard Average (Easy + Hard) Model Type Params Hit@1 R@20 Hit@1 R@20 Hit@1 MRR@10 nDCG@10 R@10 R@20 R@50 BM25 Sparse –.347 .376 .280 .354 .314 .365 .276 .321 .365 .433 gemini-emb-001 Propri. –.613 .689 .560 .685 .587 .650 .575 .629 .687 .774 text-emb-3-large Propri. –.640 .676 .600 .652 .620 .658 .557 .609 .664 .709 E5-Large-v2 Encoder 335M .507 .594 .493 .594 .500 .565 .494 .553 .594 .622 BGE-Large-v1.5 Encoder 335M .613 .677 .587 .658 .600 .653 .522 .608 .668 .743 GTE-Large-v1.5 Encoder 434M .573 .706 .520 .686 .547 .631 .542 .630 .696 .750 Qwen3-Emb-0.6B Decoder 0.6B .587 .645 .533 .628 .560 .638 .526 .595 .637 .733 NV-Embed-v2 Decoder 7B .440 .565 .413 .559 .427 .508 .410 .504 .562 .649 Qwen3-Emb-8B Decoder 8B .653 .736 .627 .716 .640 .698 .581 .659 .726 .790 SR-Emb-0.6B Decoder 0.6B .667 .762 .640 .745 .654 .723 .616 .685 .754 .814
+> SR-Emb-8B Decoder 8B .693 .785 .667 .769 .680 .731 .623 .692 .777 .851
+
+Single- vs. multi-skill calibration. Before presenting the main result tables, we make the metric semantics explicit. Table 3 compares representative encoder-only and end-to-end systems on single- versus multi-skill queries. The table is intended to calibrate interpretation rather than isolate the causal effect of reranking or fine-tuning. On single-skill queries, Hit@1, Recall@10, and FC@10 are close. On multi-skill queries, the gap between top-1 and coverage metrics becomes more pronounced. This provides useful context for interpreting the headline Hit@1 results reported below. 
+
+5.2 Encoder Retrieval Results 
+
+Table 4 presents the full retrieval results for all evaluated encoder methods across both difficulty tiers. Models are sorted by average Hit@1 and grouped by category: sparse retrieval, traditional bi-encoders, decoder-based encoders, proprietary models, and our fine-tuned models. 
+
+Fine-tuning closes the scale gap. SR-Emb-0.6B achieves 65.4% average Hit@1, the strongest average result among the encoder baselines in Table 4. It edges past Qwen3-Emb-8B (64.0%), a base model with 13 × more parameters. The improvement is consistent across tiers: +1.4pp on Easy and +1.3pp on Hard. This demonstrates that task-specific fine-tuning on skill-routing data is more effective than simply scaling model size. 
+
+Fine-tuned 0.6B is competitive with larger baselines. SR-Emb-0.6B leads the evaluated encoder baselines on average Hit@1, ahead of the strongest zero-shot baseline Qwen3-Emb-8B (64.0%), proprietary models text-embedding-3-large (62.0%) and gemini-embedding-001 (58.7%), and the best traditional encoder BGE-Large-v1.5 (60.0%). The traditional encoder-only models (E5, GTE, BGE) plateau around 50–60%, suggesting that general-purpose embeddings have limited capacity for skill routing without domain-specific adaptation. 10 Preprint. Under review. Table 5: Encoder × Reranker results (top-20 candidates, 75 queries per tier). Rank Input : nd 
+
+= name+desc only; full = name+desc+body. Encoder-only baselines (no reranking) shown in the first group for reference. Best baseline combination underlined . Shaded = primary compact pipeline ( † , 1.2B total); gray = scaling variant. Table 3 provides complementary single- vs. multi-skill coverage context. Note: LLM judges operate in listwise mode and select only a single top-1 skill rather than producing a full reranking, so only Hit@1 is reported for those rows.                                                                                                                                                                                                                                                                                 
+
+> Easy Hard Average (Easy + Hard) Encoder Reranker Rank Input Hit@1 MRR Hit@1 MRR Hit@1 MRR@10 nDCG@10 R@10
+> Encoder-only (no reranking)
+> Qwen3-Emb-0.6B ––.587 .658 .533 .618 .560 .638 .526 .595 Qwen3-Emb-8B ––.653 .709 .627 .687 .640 .698 .581 .659 SR-Emb-0.6B ––.667 .735 .640 .710 .654 .723 .616 .685
+> Reranker with nd input (no body) — see Section 3
+> Qwen3-Emb-8B Qwen3-Rank-8B nd .293 .437 .187 .348 .240 .392 .357 .530 Qwen3-Emb-0.6B Qwen3-Rank-0.6B nd .360 .455 .173 .328 .267 .392 .374 .524 Qwen3-Emb-0.6B Qwen3-Rank-8B nd .360 .465 .253 .385 .307 .425 .381 .525 Qwen3-Emb-8B Qwen3-Rank-0.6B nd .293 .451 .133 .318 .213 .385 .385 .603 Qwen3-Emb-8B GPT-4o-mini nd .213 –.173 –.193 –––Qwen3-Emb-0.6B GPT-4o-mini nd .253 –.160 –.207 –––Qwen3-Emb-8B GPT-5.4-mini nd .347 –.267 –.307 –––Qwen3-Emb-0.6B GPT-5.4-mini nd .373 –.293 –.333 –––
+> Reranker with full input — base models
+> Qwen3-Emb-8B GPT-4o-mini full .667 –.627 –.647 –––Qwen3-Emb-0.6B GPT-4o-mini full .560 –.547 –.554 –––Qwen3-Emb-8B GPT-5.4-mini full .627 –.560 –.594 –––Qwen3-Emb-0.6B GPT-5.4-mini full .573 –.547 –.560 –––Qwen3-Emb-0.6B Qwen3-Rank-0.6B full .653 .695 .627 .673 .640 .684 .558 .604 Qwen3-Emb-8B Qwen3-Rank-0.6B full .613 .697 .547 .647 .580 .672 .588 .694 Qwen3-Emb-8B Qwen3-Rank-8B full .680 .745 .680 .744 .680 .745 .623 .692 Qwen3-Emb-0.6B Qwen3-Rank-8B full .693 .741 .680 .725 .687 .733 .591 .624
+> SR-Emb-0.6B + reranker (full input)
+> SR-Emb-0.6B GPT-5.4-mini full .667 –.653 –.660 –––SR-Emb-0.6B GPT-4o-mini full .693 –.653 –.673 –––SR-Emb-0.6B Qwen3-Rank-0.6B full .720 .780 .693 .758 .707 .769 .649 .724 SR-Emb-0.6B Qwen3-Rank-8B full .720 .781 .707 .771 .714 .776 .649 .727 SR-Emb-0.6B SR-Rank-0.6B †full .760 .809 .720 .773 .740 †.791 .640 .704
+> Scaling variants (8B components)
+> SR-Emb-0.6B SR-Rank-8B full .787 .831 .707 .778 .747 .804 .655 .707 SR-Emb-8B SR-Rank-8B full .787 .827 .733 .789 .760 .808 .666 .719
+
+The recipe scales to 8B. Applying the same fine-tuning recipe to Qwen3-Emb-8B yields SR-Emb-8B at 68.0% average Hit@1, the strongest encoder in our evaluation. The 0.6B →8B scaling gain (+2.6pp) is modest compared to the fine-tuning gain over the 8B base (+4.0pp), further emphasizing that data and training matter more than scale for this task. 
+
+Recall analysis. SR-Emb-0.6B achieves 75.4% average Recall@20, meaning that the top-20 candidate set recovers 75.4% of the ground-truth skills on average. The gap between R@20 (75.4%) and Hit@1 (65.4%) indicates that the retriever usually supplies substantial but still incomplete candidate coverage for the downstream reranker—precisely the regime where cross-encoder reranking can help (Section 5.3). 
+
+5.3 End-to-End Pipeline Results 
+
+Table 5 presents the full encoder ×reranker evaluation. We test three encoders paired with multiple rerankers under both nd and full input configurations. The nd rows (name + description only) serve as controlled comparisons that isolate the contribution of skill body access in the reranking stage—their consistent degradation further corroborates the findings in Section 3. Fine-tuned reranker ablation variants (loss function, gradient accumulation) are analyzed separately in Section 5.4.2. 
+
+Removing body collapses reranking. The nd group reveals a striking pattern: reranking with only name and description degrades performance below encoder-only retrieval. The 11 Preprint. Under review. Table 6: Directional stability of the primary 1.2B pipeline versus the strongest zero-shot 8B baseline across difficulty tiers and query types. Multi FC@10 is included to contextualize strict multi-skill coverage. 
+
+Pipeline Easy Hard Single Multi Multi FC@10 
+
+Qwen3-Emb-8B × Qwen3-Rank-8B .680 .680 .667 .686 .382 SR-Emb-0.6B × SR-Rank-0.6B .760 .720 .729 .745 .353 best nd combination (Qwen3-Emb-0.6B × GPT-5.4-mini-nd) achieves only 33.3% average Hit@1, compared to 56.0% for the same encoder without reranking—a 22.7pp degradation .Cross-encoder nd results are even worse (21.3–30.7%). This confirms that rerankers without access to skill body are not merely unhelpful but actively harmful, as they re-sort candidates based on insufficient information. 
+
+SkillRouter-0.6B achieves 74.0% Hit@1. Our primary pipeline, S KILL ROUTER (SR-Emb-0.6B × SR-Rank-0.6B, 1.2B total), achieves 74.0% average Hit@1. Relative to the strongest zero-shot 8B pipeline (Qwen3-Emb-8B × Qwen3-Rank-8B at 68.0%), this is a +6.0pp gain, and it is +8.6pp above encoder-only retrieval (SR-Emb-0.6B at 65.4%). We designate this com-pact configuration as our primary result because it is deployable on consumer hardware—a key requirement for personal agent products. Table 3 provides the single- versus multi-skill metric calibration, while Table 6 shows that the Hit@1 gain remains positive across Easy, Hard, single-skill, and multi-skill slices. 
+
+Directional gains remain stable across tiers and query types. The primary pipeline improves Hit@1 on both difficulty tiers (+8.0pp on Easy, +4.0pp on Hard) and on both query strata (+6.2pp on single-skill, +5.9pp on multi-skill) relative to the strongest zero-shot 8B baseline. This makes the main result less dependent on any single slice of the benchmark. At the same time, the strict multi-skill FC@10 value remains lower for the compact pipeline (.353 vs. .382), reinforcing that our primary claim is stronger top-1 routing rather than uniformly better full-set multi-skill coverage. 
+
+The recipe scales to 8B. Applying the same fine-tuning recipe to 8B models yields fur-ther gains: SR-Emb-8B × SR-Rank-8B reaches 76.0% average Hit@1 (+2.0pp over the 0.6B pipeline). Notably, encoder quality contributes more than reranker size: upgrading the encoder from 0.6B to 8B (with the same SR-Rank-8B reranker) accounts for +1.3pp, while upgrading the reranker alone adds +0.7pp. This is consistent with the encoder result in Section 5.2—a stronger encoder places more correct skills in the top-20 window, amplifying reranker effectiveness. 
+
+Compact reranker remains competitive with larger alternatives. SR-Rank-0.6B (0.6B, fine-tuned) reaches 74.0% when paired with the same encoder, compared with 71.4% for Qwen3-Rank-8B base (8B, zero-shot). It also stays ahead of both LLM judges in this setting: GPT-4o-mini (67.3%) and GPT-5.4-mini (66.0%). Appendix H further provides a downstream scenario analysis that connects these retrieval and coverage rates to agent task completion under a retrieve-then-use deployment assumption. 
+
+5.4 Ablation Studies 
+
+5.4.1 Training Data Quality: False Negative Filtering 
+
+Community skill repositories contain extensive functional overlap: skills with different names may provide near-identical capabilities. During encoder training, these duplicates manifest as false negatives —skills that are functionally equivalent to the ground truth but treated as negatives in contrastive learning. We apply a three-layer filtering pipeline to remove such cases: (1) exact name matching (24,879 pairs), (2) body-text Jaccard similar-ity (13,860 pairs), and (3) embedding cosine similarity (326 pairs), removing 39,065 false negatives in total. 12 Preprint. Under review. Table 7: Ablation: false negative filtering for encoder training. Removing the three-layer filter degrades all metrics, with larger impact on the Hard tier. 
+
+Tier Negatives Hit@1 MRR nDCG R@10 R@50 
+
+Easy Clean .667 .735 .630 .696 .814 Raw .640 .710 .607 .676 .810 
+
+∆ –2.7 –2.6 –2.3 –1.9 –0.4 
+
+Hard Clean .640 .710 .607 .680 .814 Raw .587 .675 .573 .667 .803 
+
+∆ –5.3 –3.4 –3.4 –1.3 –1.1 
+
+Avg Clean .653 .722 .619 .688 .814 Raw .613 .692 .590 .672 .807 
+
+∆ –4.0 –3.0 –2.8 –1.6 –0.7 
+
+Table 8: Ablation: reranker loss function. Encoder = SR-Emb-0.6B, top-20 candidates. LW = listwise cross-entropy; PW = pointwise binary cross-entropy; base = zero-shot (no fine-tuning).                                                                    
+
+> Easy Hard Average Reranker Loss Hit@1 MRR R@10 Hit@1 MRR R@10 Hit@1 MRR R@10 FC@10
+> SR-Rank-0.6B LW .760 .809 .720 .720 .773 .688 .740 .791 .704 .520 Qwen3-Rank-0.6B base .720 .780 .736 .693 .758 .712 .707 .769 .724 .527
+> Qwen3-Rank-8B base .720 .781 .732 .707 .771 .722 .714 .776 .727 .527 FT-PW PW .453 .592 .576 .413 .564 .569 .433 .578 .573 .320
+> Encoder-only (no reranking) .667 .735 .696 .640 .710 .673 .654 .723 .685 .480
+
+To quantify the impact of this filtering, we train an ablation model with identical hyperpa-rameters (bs=8, ga=4, lr=2e-5, 1 epoch) but using unfiltered negatives. Table 7 shows the results. 
+
+Filtering contributes +4.0pp Hit@1. Removing the false negative filter degrades average Hit@1 from 65.4% to 61.3%. The effect is nearly twice as large on the Hard tier ( −5.3pp) compared to Easy ( −2.7pp), indicating that false negatives disproportionately affect the model’s ability to distinguish closely related skills—precisely the cases where the Hard tier’s added distractors make retrieval more challenging. 
+
+Impact concentrates on precision, not recall. R@50 degrades minimally ( −0.7pp) while Hit@1 drops by −4.0pp. This indicates that false negatives primarily corrupt the model’s 
+
+fine-grained ranking ability rather than its broad retrieval coverage: the model can still surface relevant skills in the top-50 but fails to rank the correct one at the top. This pattern is consistent with the nature of false negatives—they teach the model to push away skills that should actually be considered relevant. 
+
+5.4.2 Loss Function: Listwise vs. Pointwise 
+
+We compare listwise cross-entropy (LW) against pointwise binary cross-entropy (PW) for reranker fine-tuning. All variants use the same encoder (SR-Emb-0.6B), input format (flat-full), and top-20 candidates. Table 8 presents the full results. 
+
+Listwise loss is essential: +30.7pp over pointwise. The gap between listwise and point-wise training is dramatic: SR-Rank-0.6B with listwise CE (74.0%) exceeds the pointwise variant (43.3%) by 30.7pp . More strikingly, pointwise fine-tuning degrades below encoder-only retrieval (43.3% vs. 65.4%), meaning the reranker actively worsens the ranking it receives. 13 Preprint. Under review. Table 9: Per-query Hit@1 decomposition: encoder-only (SR-Emb-0.6B) vs. full pipeline (+ SR-Rank-0.6B). Each cell shows query count and percentage. 
+
+Easy (n=75) Hard (n=75) All (n=150) 
+
+Category n % n % n %Both correct 47 62.7 45 60.0 92 61.3 Reranker fixed 10 13.3 9 12.0 19 12.7 Reranker degraded 3 4.0 3 4.0 6 4.0 Both missed 15 20.0 18 24.0 33 22.0 Encoder Hit@1 50 66.7 48 64.0 98 65.3 Pipeline Hit@1 57 76.0 54 72.0 111 74.0 This failure is rooted in a fundamental property of skill pools: high inter-skill homogeneity .Community skill repositories contain large clusters of functionally overlapping skills (e.g., dozens of “git” or “docker” management skills with subtle differences). When the encoder retrieves top-20 candidates for a query, the resulting list is often dominated by semantically similar skills that differ only in implementation details within their body text. Pointwise BCE processes each (query, candidate) pair independently via sigmoid, assigning absolute relevance scores without any awareness of other candidates in the list. Faced with a set of near-identical candidates, the sigmoid outputs converge to a narrow band, making the resulting ranking effectively random. Listwise CE, by contrast, applies softmax over the entire candidate list, forcing the model to directly compare candidates against each other and learn their relative ordering. This comparative mechanism is precisely what is needed when the reranker must pick the one correct skill from a pool of close alternatives—a scenario that arises naturally from the homogeneity of large-scale skill repositories. 
+
+0.6B fine-tuned remains ahead of the 8B base reranker. SR-Rank-0.6B with listwise CE reaches 74.0%, compared with 71.4% for Qwen3-Rank-8B base, despite a 13 × parameter gap. The gap is modest, but it is consistent across both tiers and aligns with the broader pattern that task-specific fine-tuning matters more than raw scale in this setting. 
+
+5.5 Analysis 
+
+5.5.1 Encoder vs. Reranker Contribution Decomposition 
+
+To understand how the encoder and reranker interact, we perform a per-query decomposi-tion of Hit@1 between the encoder-only stage (SR-Emb-0.6B, top-50) and the full pipeline (SR-Emb-0.6B × SR-Rank-0.6B, top-20 reranked). For each query, we compare whether the correct skill is ranked first by the encoder alone, by the full pipeline, by both, or by neither. Table 9 presents the resulting 2 ×2 contingency matrix; Figure 3 visualizes the decomposition. 
+
+Reranker rescues 12.7%, degrades only 4.0%. Across 150 queries, the reranker corrects 19 cases (12.7%) where the encoder placed the correct skill outside rank-1 but within the top-20 retrieval window, promoting it to rank-1 through cross-attention over the full skill body. Conversely, only 6 queries (4.0%) are degraded—the encoder had the correct answer at rank-1 but the reranker displaced it. The net contribution is +8.7pp Hit@1 (from 65.3% to 74.0%). 
+
+Degradation is consistent and small. The degradation count is identical across tiers (3 per tier), with 2 of those queries overlapping between Easy and Hard. This consistency suggests that the degradation stems from specific query–skill characteristics rather than random noise, and its small magnitude (4.0%) confirms that the reranker is a reliable improvement over encoder-only retrieval. 14 Preprint. Under review. 0 25 50 75 100            
+
+> Percentage of Queries
+> 62.7% 13.3% 20.0%
+> Encoder Hit@1 = 66.7%
+> Pipeline Hit@1 = 76.0%
+> +9.3pp
+> Easy (n=75)
+> 025 50 75 100
+> Percentage of Queries
+> 60.0% 12.0% 24.0%
+> Encoder Hit@1 = 64.0%
+> Pipeline Hit@1 = 72.0%
+> +8.0pp
+> Hard (n=75)
+> Encoder Correct Reranker Fixed Reranker Missed Reranker Degraded
+
+Figure 3: Reranker contribution decomposition. The reranker rescues 12.7% of queries where the encoder fails (green), while degrading only 4.0% (red). Net contribution: +8.7pp Hit@1. 
+
+System ceiling. 33 queries (22.0%) are missed by both encoder and reranker. These represent cases where the correct skill does not appear in the encoder’s top-20 candidates (a recall limitation) or where the semantic gap between query and skill requires multi-hop reasoning beyond the capacity of current retrieval methods (see Appendix G for examples). 
+
+5.5.2 Efficiency 
+
+A key motivation for S KILL ROUTER is on-device deployment in personal agent products such as OpenClaw, where cloud-based or large-model inference is impractical. The full pipeline totals only 1.2B parameters (0.6B encoder + 0.6B reranker), compared to 8B for Qwen3-Emb-8B alone or 7B for NV-Embed-v2—much larger models against which S KILL -ROUTER compares favorably on average Hit@1. At inference time, skill embeddings are pre-computed offline and stored in a vector index. For each incoming query, the pipeline requires only: (1) encoding the query with the 0.6B encoder, (2) approximate nearest neighbor (ANN) search over pre-indexed skill embeddings, and (3) reranking the top-20 candidates with the 0.6B cross-encoder. Steps (1) and (3) involve a single forward pass each through a 0.6B model; step (2) is sub-linear in pool size via standard ANN libraries. This architecture is well-suited for CPU or edge-GPU deployment without requiring cloud API access. 
+
+5.5.3 Qualitative Analysis 
+
+We highlight two representative cases that illustrate the strengths of each pipeline stage. The full set of six case studies (four successes and two failures) is provided in Appendix G. 
+
+Case 1: Encoder advantage (video-tutorial-indexer). The query asks an agent to extract chapter timestamps from a local tutorial video. The ground-truth skill is speech-to-text ,which provides Whisper-based audio transcription—the necessary first step for timestamp extraction. Base encoders are misled by surface keywords (“video”) and retrieve video editing tools (Video Clipper, video-explorer), ranking the correct skill at position 25 (Qwen3-Emb-0.6B) or 6 (Qwen3-Emb-8B). SR-Emb-0.6B, through task-specific fine-tuning, learns the indirect semantic mapping “video + timestamps → speech-to-text” and retrieves the correct skill at rank 1. This case demonstrates that fine-tuning on skill-routing data captures reasoning shortcuts that scale alone cannot provide .
+
+Case 2: Reranker rescue (simpo-code-reproduction). The query asks to reproduce a re-search paper’s loss function implementation and set up the development environment. The ground-truth skill ( nlp-research-repo-package-installment ) focuses on Python environ-ment setup—a subtle match that all encoders miss (SR-Emb-0.6B: rank 13; all base encoders: rank >50). However, rank 13 falls within the top-20 retrieval window. The cross-encoder 15 Preprint. Under review. reranker, through token-level cross-attention over the skill’s body text, identifies the precise alignment between the query’s “setup the environment” and the skill’s dependency installa-tion instructions, promoting it to rank 1. This case exemplifies the value of the two-stage pipeline: the encoder surfaces candidates that are “close enough”; the reranker applies fine-grained body understanding to select the correct one .
+
+## 6 Related Work 
+
+Tool and skill selection for LLM agents. As LLM-based agents gain access to increasingly large tool and skill collections, selecting the right tool for a given task has emerged as a central challenge. Early systems such as Toolformer (Schick et al., 2023) and HuggingGPT (Shen et al., 2023) demonstrate the potential of LLMs to invoke external tools, but assume a small, fixed set of available tools. ToolLLM (Qin et al., 2023) scales this to 16K+ real-world APIs with a retrieval-augmented approach, while Gorilla (Patil et al., 2023) connects LLMs to API documentation through retrieval. AnyTool (Du et al., 2024) and CRAFT (Yuan et al., 2024a) further explore hierarchical tool discovery and context-aware tool retrieval. EASYTOOL (Yuan et al., 2024b) improves tool selection by generating concise, structured tool instructions from raw documentation, highlighting the importance of tool text quality. ToolkenGPT (Hao et al., 2023) takes a different approach by learning special token embeddings (“toolkens”) for each tool, enabling tool selection through next-token prediction. ToolRerank (Zheng et al., 2024) applies adaptive truncation and hierarchy-aware diversification as post-processing on retrieval results, improving tool retrieval quality on ToolBench. 
+
+Neural information retrieval. Our two-stage pipeline builds on the retrieve-and-rerank paradigm widely adopted in neural IR. Dense bi-encoder retrieval, pioneered by DPR (Karpukhin et al., 2020) and extended by Contriever (Izacard et al., 2022), ANCE (Xiong et al., 2021), E5 (Wang et al., 2024), GTE (Li et al., 2024), and BGE (Xiao et al., 2024), encodes queries and documents into a shared embedding space for efficient similarity search. Cross-encoder reranking applies deeper attention-based scoring to a shortlisted candidate set, as demonstrated by BERT passage reranking (Nogueira & Cho, 2020) and RankGPT (Sun et al., 2023). While we adopt this established architecture, skill routing presents unique challenges not found in standard document retrieval: skills are structured multi-field objects (name, description, body) with high inter-skill homogeneity, and the decisive signal resides in the body rather than in metadata—a finding that has no direct parallel in traditional IR settings. 
+
+Benchmarks for agent skills. Several benchmarks evaluate different aspects of tool-augmented agents. ToolBench (Qin et al., 2023) and API-Bank (Li et al., 2023) provide large-scale API collections for evaluating tool selection and execution. MetaTool (Huang et al., 2024) studies tool selection preferences, and T-Eval (Chen et al., 2024) evaluates tool utilization effectiveness. Our evaluation benchmark builds on SkillBench (Huang et al., 2025), which provides expert-curated task–skill mappings with strong affinity guarantees. Unlike prior benchmarks that focus on whether agents can use tools correctly, our bench-mark specifically targets the retrieval problem: can we find the right skill from a pool of 
+
+∼80K candidates? 
+
+## 7 Conclusion 
+
+We presented a systematic study of skill routing for LLM agents, addressing three research questions. For RQ1 , we established that skill routing in large-scale pools ( ∼80K skills) is a genuine and challenging retrieval problem—even the strongest base encoders achieve only 64.0% Hit@1, leaving substantial room for improvement. For RQ2 , we revealed that the skill body is the decisive signal for accurate selection: removing body text causes 29–44pp degradation across all methods, and cross-encoder attention concentrates 91.7% on the body field. This overturns the common assumption that skill name and description suffice. For 
+
+RQ3 , we demonstrated that S KILL ROUTER , a compact retrieve-and-rerank pipeline totaling only 1.2B parameters, achieves 74.0% Hit@1 and compares favorably with larger zero-shot 16 Preprint. Under review. alternatives while remaining suitable for on-device deployment. The same fine-tuning recipe scales to 8B models, reaching 76.0% Hit@1, confirming the generality of the approach. Beyond the pipeline itself, our ablation studies uncovered two practical insights for training skill-routing models: (1) false negative filtering is essential due to the high functional overlap among community-contributed skills, and (2) listwise ranking loss dramatically outperforms pointwise loss (+30.7pp), reflecting the need for comparative scoring in homogeneous candidate pools. 
+
+Limitations. Our evaluation benchmark, while built on high-quality expert-curated task– skill mappings, comprises 75 queries—a scale that limits statistical power. Additionally, our findings are validated on a single benchmark derived from SkillBench; generalization to other skill ecosystems and domains remains to be verified. Finally, because our benchmark is majority multi-skill, coverage-oriented metrics provide useful complementary context to Hit@1; 22% of queries are missed by both encoder and reranker, suggesting that some skill-routing scenarios require reasoning capabilities beyond current retrieval methods. 
+
+Future work. Several directions emerge from our findings. First, constructing larger-scale skill routing benchmarks with broader domain coverage would strengthen the generaliz-ability of our conclusions. Second, integrating LLM-based reasoning with retrieval could address the multi-hop inference cases that our pipeline currently cannot solve. Third, end-to-end evaluation within real agent frameworks would validate whether improved skill retrieval translates to better downstream task performance—our appendix analysis combining S KILL ROUTER with SkillsBench (SkillsBench Team, 2026) results (Appendix H) should be read as a calibrated scenario analysis rather than direct end-to-end evidence. We plan to release our models and evaluation toolkit to facilitate further research in this direction. 
+
+## Acknowledgments 
+
+We thank the SkillBench team for making their benchmark publicly available. 
+
+## References 
+
+Anthropic. Claude code: Ai-powered software engineering. 2025. https://www.anthropic. com/claude-code .Zehui Chen, Weihua Du, Wenwei Zhang, Kuikun Liu, Jiangning Liu, Miao Zheng, Jingming Zhuo, Songyang Zhang, Dahua Lin, Kai Chen, and Feng Zhao. T-eval: Evaluating the tool utilization capability of large language models step by step. arXiv preprint arXiv:2312.14033 , 2024. Yu Du, Fangyun Fan, and Dong Chen. Anytool: Self-reflective, hierarchical agents for large-scale api calls. arXiv preprint arXiv:2402.04253 , 2024. Google. Gemini embedding model. 2025. https://ai.google.dev/gemini-api/docs/ embeddings .Shibo Hao, Tianyang Liu, Zhen Wang, and Zhiting Hu. Toolkengpt: Augmenting frozen language models with massive tools via tool embeddings. In Advances in Neural Information Processing Systems , 2023. Yue Huang, Jiawen Shi, Yuan Li, Chenrui Fan, Siyuan Wu, Qihui Zhang, Yixin Liu, Pan Zhou, Yao Wan, Neil Zhenqiang Gong, and Lichao Sun. Metatool benchmark for large language models: Deciding whether to use tools and which to use. arXiv preprint arXiv:2310.03128 ,2024. Zhenyu Huang et al. Skillbench: Evaluating llm agents on complex tasks through skill-centric evaluation. In Proceedings of the 2025 Conference , 2025. 17 Preprint. Under review. Gautier Izacard, Mathilde Caron, Lucas Hosseini, Sebastian Riedel, Piotr Bojanowski, Ar-mand Joulin, and Edouard Grave. Unsupervised dense information retrieval with con-trastive learning. Transactions on Machine Learning Research , 2022. Vladimir Karpukhin, Barlas Oguz, Sewon Min, Patrick Lewis, Ledell Wu, Sergey Edunov, Danqi Chen, and Wen-tau Yih. Dense passage retrieval for open-domain question answer-ing. In Proceedings of EMNLP , 2020. Chankyu Lee, Rajarshi Roy, Menber Xu, Jonathan Raiman, Mohammad Shoeybi, Bryan Catanzaro, and Wei Han. Nv-embed: Improved techniques for training llms as generalist embedding models. arXiv preprint arXiv:2405.17428 , 2024. Minghao Li, Feifan Song, Bowen Yu, Haiyang Yu, Zhoujun Li, Fei Huang, and Yongbin Li. Api-bank: A comprehensive benchmark for tool-augmented llms. Proceedings of EMNLP ,2023. Zehan Li, Xin Zhang, Yanzhao Zhang, Dingkun Long, Pengjun Xie, and Meishan Zhang. Towards general text embeddings with multi-stage contrastive learning. arXiv preprint arXiv:2308.03281 , 2024. Rodrigo Nogueira and Kyunghyun Cho. Passage re-ranking with bert. In arXiv preprint arXiv:1901.04085 , 2020. OpenAI. New embedding models and api updates. 2024. https://openai.com/blog/ new-embedding-models-and-api-updates .OpenAI. Codex cli. 2025. https://github.com/openai/codex .Shishir G Patil, Tianjun Zhang, Xin Wang, and Joseph E Gonzalez. Gorilla: Large language model connected with massive apis. arXiv preprint arXiv:2305.15334 , 2023. Yujia Qin, Shihao Liang, Yining Ye, Kunlun Zhu, Lan Yan, Yaxi Lu, Yankai Lin, Xin Cong, Xiangru Tang, Bill Qian, et al. Toolllm: Facilitating large language models to master 16000+ real-world apis. arXiv preprint arXiv:2307.16789 , 2023. Qwen Team. Qwen3 embedding and reranker models. 2025. https://qwen3.org .Timo Schick, Jane Dwivedi-Yu, Roberto Dess `ı, Roberta Raileanu, Maria Lomeli, Luke Zettlemoyer, Nicola Cancedda, and Thomas Scialom. Toolformer: Language models can teach themselves to use tools. In Advances in Neural Information Processing Systems , 2023. Yongliang Shen, Kaitao Song, Xu Tan, Dongsheng Li, Weiming Lu, and Yueting Zhuang. Hugginggpt: Solving ai tasks with chatgpt and its friends in hugging face. Advances in Neural Information Processing Systems , 2023. SkillsBench Team. Skillsbench: Benchmarking agent skills for frontier LLM agents. 2026. 
+
+https://www.skillsbench.ai .Weiwei Sun, Lingyong Yan, Xinyu Ma, Shuaiqiang Wang, Pengjie Ren, Zhumin Chen, Dawei Yin, and Zhaochun Ren. Is chatgpt good at search? investigating large language models as re-ranking agents. arXiv preprint arXiv:2304.09542 , 2023. Liang Wang, Nan Yang, Xiaolong Huang, Binxing Jiao, Linjun Yang, Daxin Jiang, Rangan Majumder, and Furu Wei. Text embeddings by weakly-supervised contrastive pre-training. 
+
+arXiv preprint arXiv:2212.03533 , 2024. Shitao Xiao, Zheng Liu, Peitian Zhang, and Niklas Muennighoff. C-pack: Packaged re-sources to advance general chinese embedding. arXiv preprint arXiv:2309.07597 , 2024. Lee Xiong, Chenyan Xiong, Ye Li, Kwok-Fung Tang, Jialin Liu, Paul Bennett, Junaid Ahmed, and Arnold Overwijk. Approximate nearest neighbor negative contrastive learning for dense text retrieval. In Proceedings of ICLR , 2021. 18 Preprint. Under review. Lifan Yuan, Yangyi Chen, Xingyao Wang, Yi R. Fung, Hao Peng, and Heng Ji. Craft: Customizing llms by creating and retrieving from specialized toolsets. In Proceedings of ICLR , 2024a. Siyu Yuan, Kaitao Song, Jiangjie Chen, Xu Tan, Yongliang Shen, Ren Kan, Dongsheng Li, and Deqing Yang. Easytool: Enhancing llm-based agents with concise tool instruction. 
+
+arXiv preprint arXiv:2401.06201 , 2024b. Yuanhang Zheng, Peng Li, Wei Liu, Yang Liu, Jian Luan, and Bin Wang. Toolrerank: Adaptive and hierarchy-aware reranking for tool retrieval. In Proceedings of LREC-COLING ,pp. 16263–16273, 2024. 
+
+## A Evaluation Details 
+
+Single- vs. multi-skill queries. Of the 75 core queries, 24 are single-skill queries (exactly one ground-truth skill) and 51 are multi-skill queries (two or more ground-truth skills required to complete the task). 
+
+Metric computation for multi-skill queries. For queries with multiple ground-truth skills 
+
+Gq = {g1, . . . , gm}, we compute Hit@1 as the indicator of whether any ground-truth skill appears at rank 1. MRR@10 uses the highest-ranked ground-truth skill’s reciprocal rank. Recall@ K measures the fraction of ground-truth skills that appear in the top-K results: R@ K = |G q ∩ top-K|/|G q|. FC@10 (Full Coverage at 10) is the strictest metric: it equals 1 only when all ground-truth skills for a query appear in the top 10. 
+
+## B Benchmark Data 
+
+Hard tier distractor generation. The Hard tier augments the Easy pool with 780 LLM-generated distractor skills. For each ground-truth skill, we prompt GPT-4o-mini to generate 3–5 plausible-but-incorrect skills using three distractor strategies: same-domain-different-problem (same technical domain but solves a different task), same-tech-different-use (same technology stack but different application), and over-generalized (broader version that lacks the specific capability needed). Table 10 shows the generation prompt. Table 10: Distractor skill generation prompt for the Hard evaluation tier. 
+
+System: You are a skill document writer for a coding agent platform. You produce SKILL.md-style documents that are plausible but address a DIFFERENT problem than the reference skill. Each distractor must look like a real, useful skill document but must NOT solve the same task as the reference. 
+
+User: I have a ground-truth skill used for the task(s): {task ids }
+
+Reference skill (name: {skill name }, category: {category }): 
+
+{body truncated }
+
+Generate {num distractors } HARD distractor skills. Each distractor must be a complete SKILL.md document that looks relevant to someone searching for this skill, but actually solves a different problem. Use these distractor strategies (one per distractor): 
+
+same-domain-diff-problem, same-tech-diff-use, over-generalized 
+
+For EACH distractor, output a JSON object with fields: 
+
+distractor type , name , description , body (400–1200 words). 
+
+Data examples. Table 11 shows representative examples from the Easy and Hard tiers, illustrating the difference between a ground-truth skill, a pool skill (natural distractor), and an LLM-generated distractor. 19 Preprint. Under review. Table 11: Representative data examples from the Easy and Hard tiers. Ground-truth skills appear in both tiers; LLM-generated distractors are added only in the Hard tier to increase inter-skill confusion.         
+
+> Type Name Description Body (truncated)
+> Ground-truth skill (present in both Easy and Hard)
+> GT speech-to-text Transcribe audio files using Whisper Converts audio/video files to text using OpenAI Whisper model. Supports chunked processing for long files, multiple output formats (txt, srt, vtt)...
+> Natural pool skill (present in both Easy and Hard — from community)
+> Pool audio-transcriber Audio transcription service A general-purpose audio transcription skill using cloud APIs. Sends audio to external service, re-turns JSON transcript with timestamps...
+> LLM-generated distractor (added in Hard tier only)
+> Distractor video-subtitle-sync Synchronize subtitles with video Adjusts subtitle timing to match video playback. Parses SRT files, detects audio cues for alignment, handles frame-rate conversion...
+
+## C Model Input Templates 
+
+We document the exact input formats used for each model type in our experiments. 
+
+Bi-encoder (query side). Following Qwen3-Emb’s instruction-prefixed encoding format: 
+
+Instruct: Given a task description, retrieve the most relevant skill document that would help an agent complete the task Query: {query text }
+
+Bi-encoder (skill side). Skills are encoded as plain concatenated text without instruction prefix: 
+
+{name } | {description } | {body }
+
+Description is truncated to 300 tokens and body to 2,500 tokens. 
+
+Cross-encoder reranker (flat-full format). Following Qwen3-Reranker’s input convention: 
+
+<Instruct>: Given a task description, judge whether the skill document is relevant and useful for completing the task <Query>: {query text }
+
+<Document>: {name } | {description } | {body }
+
+Description is truncated to 500 tokens and body to 3,000 tokens. 
+
+LLM-as-judge (GPT-4o-mini / GPT-5.4-mini). Both LLM judges operate in listwise mode: they receive the full list of top-K candidates at once and select the single most relevant skill. 
+
+System prompt: 
+
+You are an expert at matching tasks to reusable skill definitions. Given a task query and a numbered list of candidate skills, identify the SINGLE most relevant skill that best solves the task. Respond with ONLY the number (e.g. ‘3’) of the best matching skill, nothing else. 
+
+User message: The query text followed by a numbered list of candidates, each formatted as: 
+
+[1] Name: {name }
+
+Description: {description }
+
+20 Preprint. Under review. 
+
+Body: {body }
+
+[2] Name: ... 
+
+The selected skill is placed at rank 1; all other candidates retain their original encoder ordering. 
+
+## D Top-K Candidate Ablation 
+
+We ablate the number of candidates ( K ∈ { 10, 20, 50 }) passed from the encoder to the reranker. Table 12 reports Hit@1 for three rerankers across both tiers. Figure 4 shows the Recall@ K candidate coverage provided by each candidate set size. Table 12: Hit@1 as a function of top-K candidates for reranking. Encoder = SR-Emb-0.6B. 
+
+K=20 is optimal for all rerankers. 
+
+Easy Hard Avg Reranker @10 @20 @50 @10 @20 @50 @20 SR-Rank-0.6B (FT) .747 .760 .733 .720 .720 .707 .740 
+
+Qwen3-Rank-0.6B .720 .720 .667 .693 .693 .640 .707 Qwen3-Rank-8B .693 .720 .707 .680 .707 .707 .714 1 10 20 50      
+
+> K
+> 0.45
+> 0.50
+> 0.55
+> 0.60
+> 0.65
+> 0.70
+> 0.75
+> 0.80
+> 0.85
+> Recall@K
+> Pipeline Hit@1: 76.0%
+> top-20 reranker
+> (a) Easy
+> 110 20 50
+> K
+> Pipeline Hit@1: 72.0%
+> top-20 reranker
+> (b) Hard
+> Qwen3-0.6B base
+> Qwen3-8B base
+> SR-Emb-0.6B (Ours)
+
+Figure 4: Recall@ K candidate coverage for SR-Emb-0.6B at different candidate set sizes. 
+
+K=20 captures 75.4% of ground-truth skills on average; K=50 reaches 81.4%. The star (⋆) marks the full pipeline Hit@1 (SR-Emb-0.6B × SR-Rank-0.6B) at K=20, showing the reranker’s effectiveness given the candidate coverage supplied by the encoder. 
+
+K=20 is optimal for all rerankers: it provides strong average candidate coverage (75.4%) while keeping the candidate set small enough for precise reranking. At K=50, the top-K
+
+coverage increases to 81.4%, but the additional noisy candidates degrade Hit@1 for all models, particularly the fine-tuned SR-Rank-0.6B ( −2.0pp average). At K=10, average candidate coverage is lower (69.6%), which restricts the reranker’s headroom. 
+
+## E Confidence Intervals 
+
+Table 13 reports 95% confidence intervals for Hit@1 of key models and pipeline config-urations. CIs are computed using the normal approximation to the binomial proportion (p ± 1.96 pp(1−p)/n, n=150 for averaged Easy+Hard, n=75 per tier). 1
+
+> 1
+
+For reranker variants (Table 8), bootstrap CIs ( n=1000, seed 42) are reported directly in the table. 
+
+21 Preprint. Under review. Table 13: 95% confidence intervals for average Hit@1 ( n=150). Per-tier CIs ( n=75) are narrower for Easy and wider for Hard in most cases. 
+
+Configuration Type Avg Hit@1 95% CI 
+
+Encoder-only 
+
+Qwen3-Emb-0.6B base Decoder .560 [.481, .639] text-emb-3-large Propri. .620 [.542, .698] Qwen3-Emb-8B base Decoder .640 [.563, .717] SR-Emb-0.6B Ours (FT) .654 [.578, .730] SR-Emb-8B Ours (FT) .680 [.605, .755] 
+
+End-to-end pipeline 
+
+Emb-8B × Rank-8B base Baseline .680 [.605, .755] SR-Emb-0.6B × SR-Rank-0.6B Ours (1.2B) .740 [.670, .810] SR-Emb-0.6B × SR-Rank-8B Ours .747 [.677, .817] SR-Emb-8B × SR-Rank-8B Ours .760 [.692, .828] 
+
+Key observations. The CI for our primary pipeline (SR-Emb-0.6B × SR-Rank-0.6B: [.670, .810]) does not overlap with the best baseline (Emb-8B × Rank-8B base: [.605, .755]) at the lower/upper bounds, though there is partial overlap in the middle range. The reliability of our findings is supported by three factors: (1) the advantage is consistent across both Easy and Hard tiers independently, (2) it holds across all metrics (Hit@1, MRR@10, nDCG@10), and (3) the fine-tuning gains replicate at 8B scale. 
+
+## F Detailed Attention Analysis 
+
+Table 14 provides the per-layer-group and key individual layer attention distributions for SR-Rank-0.6B, complementing the aggregate results in Section 3.2. Table 14: Attention distribution across skill fields by layer group and key individual layers (SR-Rank-0.6B, 28 layers × 16 heads, 75 queries). 
+
+Layer (Group) Name Desc Body 
+
+Layer groups (averaged) 
+
+Early (0–6) 2.3% 0.3% 97.3% 
+
+Middle (7–20) 9.6% 1.4% 89.0% 
+
+Late (21–27) 7.5% 0.8% 91.7% 
+
+Key individual layers 
+
+Layer 0 0.3% 0.1% 99.6% 
+
+Layer 11 14.6% 1.4% 84.0% Layer 19 26.3% 1.8% 72.0% Layer 27 1.5% 0.4% 98.1% 
+
+Overall 7.3% 1.0% 91.7% 
+
+## G Case Studies 
+
+We present six representative cases analyzing the behavior of the S KILL ROUTER pipeline. Cases 1–2 are summarized in Section 5.5.3; here we provide the full details alongside four additional cases. 
+
+Case 1: Encoder advantage (video-tutorial-indexer). Query: Extract chapter timestamps from a local tutorial video. 
+
+GT Skill: speech-to-text (Whisper-based audio transcription). 22 Preprint. Under review. 0 5 10 15 20 25 27   
+
+> Layer Index
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Attention Proportion  L19: name peak
+> (a) Per-Layer Attention to Skill Fields
+> Body
+> Name
+> Desc
+> 0.0 0.5 1.0
+> Mean Proportion
+> Body
+> Name
+> Desc
+> 91.7%
+> 7.3%
+> 1.0%
+> (b) Overall Average
+
+Figure 5: Per-layer attention distribution across skill fields. Layer 19 shows peak name attention (26.3%), suggesting mid-layer name-based semantic matching before late layers return to body for the final relevance decision. 
+
+Analysis: Base encoders are misled by surface keyword “video” and retrieve video editing tools. Qwen3-Emb-0.6B base ranks GT at position 25; Qwen3-Emb-8B at position 6. SR-Emb-0.6B learns the indirect mapping “video + timestamps → speech-to-text” and retrieves GT at rank 1. This demonstrates that fine-tuning captures reasoning shortcuts that model scale alone cannot provide. 
+
+Case 2: Reranker rescue (simpo-code-reproduction). Query: Reproduce a research paper’s loss function and set up the development environment. 
+
+GT Skill: nlp-research-repo-package-installment (Python environment setup). 
+
+Analysis: All encoders miss this subtle match (SR-Emb-0.6B: rank 13; base encoders: rank 
+
+>50). Since rank 13 is within the top-20 window, the cross-encoder reranker identifies the alignment between “setup the environment” and the skill’s dependency installation instructions, promoting GT to rank 1. 
+
+Case 3: Encoder advantage (workflow-automation). Query: Automate a multi-step CI/CD pipeline with conditional stage execution. 
+
+GT Skill: github-actions-workflow (GitHub Actions YAML generation). 
+
+Analysis: Base encoders retrieve generic automation skills (“task-scheduler”, “cron-manager”). SR-Emb-0.6B captures the “CI/CD + conditional” → “GitHub Actions” map-ping, ranking GT at position 1 vs. position 8 for Qwen3-Emb-8B. The skill body explicitly describes conditional workflow syntax, which the fine-tuned model has learned to associate with CI/CD queries. 
+
+Case 4: Reranker rescue (data-format-conversion). Query: Convert a legacy XML configu-ration to modern TOML format with schema validation. 
+
+GT Skill: config-format-converter (multi-format config file conversion). 
+
+Analysis: The encoder retrieves XML-focused and TOML-focused tools separately but misses the unified converter (SR-Emb-0.6B: rank 11). The reranker, through cross-attention over the body’s supported format list (XML, YAML, JSON, TOML, INI), identifies the correct multi-format skill and promotes it to rank 1. 
+
+Case 5: Pointwise loss degradation (api-documentation). Query: Generate REST API documentation from OpenAPI spec with interactive examples. 
+
+GT Skill: openapi-doc-generator (Swagger/OpenAPI documentation tool). 
+
+Analysis: SR-Emb-0.6B correctly retrieves GT at rank 1. However, FT-PW (pointwise BCE) reranker degrades it to rank 18, while SR-Rank-0.6B (listwise CE) maintains rank 1. The pointwise model assigns similar scores ( ∼0.52) to all API-related candidates, effectively 23 Preprint. Under review. randomizing the order. This case exemplifies why pointwise scoring fails in homogeneous candidate pools. 
+
+Case 6: System limitation (invoice-fraud-detection). Query: Analyze invoice images to detect potential fraud patterns (duplicate amounts, suspicious vendor names). 
+
+GT Skill: pdf-table-extractor (structured data extraction from PDF/images). 
+
+Analysis: All methods fail. The connection between “invoice fraud detection” and “PDF table extraction” requires multi-hop reasoning: fraud analysis → structured data needed 
+
+→ invoices are PDFs → table extraction. No retrieval method in our pipeline captures this chain. The top results are fraud-detection analytics tools and image classifiers, none of which provide the prerequisite data extraction step. This case illustrates the 22% system ceiling where retrieval-based approaches reach their fundamental limit. 
+
+## H Downstream Scenario Analysis for Agent Task Completion 
+
+Our evaluation so far measures retrieval quality (Hit@1, Recall@ K) in isolation. A natural question is: how does retrieval accuracy translate to downstream agent task completion when skills must be retrieved from a large pool rather than provided as ground truth? 
+
+To answer this, we conduct a calibrated scenario analysis by combining our retrieval results with the independently published SkillsBench benchmark (SkillsBench Team, 2026), which evaluates frontier coding agents on 84 real-world tasks under two conditions: vanilla (no skills) and with skills (gold-standard skills provided directly to the agent). By bridging these two data sources, we can estimate the agent pass rate under a realistic retrieve-then-use deployment scenario, where skills must first be selected from an 80K-scale pool. This appendix should therefore be read as an estimate of downstream implications rather than as direct end-to-end evidence. 
+
+Model. We adopt a linear mixture model, but use coverage proxies rather than a single retrieval metric. Let C denote an effective coverage coefficient capturing how much of the needed skill support is surfaced by retrieval, Pwith the agent pass rate with gold skills, and 
+
+Pwithout the pass rate without skills. The estimated pass rate under retrieval is: 
+
+Pretrieve (C) = C · Pwith + ( 1 − C) · Pwithout (4) The intuition is straightforward: larger values of C move the agent closer to the gold-skill regime, while smaller values of C leave it closer to vanilla performance. 
+
+Why one metric is not enough. SkillBench includes many multi-skill tasks, so treating Hit@1 as the sole proxy is too optimistic. We therefore report three deployment semantics: 1. Hit@1 as a top-1 / upper-bound proxy : appropriate when the agent only consumes one retrieved skill, or when retrieving any one key skill is enough to unlock the task. 2. R@10 as a top-10 partial-coverage proxy : appropriate when the agent can inspect a shortlist and benefit in proportion to how much of the required skill set appears in the top 10. 3. FC@10 as a top-10 full-coverage proxy : appropriate for stricter multi-skill settings where 
+
+all required skills must appear in the top 10. This distinction matters empirically. On our benchmark, the primary 1.2B pipeline (SR-Emb-0.6B × SR-Rank-0.6B) achieves Hit@1 =72.9%, R@10 =FC@10 =87.5% on single-skill queries, but on multi-skill queries the gap widens to Hit@1 =74.5%, R@10 =62.4%, and FC@10 =35.3%. Thus, Hit@1 alone substantially overstates task readiness for multi-skill settings. 
+
+Data sources. We use Hit@1, R@10, and FC@10 from our pipeline configurations as alternative choices of C, and the SkillsBench leaderboard results (SkillsBench Team, 2026) for 
+
+Pwith and Pwithout . SkillsBench evaluates 7 agent–model configurations across 84 tasks with 5 trials per task (420 trials per configuration), scoring with the Terminal-Bench Method D task-mean approach. 24 Preprint. Under review. Table 15: Average estimated agent pass rates (%) under retrieve-then-use deployment with an 80K skill pool. Estimated Pass Range spans the strict lower bound from FC@10 to the optimistic upper bound from Hit@1; Mid Estimate uses R@10. Best encoder-only model is SR-Emb-8B. †Our primary compact pipeline.                             
+
+> Pipeline Hit@1 R@10 FC@10 Estimated Pass Range (FC@10 →Hit@1) Mid Estimate (R@10)
+> BM25 0.314 0.321 0.214 27.8–29.4 29.5 Best encoder-only model (SR-Emb-8B) 0.680 0.692 0.534 33.0–35.4 35.6
+> Primary SR-1.2B †0.740 0.704 0.520 32.8–36.3 35.8
+> Best overall (SR-Emb-8B ×SR-Rank-8B) 0.760 0.719 0.540 33.1–36.7 36.0
+
+Table 16: Per-agent estimated pass rates (%) for the primary 1.2B pipeline (SR-Emb-0.6B 
+
+× SR-Rank-0.6B). Estimated Pass Range spans FC@10-based lower bound to Hit@1-based upper bound; Mid Estimate uses R@10 and should be read as the main estimate. 
+
+Agent + Model No Skills 
+
+Pwithout 
+
+Gold Skills 
+
+Pwith 
+
+Estimated Pass Range (FC@10 → Hit@1) Mid Estimate (R@10=.704) 
+
+Gemini CLI (Flash) 31.3 48.7 40.3–44.2 43.6 Claude Code (Opus 4.5) 22.0 45.3 34.1–39.2 38.4 Codex (GPT-5.2) 30.6 44.7 37.9–41.0 40.5 Claude Code (Opus 4.6) 30.6 44.5 37.8–40.9 40.4 Gemini CLI (Pro) 27.6 41.2 34.7–37.7 37.2 Claude Code (Sonnet 4.5) 17.3 31.8 24.8–28.0 27.5 Claude Code (Haiku 4.5) 11.0 27.7 19.7–23.4 22.8 
+
+Average 24.3 40.6 32.8–36.3 35.8 
+
+Results. Table 15 first summarizes the average pass rate across all 7 SkillsBench agent configurations for four representative retrieval pipelines. Table 16 then expands the per-agent estimates for our primary 1.2B pipeline. 
+
+The realistic downstream estimate is now a range, not a point. Under the linear model, the fraction of total skill benefit captured equals the chosen coverage proxy C itself. For our primary 1.2B pipeline, this means: • Upper bound (Hit@1): captures 74.0% of the gold-skill uplift, raising average pass rate from 24.3% to 36.3%. • Shortlist estimate (R@10): captures 70.4% of the uplift, yielding 35.8% average pass rate. • Strict lower bound (FC@10): captures 52.0% of the uplift, yielding 32.8% average pass rate. Hence the practically relevant regime for multi-skill tasks is better summarized as a 32.8%– 35.8% expected pass range, with 36.3% serving as an optimistic top-1 upper bound rather than the main point estimate. 
+
+Skills-as-scale-substitute holds under retrieval. SkillsBench’s striking finding is that a smaller model with skills can outperform a larger model without skills—e.g., Claude Haiku 4.5 with gold skills (27.7%) beats Opus 4.5 without skills (22.0%). Under retrieval, this effect becomes conditional on coverage assumptions . For the primary 1.2B pipeline, Haiku 4.5 rises from 11.0% to 19.7%–23.4%; it still exceeds Opus 4.5 without skills (22.0%) under the R@10 / Hit@1 assumptions, but not under the strict FC@10 bound. Sonnet 4.5 rises from 17.3% to 24.8%–28.0%, comfortably exceeding Opus 4.5 without skills across all three assumptions. Thus, the “skills as scale substitute” phenomenon remains visible after retrieval, but its strength depends on whether downstream tasks need one key skill or full multi-skill coverage .
+
+Assumptions and limitations. This simulation rests on several simplifying assumptions that should be noted: 25 Preprint. Under review. 1. Coverage semantics are approximate. Hit@1, R@10, and FC@10 correspond to different assumptions about how agents consume retrieved skills. Real agents may obtain partial benefit from incomplete skill sets, so the true pass rate may lie between the R@10 and FC@10 estimates. 2. Binary benefit model. We still model retrieval as two-state: sufficient coverage yields gold-skill performance, insufficient coverage yields vanilla performance. In reality, partially relevant skills may help somewhat, while misleading skills may hurt. SkillsBench reports that 16 of 84 tasks show negative skill effects, so both deviations are possible. 3. Transferability of C . Our coverage values are measured on our benchmark (150 queries, 
+
+∼80K skills). The actual retrieval difficulty and skill cardinality distribution on Skills-Bench’s 84 tasks may differ. These numbers should therefore be interpreted as calibrated scenario estimates rather than exact predictions. 26
