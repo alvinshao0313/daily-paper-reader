@@ -1,0 +1,502 @@
+Title: Mixture of Chapters: Scaling Learnt Memory in Transformers
+
+URL Source: https://arxiv.org/pdf/2603.21096v1
+
+Published Time: Tue, 24 Mar 2026 01:08:19 GMT
+
+Number of Pages: 20
+
+Markdown Content:
+# Mixture of Chapters: Scaling Learnt Memory in Transformers 
+
+Tasmay Pankaj Tibrewal 1,2 Pritish Saha 1 Ankit Meda 1
+
+Kunal Singh 2 Pradeep Moturi 21IIT Kharagpur 2Fractal AI 
+
+tasmay.tibrewal@kgpian.iitkgp.ac.in, pritish.saha@kgpian.iitkgp.ac.in, ankitm18@kgpian.iitkgp.ac.in, kunal.singh@fractal.ai, pradeep.moturi@fractal.ai 
+
+March 24, 2026 
+
+Abstract 
+
+Transformers lack an explicit architectural mechanism for storing and organizing knowledge ac-quired during training. We introduce learnable sparse memory banks: a set of latent tokens, randomly initialized and trained end-to-end, that transformer layers query via cross-attention to retrieve stored knowledge. To scale memory capacity without prohibitive attention costs, we propose chapter-based routing inspired by Mixture-of-Experts architectures, partitioning the memory bank into chapters and training a router to select relevant subsets per input. This enables scaling to 262K memory tokens while maintaining tractable computation. We evaluate our approach against standard transformers (in iso-FLOP settings) on pre-training and instruction fine-tuning across relevant benchmarks. Our models surpass iso-FLOP baselines suggesting scope for a new axis of scaling, demonstrating that explicit as-sociative memory provides complementary capacity to what is captured implicitly in model parameters. Additionally, we observe improved knowledge retention under continued training, with robustness to forgetting when transitioning between training phases (e.g., pretraining to instruction fine-tuning). 
+
+# 1 Introduction 
+
+Transformers provide a powerful foundation for sequence modeling [46], but they do not expose an ex-plicit architectural mechanism for persistent, addressable memory. In practice, many systems instead rely on inference-time mechanisms such as segment-level recurrence over prior hidden states [13], KV-cache retention, eviction, or compression methods for long-context generation [8, 27, 54, 58], tool-based updates [42, 55], and retrieval-augmented generation (RAG) [34]. These methods are effective, but they primar-ily reuse or manage previously processed context, or retrieve external information, rather than providing a learned internal memory store for factual knowledge acquired during training. We study a complementary direction: a transformer augmented with a learned memory bank [45, 52]. The memory is a set of latent tokens, randomly initialized and trained end-to-end, that can be queried via cross-attention, where the token stream produces queries and the memory provides keys and values [52]. This design stores knowledge in a compact latent space rather than as retrieved text, and it can be integrated inside standard transformer blocks [24, 52]. The main bottleneck is scale. Dense cross-attention over a very large bank is expensive. We there-fore introduce Mixture of Chapters (MoC) 1, which partitions the memory bank into chapters and uses a  
+
+> 1Code is available at https://github.com/Tasmay-Tibrewal/Memory .
+
+1
+
+> arXiv:2603.21096v1 [cs.LG] 22 Mar 2026
+
+lightweight router to select a small subset of chapters per input at the sequence level [18, 41, 43]. This enables scaling learned memory capacity to large sizes while keeping computation tractable, and it fits naturally with the goals of associative memory research [4, 32]. 
+
+# 2 Motivation 
+
+We motivate Mixture of Chapters with three goals. 
+
+(1) Explicit memory. Transformers store knowledge implicitly in dense parameters [46], making it hard to inspect, edit, or scale memory independently. Prior work adds explicit memory via large key-value tables [3, 31] or attention-based memory modules [16, 52]. We follow this direction by introducing a learned, addressable memory bank that complements parametric capacity. 
+
+(2) Scalable sparse access. Dense attention over large memory banks is expensive [31]. Inspired by sparse routing in MoE models [17, 43] and routing-based sparsification [40], we partition memory into chapters and route each input to a small subset, enabling predictable scaling at tractable cost. 
+
+(3) Retention under continued training. Post-training shifts can cause catastrophic forgetting [30], in-cluding in LLM instruction tuning [36]. An explicit memory bank can reduce interference during continued training by anchoring factual content, which we observe empirically across training phase transitions [12]. 
+
+# 3 Related Work 
+
+Most relevant. Our work is closest to learned, scalable internal memory modules integrated into trans-formers. Product Key Memory (PKM) provides a classic recipe for large trainable key-value memory with efficient sparse lookup [31]. Memory Layers at Scale shows that trainable memory layers can add substan-tial capacity with near-constant FLOPs and strong factual gains [4]. We build on this direction, but use a learned latent-token memory bank accessed via cross-attention and scale it with sequence-level chapter routing. 
+
+Other memory mechanisms. A broad set of alternatives externalize memory at inference time or focus on efficiency and long-context handling. Transformer-XL exemplifies recurrent caching to extend effective context [14], and RAG exemplifies retrieval over an external corpus [33]. Conditional computation via routing, as in mixture-of-experts, provides the sparse-activation template we adapt for memory selection [43]. Finally, continual training can induce catastrophic forgetting [30], which motivates our retention experiments. A wider map of related directions is provided in Appendix A.1 (Table 3). 
+
+# 4 Contributions 
+
+This paper makes the following contributions: • Learned associative memory bank in transformers. We add a persistent bank of latent memory tokens trained end-to-end and accessed via cross-attention, enabling internal retrieval in a compact latent space rather than text-based retrieval [3, 52]. 2RMSNorm               
+
+> Self-attn
+> 12H, 4KV (GQA); RoPE
+> +
+> RMSNorm
+> Mem cross-attn
+> 12H, 12KV
+> +
+> RMSNorm
+> SwiGLU MLP
+> dff =2304
+> +
+> Residual
+> Router input
+> Pool( H)
+> Router
+> softmax( Wrr+br)
+> Select Top-kk= 64
+> Memory bank MNm= 262 ,208 , C = 4 ,097 , T = 64
+> Sh1 R1 R2 · · · R64
+> 4,032 inactive chapters
+> Chapter-based memory routing
+> Router Input
+> K, V
+
+Figure 1: Single transformer block with chapter-based memory routing 
+
+• Mixture of Chapters for scalable sparse access. We partition memory into chapters and train a lightweight router that selects a small subset per input, adopting the conditional computation principle from Mixture of Experts [17, 43]. • Scaling behavior under fixed compute. We evaluate our memory architecture against standard trans-formers in iso-FLOP settings, complementing compute-optimal scaling discussions in language mod-eling [23]. • Retention under continued training. We provide evidence that explicit memory improves knowl-edge retention and reduces forgetting across training phase transitions, connecting to continual learn-ing analyses in LLMs [30, 36]. 
+
+# 5 Method 
+
+5.1 Memory layer: learned bank with chapter routing 
+
+We augment a standard decoder-only transformer [46] with a memory layer that provides persistent, ad-dressable storage. The memory consists of a learned bank of latent tokens that are trained end-to-end, and accessed through cross-attention, following the general memory-augmented attention pattern [45, 52]. Let H ∈ RB×L×d be the token hidden states at a layer. We maintain a memory bank 
+
+M ∈ RNm×d,
+
+where each row is a learned memory token. The memory layer reads from M using cross-attention where 3the token stream produces queries and memory produces keys and values: 
+
+Q = Norm( H)WQ, (1) 
+
+K = M W K , (2) 
+
+V = M W V , (3) 
+
+MemRead( H, M ) = softmax 
+
+ QK ⊤
+
+√dh
+
+
+
+V. (4) The readout is added back to the token stream through a residual connection: 
+
+H′ = H + MemRead( H, M )
+
+5.2 Scaling the bank with chapters 
+
+Attending over all Nm memory tokens can be expensive for large banks. We therefore partition the bank into C chapters :
+
+M = [ M1; . . . ; MC ], Mc ∈ RT ×d, Nm = CT. 
+
+For each input sequence, a lightweight router selects a small subset of chapters. We compute a sequence representation by pooling hidden states (for example, mean pooling): 
+
+r = Pool( H) ∈ Rd,
+
+then score chapters and select the top-k:
+
+p = softmax( Wrr + br), S = TopK( p, k ).
+
+The memory layer then attends only to the selected chapters: 
+
+MS = Concat( {Mc : c ∈ S} ), H′ = H + MemRead( H, M S ).
+
+This reduces memory attention cost from O(LN m) to O(LkT ) per memory layer while preserving attention-based associative retrieval. Algorithm 1 (see Appendix A.3) summarizes the forward pass of a single MoC memory layer, including sequence-level routing, chapter selection, and routed memory cross-attention. The routing mechanism is inspired by sparse conditional computation in mixture-of-experts models [18, 43] and routing-based sparsification [41]. 
+
+# 6 Experiments 
+
+6.1 Setup 
+
+Models. We compare (i) Vanilla (iso-FLOP) : a dense transformer baseline compute-matched to our mem-ory model during pretraining (see Appendix A.2 for the analytic FLOPs calculation), (ii) Mixture of Chap-ters (MoC) : our memory-augmented transformer, and (iii) Vanilla (backbone-only) : the dense transformer backbone of the memory model with memory components removed. 
+
+Training protocol. We pretrain for 9,600 steps (9.6B tokens) and then instruction fine-tune (IFT) for 2 epochs on 230M tokens (3.2k steps). This is a relatively heavy post-training budget for this model scale and it induces clear forgetting in the dense baseline. During IFT, we increase context length from 1024 to 2048. All plots and reported pretraining results correspond to the 9,600-step run (not a continued run). 4Table 1: Pretraining validation loss (lower is better). Model Val loss ↓
+
+Vanilla (backbone-only) 2.92 Vanilla (iso-FLOP) 2.86 Mixture of Chapters (MoC) 2.79 
+
+Table 2: Comparison of Vanilla, Mixture of Chapters (MoC) ( ∆ = IFT - pretrain; lower is better)                                    
+
+> Vanilla (iso-FLOP) MoC Benchmark Pretrain (%) ∆(pp) ↓IFT (%) Pretrain (%) ∆(pp) ↓IFT (%) MMLU 26.90 -0.99 25.91 27.87 -0.35 27.52
+> ARC-C 31.77 -6.69 25.08 31.44 -2.68 28.76
+> BoolQ 57.13 -6.24 50.89 61.87 +0.24 62.11
+> OBQA 36.20 -2.00 34.20 37.40 -2.00 35.40
+
+Evaluation. We report accuracy on MMLU [22], ARC-Challenge [11], BoolQ [10], and OpenBookQA [37]. Random guessing is approximately 0.25 on ARC-Challenge and 0.50 on BoolQ. 
+
+6.2 Results 
+
+Pretraining loss. Table 1 shows validation loss at the end of pretraining. The memory model attains the best loss, and Figure 2 shows it continues to separate late in training, suggesting additional headroom with longer runs. 
+
+Benchmarks and forgetting under heavy IFT. Table 2 reports benchmark accuracy after pretraining and after IFT, along with deltas (IFT minus pretrain). Vanilla is strongly affected on knowledge-heavy tasks: ARC-Challenge drops by 0.0669 (0.3177 → 0.2508, approaching random) and BoolQ drops by 0.0624 (0.5713 → 0.5089, approaching random). In contrast, the memory model remains stable on these tasks: BoolQ is effectively unchanged (+0.0024), and ARC-Challenge drops only 0.0268, less than half the vanilla degradation. This pattern is consistent with the memory bank anchoring factual knowledge during continued training. 
+
+IFT loss and freezing the memory bank. Figure 2 (right) compares IFT validation loss for memory variants where the bank is frozen, trained with a very small learning rate, or trained with the same learning rate as the backbone. The curves overlap closely, and post-IFT benchmark scores remain within noise across these settings (Appendix A.4). This indicates the pretrained memory bank can be reused during post-training without further bank updates. 
+
+Pretraining distribution after IFT. Evaluating IFT checkpoints on the pretraining validation distribu-tion yields higher loss for the memory model (3.2024) than vanilla (3.0574), despite better retention on knowledge benchmarks. This suggests the memory model can shift further toward instruction alignment while preserving factual knowledge, consistent with a separation of roles between backbone adaptation and memory anchoring. 5(Left) Pretraining eval loss (9,600 steps). (Right) IFT eval loss for bank-freeze and LR variants. 
+
+Figure 2: Loss curves. Left: Pretraining. Right: IFT (Freezing the bank yields identical curves). 
+
+# 7 Conclusion 
+
+We introduced Mixture of Chapters (MoC) , a memory-augmented transformer that adds a learned latent memory bank and scales access via sequence-level chapter routing, providing an explicit associative mem-ory substrate with sparse, tractable access. In a 9.6B-token pretraining run, the memory model achieves lower validation loss than compute-matched dense baselines and improves knowledge-heavy benchmark performance. Under heavy post-training (2-epoch IFT on 230M tokens with context length increased from 1024 to 2048), the dense baseline exhibits substantial forgetting on ARC-Challenge and BoolQ, while the memory model remains comparatively sta-ble; freezing the bank during IFT performs on par with updating it. Overall, these results point to learned memory as a complementary axis of scaling and motivate further study of larger banks, longer training, and improved routing/organization for specialization and interpretability. 6References 
+
+[1] Jean-Baptiste Alayrac, Jeff Donahue, Pauline Luc, Antoine Miech, I. Barr, Y. Hasson, et al. Flamingo: A visual language model for few-shot learning. arXiv preprint arXiv:2204.14198, 2022. [2] Ali Behrouz, Peilin Zhong, and Vahab Mirrokni. Titans: Learning to memorize at test time, 2025. URL https://arxiv.org/abs/2501.00663 .[3] Vincent-Pierre Berges, Barlas O˘ guz, Daniel Haziza, Wen-tau Yih, Luke Zettlemoyer, and Gargi Ghosh. Memory layers at scale. arXiv preprint arXiv:2412.09764 , 2024. [4] Vincent-Pierre Berges, Barlas Oguz, Daniel Haziza, Wen-Tau Yih, Luke Zettlemoyer, and Gargi Ghosh. Memory layers at scale. In Proceedings of the 42nd International Conference on Machine Learning , 2025. URL https://proceedings.mlr.press/v267/berges25a.html .[5] Sebastian Borgeaud, Arthur Mensch, Jordan Hoffmann, Trevor Cai, Eliza Rutherford, Katie Mil-lican, et al. Improving language models by retrieving from trillions of tokens. arXiv preprint arXiv:2112.04426, 2021. [6] Alexander Bulatov, Yuri Kuratov, and Mikhail S. Burtsev. Recurrent memory transformer. arXiv preprint arXiv:2207.06881, 2022. [7] Alexander Bulatov, Yuri Kuratov, and Mikhail S. Burtsev. Scaling transformer to 1M tokens and beyond with RMT. arXiv preprint arXiv:2304.11062, 2023. [8] Lingfeng Chen, Zhenyu Zhang, Ying Sheng, Lin Dong, Weijia Xu, Lianmin Zheng, Bohan Zhuang, Yukang Cao, Zhangyang Wang, and Beidi Chen. NaCl: A general and effective KV cache eviction framework for LLMs. In Proceedings of the 62nd Annual Meeting of the Association for Computa-tional Linguistics , 2024. URL https://aclanthology.org/2024.acl-long.428/ .[9] Xin Cheng et al. Engram: Conditional memory via scalable lookup: A new axis of sparsity for large language models, 2026. URL https://arxiv.org/abs/2601.07372 .[10] Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina Toutanova. Boolq: Exploring the surprising difficulty of natural yes/no questions. In NAACL-HLT ,2019. URL https://arxiv.org/abs/1905.10044 .[11] Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. Think you have solved question answering? try ARC, the AI2 reasoning challenge. 
+
+arXiv preprint arXiv:1803.05457 , 2018. URL https://arxiv.org/abs/1803.05457 .[12] Andrea Cossu, Tinne Tuytelaars, Antonio Carta, Lucia Passaro, Vincenzo Lomonaco, and Da-vide Bacciu. Continual pre-training mitigates forgetting in language and vision. arXiv preprint arXiv:2205.09357 , 2022. [13] Zihang Dai, Zhilin Yang, Yiming Yang, Jaime Carbonell, Quoc Le, and Ruslan Salakhutdinov. Transformer-XL: Attentive language models beyond a fixed-length context. In Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics , 2019. URL https: //aclanthology.org/P19-1285/ .[14] Zihang Dai, Zhilin Yang, Yiming Yang, Jaime Carbonell, Quoc Le, and Ruslan Salakhutdi-nov. Transformer-XL: Attentive language models beyond a fixed-length context. arXiv preprint arXiv:1901.02860, 2019. 7[15] Michiel de Jong, Yury Zemlyanskiy, Nicholas FitzGerald, Fei Sha, and William Cohen. Mention memory: Incorporating textual knowledge into transformers through entity mention attention, 2021. URL https://arxiv.org/abs/2110.06176 .[16] Michiel de Jong, Yury Zemlyanskiy, Nicholas FitzGerald, Fei Sha, and William Cohen. Mention memory: Incorporating textual knowledge into transformers through entity mention attention. arXiv preprint arXiv:2110.06176 , 2021. [17] William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. arXiv preprint arXiv:2101.03961 , 2021. [18] William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39, 2022. URL https://jmlr.org/papers/v23/21-0998.html .[19] Thibault Fevry, Livio Baldini Soares, Nicholas FitzGerald, Eunsol Choi, and Tom Kwiatkowski. En-tities as experts: Sparse memory access with entity supervision. arXiv preprint arXiv:2004.07202, 2020. [20] N. Fountas, Nicola De Cao, T. Wolff, and Maxime Peyrard. Human-inspired episodic memory for infinite context LLMs, 2025. URL https://arxiv.org/abs/2407.09450 .[21] T. Ge, J. Hu, L. Li, X. Qiu, X. Huang, and L. Si. In-context autoencoder for context compression in a large language model. arXiv preprint arXiv:2307.06945, 2023. [22] Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. Measuring massive multitask language understanding. In International Conference on Learning Representations , 2021. URL https://arxiv.org/abs/2009.03300 .[23] Jordan Hoffmann, Sebastian Borgeaud, Arthur Mensch, Elena Buchatskaya, Trevor Cai, Eliza Ruther-ford, Diego de Las Casas, Lisa Anne Hendricks, Johannes Welbl, Aidan Clark, et al. Training compute-optimal large language models. arXiv preprint arXiv:2203.15556 , 2022. [24] Andrew Jaegle, Sebastian Borgeaud, Jean-Baptiste Alayrac, Carl Doersch, Catalin Ionescu, David Ding, Skanda Koppula, Daniel Zoran, Andrew Brock, Evan Shelhamer, Olivier H´ enaff, Matthew Botvinick, Andrew Zisserman, Oriol Vinyals, and Joao Carreira. Perceiver io: A general archi-tecture for structured inputs and outputs. arXiv preprint arXiv:2107.14795 , 2021. URL https: //arxiv.org/abs/2107.14795 .[25] Andrew Jaegle, Felix Gimeno, Andy Brock, Andrew Zisserman, Oriol Vinyals, and Joao Carreira. Perceiver: General perception with iterative attention. arXiv preprint arXiv:2103.03206, 2021. [26] Junhao Kang, Wei Wu, Filippos Christianos, Arthur J. Chan, Frank Greenlee, George Thomas, Mahdi Purtorab, and Adam Toulis. LM2: Large memory models, 2025. URL https://arxiv.org/ abs/2502.06049 .[27] Mahdi Karami, Ali Behrouz, Praneeth Kacham, and Vahab Mirrokni. Trellis: Learning to compress key-value memory in attention models. arXiv preprint arXiv:2512.23852 , 2025. URL https:// arxiv.org/abs/2512.23852 . In COLM 2025. [28] Urvashi Khandelwal, Omer Levy, Dan Jurafsky, Luke Zettlemoyer, and Mike Lewis. Generalization through memorization: Nearest neighbor language models. arXiv preprint arXiv:1911.00172 , 2019. URL https://arxiv.org/abs/1911.00172 .8[29] J. H. Kim, J. Ma, L. Lausen, C. Tan, J. Zhang, and Y. Cui. Compressed context memory for online language model interaction. arXiv preprint arXiv:2312.03414, 2024. [30] James Kirkpatrick, Razvan Pascanu, Neil Rabinowitz, Joel Veness, Guillaume Desjardins, Andrei A. Rusu, Kieran Milan, John Quan, Tiago Ramalho, Agnieszka Grabska-Barwinska, Demis Hassabis, Claudia Clopath, Dharshan Kumaran, and Raia Hadsell. Overcoming catastrophic forgetting in neural networks. In Proceedings of the National Academy of Sciences , 2017. URL https://www.pnas. org/doi/10.1073/pnas.1611835114 .[31] Guillaume Lample, Alexandre Sablayrolles, Marc’Aurelio Ranzato, Ludovic Denoyer, and Herv´ eJ´ egou. Large memory layers with product keys. arXiv preprint arXiv:1907.05242 , 2019. [32] Guillaume Lample, Alexandre Sablayrolles, Marc’Aurelio Ranzato, Ludovic Denoyer, and Herv´ eJ´ egou. Large memory layers with product keys. In Advances in Neural Information Processing Sys-tems , 2019. URL https://arxiv.org/abs/1907.05242 .[33] Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich K¨ uttler, Mike Lewis, Wen-tau Yih, Tim Rockt¨ aschel, Sebastian Riedel, and Douwe Kiela. Retrieval-augmented generation for knowledge-intensive NLP tasks. arXiv preprint arXiv:2005.11401 ,2020. [34] Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich K¨ uttler, Mike Lewis, Wen-tau Yih, Tim Rockt¨ aschel, Sebastian Riedel, and Douwe Kiela. Retrieval-augmented generation for knowledge-intensive NLP tasks. In Advances in Neural Informa-tion Processing Systems , 2020. URL https://arxiv.org/abs/2005.11401 .[35] Peng Liu, Y. Zhang, and Daniel S. Weld. Larimar: Large language models with episodic memory control, 2024. URL https://arxiv.org/abs/2403.11901 .[36] Yun Luo, Zhen Yang, Fandong Meng, Yafu Li, Jie Zhou, and Yue Zhang. An empirical study of catastrophic forgetting in large language models during continual fine-tuning. arXiv preprint arXiv:2308.08747 , 2023. [37] Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. Can a suit of armor conduct electricity? a new dataset for open book question answering. In EMNLP , 2018. URL https: //arxiv.org/abs/1809.02789 .[38] Tsendsuren Munkhdalai, Manaal Faruqui, and Saumya Gopal. Leave no context behind: Efficient infinite context transformers with infini-attention. arXiv preprint arXiv:2404.07143, 2024. [39] Jack W. Rae, Anna Potapenko, Siddhant M. Jayakumar, Chloe Hillier, and Timothy P. Lillicrap. Com-pressive transformers for long-range sequence modelling. arXiv preprint arXiv:1911.05507, 2020. [40] Aurko Roy, Mohammad Saffar, Ashish Vaswani, and David Grangier. Efficient content-based sparse attention with routing transformers. arXiv preprint arXiv:2003.05997 , 2020. [41] Aurko Roy, Mohammad Saffar, Ashish Vaswani, and David Grangier. Efficient content-based sparse attention with routing transformers. Transactions of the Association for Computational Linguistics , 9: 53–68, 2021. URL https://aclanthology.org/2021.tacl-1.4/ .[42] Timo Schick, Jane Dwivedi-Yu, Roberto Dess` ı, Roberta Raileanu, Maria Lomeli, Luke Zettlemoyer, Nicola Cancedda, and Thomas Scialom. Toolformer: Language models can teach themselves to use tools. arXiv preprint arXiv:2302.04761 , 2023. URL https://arxiv.org/abs/2302.04761 .9[43] Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. arXiv preprint arXiv:1701.06538 , 2017. URL https://arxiv.org/abs/1701.06538 .[44] Sainbayar Sukhbaatar, Edouard Grave, Piotr Bojanowski, and Armand Joulin. Augmenting self-attention with persistent memory. arXiv preprint arXiv:1907.01470, 2019. [45] Sainbayar Sukhbaatar, Edouard Grave, Guillaume Lample, Herv´ e J´ egou, and Armand Joulin. Aug-menting self-attention with persistent memory. arXiv preprint arXiv:1907.01470 , 2019. URL 
+
+https://arxiv.org/abs/1907.01470 .[46] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. In Advances in Neural Information Processing Systems , 2017. [47] Patrick Verga, Haitian Sun, Livio Baldini Soares, and William Cohen. Facts as experts: Adaptable and interpretable neural memory over symbolic knowledge. arXiv preprint arXiv:2007.00849, 2020. [48] Yu Wang, Yifan Gao, Xiusi Chen, Haoming Jiang, Shiyang Li, Jingfeng Yang, Qingyu Yin, Zheng Li, Xian Li, Bing Yin, Jingbo Shang, and Julian McAuley. MEMORYLLM: Towards self-updatable large language models, 2024. URL https://arxiv.org/abs/2402.04624 .[49] Yu Wang et al. M+: Extending MEMORYLLM with scalable long-term memory, 2025. URL https: //arxiv.org/abs/2502.00592 .[50] Qingyang Wu and Zhou Yu. Stateful memory-augmented transformers for efficient dialogue modeling. arXiv preprint arXiv:2209.07634, 2022. [51] Y. Wu, Y. Zhao, B. Hu, P. Minervini, P. Stenetorp, and S. Riedel. An efficient memory-augmented transformer for knowledge-intensive NLP tasks. In Proceedings of the 2022 Conference on Empirical Methods in Natural Language Processing , 2022. arXiv:2210.16773. [52] Yuhuai Wu, Markus N. Rabe, DeLesley Hutchins, and Christian Szegedy. Memformer: A memory-augmented transformer for sequence modeling. arXiv preprint arXiv:2010.06891 , 2020. URL 
+
+https://arxiv.org/abs/2010.06891 .[53] Yuhuai Wu, Markus N Rabe, DeLesley Hutchins, and Christian Szegedy. Memorizing transformers. 
+
+arXiv preprint arXiv:2203.08913 , 2022. [54] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. Efficient streaming lan-guage models with attention sinks. In International Conference on Learning Representations , 2024. URL https://arxiv.org/abs/2309.17453 .[55] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao. ReAct: Synergizing reasoning and acting in language models. In International Conference on Learning Representations , 2023. URL https://openreview.net/forum?id=WE_vluYUL-X .[56] P. Zhang, H. Qian, Q. Ye, and Z. Dou. Long context compression with activation beacon. arXiv preprint arXiv:2401.03462, 2024. [57] Z. Zhang, W. Shao, Y. Ge, X. Wang, J. Gu, and P. Luo. Cached transformers: Improving transformers with differentiable memory cache. arXiv preprint arXiv:2312.12742, 2023. 10 [58] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher R´ e, Clark Barrett, Zhangyang Wang, and Beidi Chen. H2o: Heavy-hitter oracle for efficient generative inference of large language models. In Advances in Neural Information Processing Systems , 2023. URL https://arxiv.org/abs/2306.14048 .11 A Appendix 
+
+A.1 Extended literature review (concise map) 
+
+Due to the page limit, the main paper focuses on the closest comparisons (Titans, Memory Layers at Scale, PKM). This appendix provides a compact narrative overview of broader related directions, complemented by Table 3. 
+
+Inference-time and external memory. A common strategy is to externalize memory at inference time, either by caching past activations to improve efficiency and extend effective context, or by retrieving text from an external index. Transformer-XL is a canonical example of recurrence and caching [14], while RAG exemplifies retrieval-conditioned generation [33]. These approaches are strong baselines, but the stored content remains outside the model and must be fetched and integrated per query. 
+
+Learned memory inside the model. A complementary line integrates memory as a trainable component. Memformer reads and writes through an internal memory mechanism coupled to token representations [52]. For scaling, PKM provides efficient large key-value lookup [31], and Memory Layers at Scale shows that trainable memory layers can add substantial capacity with near-constant FLOPs and strong factual gains [4]. Our work is closest to this direction, but uses a learned latent-token bank accessed by cross-attention and scales access via sequence-level chapter routing. 
+
+Updatable and test-time memory. Some methods emphasize explicit test-time updates or state that evolves across interactions, such as Titans [2]. These approaches often target persistent personalization or long-horizon interaction, whereas our focus is on scaling learned associative memory trained end-to-end and analyzing retention under continued training. 
+
+Sparse routing and conditional computation. Routing and conditional computation provide a general template for scaling by activating only a subset of components. MoE systems route inputs to a small subset of experts [18, 43]. Our method borrows this principle but applies routing to memory selection, with chapters serving as routed memory units. 
+
+Retention and catastrophic forgetting. Catastrophic forgetting is a classical issue in sequential training [30], and has been measured in continual or sequential tuning of language models. Our experiments connect this literature to architectural memory by testing whether a learned bank helps preserve factual knowledge across the pretraining-to-IFT transition. 
+
+A.2 Analytic FLOPs calculation 
+
+In this section, we estimate FLOPs analytically for a single sequence with batch size B = 1 and sequence length L = 1024 . Our codebase includes a reference implementation, estimate flops.py , which follows the same counting rules used here for complete training runs. The derivation below mirrors that implementation, while making the layer-by-layer calculation explicit. Linear layers use 
+
+FLOPs linear = 2 N d in dout ,
+
+attention matmuls use 
+
+FLOPs attn matmul = 4 B L q Lk d, 
+
+12 Table 3: Literature map (representative, not exhaustive).     
+
+> Category Representative works Learnable internal memory bank (cross-attn / persistent tokens) Memformer [52], LM2 [26], persistent memory vectors [44], stateful memory variants [50]. Large trainable memory layers (scalable ac-cess) Memory Layers at Scale [4], PKM [31], EMAT [51], Memorizing Transformers [53]. Test-time / updatable memory Titans [2], MemoryLLM [48], M+ [49], Larimar [35], EM-LLM [20], Engram [9]. Recurrence and compressive memory for long context Transformer-XL [14], RMT [6, 7], Compressive Transformers [39], Infini-attention [38], Cached Transformers [57]. Structured/entity memories Mention Memory [15], Entities as Experts [19], Facts as Experts [47]. Latent-token architectures and context com-pression Perceiver/Perceiver IO [24, 25], Flamingo [1], Activation Beacon [56], ICAE [21], compressed-context memory [29]. Retrieval and KV-cache baselines RAG [33], RETRO [5], kNN-LM [28], KV-cache retention/compression (H 2O, StreamingLLM, NACL, Trellis) [8, 27, 54, 58].
+
+RMSNorm uses 
+
+FLOPs RMSNorm = N (4 d + 4) ,
+
+and the backward pass is approximated as 2× the forward pass, consistent with the estimator. For our backbone, d = 768 , dff = 2304 , h = 12 , hkv = 4 , so the self-attention KV dimension is 
+
+dkv = hkv · dh = 4 · 64 = 256 .
+
+Standard transformer layer. A standard layer contains self-attention, two RMSNorms, one SwiGLU MLP, RoPE, and two residual additions. 
+
+Self-attention projections and attention. 
+
+Q : 2 · 1024 · 768 · 768 = 1 ,207 ,959 ,552 (5) 
+
+K : 2 · 1024 · 768 · 256 = 402 ,653 ,184 (6) 
+
+V : 2 · 1024 · 768 · 256 = 402 ,653 ,184 (7) 
+
+O : 2 · 1024 · 768 · 768 = 1 ,207 ,959 ,552 (8) 
+
+QK ⊤, AV : 4 · 1 · 1024 · 1024 · 768 = 3 ,221 ,225 ,472 . (9) The estimator also includes attention softmax, masking, and scaling: 
+
+12 · 1024 · 1024 · (5 + 2) = 88 ,080 ,384 .
+
+Hence total self-attention FLOPs per standard layer are 
+
+6,530 ,531 ,328 .
+
+RoPE. 
+
+3 · 1024 · (768 + 256) = 3 ,145 ,728 .
+
+Two RMSNorms. 
+
+2 · 1024 · (4 · 768 + 4) = 6 ,299 ,648 .
+
+SwiGLU MLP. 
+
+Wup : 2 · 1024 · 768 · 2304 = 3 ,623 ,878 ,656 (10) 
+
+Wgate : 2 · 1024 · 768 · 2304 = 3 ,623 ,878 ,656 (11) 
+
+Wdown : 2 · 1024 · 2304 · 768 = 3 ,623 ,878 ,656 (12) SwiGLU activation : 1024 · 2304 · 5 = 11 ,796 ,480 . (13) 13 So total MLP FLOPs per layer are 
+
+10 ,883 ,432 ,448 .
+
+Residual adds. 
+
+2 · 1024 · 768 = 1 ,572 ,864 .
+
+Putting these together, one standard transformer layer costs 
+
+6,530 ,531 ,328 + 3 ,145 ,728 + 6 ,299 ,648 + 10 ,883 ,432 ,448 + 1 ,572 ,864 = 17 ,424 ,982 ,016 
+
+FLOPs. 
+
+MoC memory layer. An MoC memory layer adds router computation, memory preprocessing, memory cross-attention, an extra RMSNorm, and an extra residual add. The memory bank has 262 ,208 tokens, partitioned into 4097 chapters, giving 
+
+T = 262 ,208 /4097 = 64 
+
+tokens per chapter. With one shared chapter and top-k = 64 routed chapters, the selected memory tokens per sequence are 
+
+Nsel = (1 + 64) · 64 = 4160 .
+
+Router forward. For sequence-level routing, the estimator includes sequence pooling, router projection, softmax, and top-k:pooling : 1 · 768 · (1024 − 1) + 768 = 786 ,432 (14) router linear : 2 · 1 · 768 · 4097 = 6 ,292 ,992 (15) router softmax : 4097 · 5 = 20 ,485 (16) top-k : 4097 · ⌈ log 2 64 ⌉ = 24 ,582 . (17) Thus router forward FLOPs are 
+
+7,124 ,491 .
+
+Router auxiliary-loss compute. The estimator also includes the auxiliary routing-loss terms (load-balancing, z-loss, entropy, and related reductions), which contribute 
+
+331 ,859 
+
+FLOPs per memory layer. 
+
+Memory preprocessing. The estimator includes chapter weighting plus normalization of the selected memory tokens: weighting : 1 · 4160 · 768 = 3 ,194 ,880 (18) RMSNorm : 4160 · (4 · 768 + 4) = 12 ,796 ,160 . (19) So memory preprocessing contributes 
+
+15 ,991 ,040 
+
+FLOPs. 14 Memory attention. Here hmem = 12 , hmem ,kv = 12 , so memory KV dimension is 768 .
+
+Q : 2 · 1024 · 768 · 768 = 1 ,207 ,959 ,552 (20) 
+
+K : 2 · 4160 · 768 · 768 = 4 ,907 ,335 ,680 (21) 
+
+V : 2 · 4160 · 768 · 768 = 4 ,907 ,335 ,680 (22) 
+
+O : 2 · 1024 · 768 · 768 = 1 ,207 ,959 ,552 (23) 
+
+QK ⊤, AV : 4 · 1 · 1024 · 4160 · 768 = 13 ,086 ,351 ,360 . (24) The attention softmax, masking, and scaling term is 
+
+12 · 1024 · 4160 · (5 + 2) = 357 ,826 ,560 .
+
+Hence memory attention contributes 
+
+25 ,674 ,645 ,504 
+
+FLOPs. 
+
+Extra norm and residual. 
+
+extra RMSNorm = 1024 · (4 · 768 + 4) = 3 ,149 ,824 , extra residual = 1024 · 768 = 786 ,432 .
+
+Therefore the extra cost added by an MoC memory layer is 
+
+7,124 ,491 + 331 ,859 + 15 ,991 ,040 + 25 ,674 ,645 ,504 + 3 ,149 ,824 + 786 ,432 = 25 ,702 ,029 ,150 .
+
+Adding the underlying standard transformer layer gives 
+
+17 ,424 ,982 ,016 + 25 ,702 ,029 ,150 = 43 ,127 ,011 ,166 
+
+FLOPs per MoC memory layer. 
+
+Final prediction head and loss. After the transformer stack, the estimator includes a final RMSNorm, LM head, and cross-entropy loss: final RMSNorm : 1024 · (4 · 768 + 4) = 3 ,149 ,824 (25) LM head : 2 · 1024 · 768 · 49152 = 77 ,309 ,411 ,328 (26) CE loss : (1024 − 1) · 49152 · 5 = 251 ,412 ,480 . (27) Thus the final prediction/loss block contributes 
+
+77 ,563 ,973 ,632 
+
+FLOPs. 
+
+Model totals. The backbone-only vanilla model has 16 standard layers: 
+
+F backbone fwd = 16 · 17 ,424 ,982 ,016 + 77 ,563 ,973 ,632 = 356 ,363 ,685 ,888 .
+
+The iso-FLOP vanilla baseline has 24 standard layers: 
+
+F iso fwd = 24 · 17 ,424 ,982 ,016 + 77 ,563 ,973 ,632 = 495 ,763 ,542 ,016 .
+
+15 Table 4: Per-sequence FLOPs for one forward pass and one forward+backward pass ( B = 1 , L = 1024 ). 
+
+Model Forward FLOPs Backward FLOPs Forward+Backward FLOPs Vanilla (backbone-only) 0.356T 0.713T 1.069T Vanilla (iso-FLOP) 0.496T 0.992T 1.487T Mixture of Chapters (MoC) 0.459T 0.918T 1.378T 
+
+The memory model has 12 standard layers and 4 MoC memory layers: 
+
+F MoC fwd = 12 · 17 ,424 ,982 ,016 + 4 · 43 ,127 ,011 ,166 + 77 ,563 ,973 ,632 = 459 ,171 ,802 ,488 .
+
+Following the estimator, we approximate one backward pass as 2× the forward FLOPs: 
+
+Fbwd ≈ 2Ffwd .
+
+Hence the total for one forward plus one backward pass is 3Ffwd .Note that these are single-sequence estimates. They differ slightly from dividing the microstep estimates by batch size, because the sequence-level router auxiliary-loss terms do not scale exactly linearly with batch size. 
+
+A.3 Algorithm: Mixture of Chapters (MoC) memory layer 
+
+Algorithm 1 MoC memory layer with sequence-level routing 
+
+Require: Batch hidden states H ∈ RB×L×d
+
+Require: Chaptered memory bank M = [ M1; . . . ; MC ], where Mc ∈ RT ×d
+
+Require: Router parameters Wr, b r, projections WQ, W K , W V , top-k
+
+Ensure: Updated hidden states H′ ∈ RB×L×d 
+
+> 1:
+
+for b = 1 to B do  
+
+> 2:
+
+rb ← Pool( Hb) 
+
+> 3:
+
+pb ← softmax( Wrrb + br) 
+
+> 4:
+
+Sb ← TopK( pb, k ) 
+
+> 5:
+
+Mb ← Concat( {Mc : c ∈ S b}) 
+
+> 6:
+
+Qb ← Norm( Hb)WQ 
+
+> 7:
+
+Kb ← MbWK 
+
+> 8:
+
+Vb ← MbWV 
+
+> 9:
+
+Ab ← softmax 
+
+ QbK⊤
+
+> b√dh
+
+ 
+
+> 10:
+
+MemRead b ← AbVb 
+
+> 11:
+
+H′ 
+
+> b
+
+← Hb + MemRead b 
+
+> 12:
+
+end for  
+
+> 13:
+
+return H′ = [ H′
+
+> 1
+
+; . . . ; H′ 
+
+> B
+
+]
+
+A.4 Additional experimental details 
+
+A.4.1 Model sizes 
+
+The memory model has a larger total parameter count due to the persistent bank, but uses sparse chapter routing so only a subset of the bank is activated per input. We therefore match pretraining compute to a 16 Table 5: Main MoC architecture used in our experiments.                   
+
+> Component Setting Backbone Decoder-only transformer with 16 layers, hidden size 768, 12 attention heads, 4 KV heads, SwiGLU MLP with intermediate size 2304, RMSNorm, RoPE with θ= 100000 , tied embeddings, vocabulary size 49152 Memory placement Memory cross-attention inserted at layers {2,6,10 ,14 }
+> Memory bank 262,208 latent memory tokens, shared across memory layers Chapter routing 4097 total chapters, including 1 shared chapter; top-k= 64 chapters se-lected per sequence Memory attention 12 memory query heads and 12 memory KV heads Routing details Sequence-level routing, routed scaling factor 2.5, shared/routed mixing nor-malized with RMSNorm Regularization Load-balance loss coefficient 0.01, z-loss coefficient 0.001 Other Memory adapter enabled, memory initialization std. 0.02, memory quanti-zation disabled
+
+dense baseline (Vanilla iso-FLOP). For the non-memory baselines, the Vanilla (backbone-only) model uses the same 16-layer backbone architecture with the memory layers removed, while the Vanilla (iso-FLOP) 
+
+baseline is a denser variant obtained by repeating the standard backbone layers without memory modules and increasing depth to match the pretraining compute budget of the memory model. For reference, the dense baseline has 202.94M parameters, while the memory model has 371.29M total parameters composed of a 147.87M backbone plus a 201.38M bank and 22.04M memory-layer parameters. 
+
+A.4.2 Model and training configuration 
+
+Tables 5 and 6 summarize the main Mixture of Chapters (MoC) architecture and the training settings used for pretraining and instruction fine-tuning (IFT). For comparison, the vanilla backbone-only baseline uses the same 16-layer backbone with memory disabled, while the iso-FLOP vanilla baseline increases depth to 24 layers. 
+
+A.4.3 Pretraining benchmarks including the backbone-only baseline 
+
+Table 7 includes the backbone-only benchmark results to contextualize gains from MoC versus simply changing backbone capacity. 
+
+A.4.4 IFT learning rates and bank update ablations 
+
+IFT uses a base learning rate of 3 × 10 −5 (one tenth of the pretraining rate). We vary the memory bank learning rate across: (1) Frozen bank (LR = 0), (2) Low bank LR (very small LR), (3) Equal LR (bank LR matches base LR). Across these settings, Figure 2 shows no visible divergence in validation loss curves. Table 8 reports benchmark scores for representative settings. Freezing the bank performs on par with updating it, indicating that the pretrained bank is retained and sufficient for post-training. 
+
+A.4.5 IFT shifts the pretraining distribution loss while preserving knowledge benchmarks 
+
+When evaluating IFT checkpoints on the pretraining validation distribution, the memory model exhibits higher loss (3.2024) than the vanilla baseline (3.0574), even though it retains benchmark performance substantially better on ARC-Challenge and BoolQ. This suggests that the memory model can adapt more 17 Table 6: Main training settings for pretraining and IFT. 
+
+Setting Pretraining IFT Tokenizer HuggingFaceTB/SmolLM2-135M HuggingFaceTB/ SmolLM2-135M-Instruct 
+
+Dataset Tasmay-Tib/ fineweb-edu-10bt-split HuggingFaceH4/ultrachat_200k 
+
+Data split train / eval train sft / test sft Sequence length 1024 2048 Distributed setup DDP on 8 GPUs DDP on 4 GPUs Batch size 32 with gradient accumulation 4 32 with gradient accumulation 1 Training duration 9600 steps 2 epochs (3200 steps) Optimizer AdamW AdamW Learning rates base model: 3 × 10 −4
+
+memory layers: 6 × 10 −4
+
+memory bank: 6 × 10 −4
+
+base model: 3 × 10 −5
+
+memory layers: 1.5 × 10 −5
+
+memory bank: 5 × 10 −6
+
+Scheduler WSD, warmup 250 steps, min LR ratio 0.1, decay start at step 8160 Cosine, warmup 250 steps Optimization details weight decay 0.1, Adam β1 = 0 .9,
+
+β2 = 0 .95 , grad clip 1.0 weight decay 0.1, Adam β1 = 0 .9,
+
+β2 = 0 .95 , grad clip 1.0 Precision bf16 bf16 Checkpointing gradient checkpointing enabled gradient checkpointing enabled Initialization random initialization initialized from the pretrained MoC checkpoint 
+
+Table 7: Benchmark accuracy after pretraining (including backbone-only). Model MMLU ARC-C BoolQ OBQA Vanilla (iso-FLOP) 0.2690 0.3177 0.5713 0.3620 MoC 0.2787 0.3144 0.6187 0.3740 
+
+Vanilla (backbone-only) 0.2746 0.3311 0.5446 0.3340 strongly toward the IFT objective while keeping factual knowledge stable through the explicit bank, consis-tent with a division of labor between backbone adaptation and memory anchoring. 
+
+A.4.6 Compute and memory implications during post-training 
+
+Freezing the memory bank during IFT removes bank updates and reduces optimizer state and gradient memory for that component, which lowers VRAM requirements. In addition, increasing context length from 1024 to 2048 increases self-attention cost for all models. Under this longer-context setting, the benefit of freezing the bank is preserved while the dense baseline pays the full quadratic self-attention cost. This combination makes the memory approach attractive for heavier or longer post-training schedules. 
+
+A.5 Ablation studies and future work 
+
+This section lists ablations for Mixture of Chapters and outlines directions to clarify scaling, efficiency, and retention. 18 Table 8: MoC IFT benchmarks for bank update settings. IFT setting MMLU ARC-C BoolQ OBQA MoC (bank frozen) 0.2754 0.2843 0.6214 0.3540 MoC (bank 1/10 LR) ∗ 0.2752 0.2876 0.6211 0.3540 
+
+MoC (bank equal LR) 0.2753 0.2943 0.6211 0.3480  
+
+> ∗
+
+denotes the main setting reported above. 
+
+Ablation studies. 
+
+• Top-k routing sweep. Vary the number of routed chapters, e.g., k ∈ { 1, 2, 4, 8, 16 , 32 , 64 }, holding bank size fixed to map the quality–compute frontier. • Routing granularity and train/inference mismatch. Compare (i) sequence routing at train and inference (current), (ii) token routing at inference only, and (iii) token routing at train and inference (if feasible). • Shared chapters. Sweep the number of always-on shared chapters and mixing schemes: nshared ∈{0, 1, 2, 4, 8}.• Memory placement and sharing. Study where memory layers are inserted and whether the bank is shared across layers vs per-layer banks. • Router regularization. Sweep load-balancing / auxiliary routing losses (and any z-loss) to quantify utilization collapse vs quality tradeoffs. • Initialization. Ablate output-projection initialization (e.g., zero-init) and bank initialization scale to test stability and early training behavior. • Memory size and chapter geometry. Scale total memory tokens, number of chapters, and tokens-per-chapter T to separate “more chapters” from “longer chapters.” • Compression ablations. Evaluate quantized banks and low-rank factorization of bank/projections to trade expressiveness for capacity. • PEFT comparisons: LoRA vs memory adapters vs both. Compare LoRA-only, memory-adapter-only, and combined settings under matched trainable parameter budgets. 
+
+Future work. 
+
+• Scaling laws for learned memory. Extend pretraining beyond 9.6B tokens and sweep bank capacity to quantify how performance scales with memory under fixed compute. • Token-level routing with efficient kernels. Investigate kernels that avoid materializing large routed key tensors, enabling token routing during training without large memory overhead. • Dynamic and test-time updates. Add controlled write/update mechanisms to support continual ac-quisition and personalization while retaining the “freeze bank” benefits. • Interpretability and chapter-level editing. Analyze router selections for specialization, and test targeted chapter edits (zeroing, swapping, pruning) to localize knowledge. 19 • Hybrid memory: shared global + routed private. Explore explicit separation between a small shared global memory and a large routed bank, with different update schedules or learning rates. • Broader evaluations. Add tests for long-context generalization, factual recall, and retention under multiple sequential post-training stages. • Interpretability and analysis of memory usage. Analyze how memory is used across layers and time: (i) chapter selection statistics (entropy, sparsity, stability across prompts), (ii) per-layer re-liance on memory (attention mass to memory vs self-attn), (iii) chapter specialization (clustering chapters by the queries they serve or by input domains), and (iv) causal interventions such as ze-roing/swapping/pruning selected chapters or memory tokens to localize which knowledge is stored where. This can be paired with qualitative retrieval probes by decoding nearest-neighbor token pro-jections from memory to inspect what each chapter appears to represent. 20
