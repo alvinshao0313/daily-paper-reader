@@ -1,0 +1,504 @@
+Title: IsoQuant: Hardware-Aligned SO(4) Isoclinic Rotations for LLM KV Cache Compression
+
+URL Source: https://arxiv.org/pdf/2603.28430v1
+
+Published Time: Tue, 31 Mar 2026 02:07:16 GMT
+
+Number of Pages: 11
+
+Markdown Content:
+# IsoQuant: Hardware-Aligned SO(4) Isoclinic Rotations for LLM KV Cache Compression 
+
+## Zhongping Ji 
+
+Abstract 
+
+Orthogonal feature decorrelation is a useful primitive for low-bit online vector quantization, but the standard approach of applying a dense random orthogonal matrix incurs prohibitive O(d2) storage and compute. Recent work such as RotorQuant reduces this cost by replacing the global transform with blockwise 3D Clifford rotors. While effective, the resulting 3D partition is not naturally aligned with modern hardware, since transformer feature widths are typically powers of two and thus lead to awkward tails, irregular memory access, and limited local mixing. We propose IsoQuant , a blockwise rotation framework based on quaternion algebra and the isoclinic decomposition of SO (4). Each block of four coordinates is identified with a quaternion and transformed by the closed-form map T (v) = qLvq R parameterized by a pair of unit quaternions. This yields two main variants: 
+
+IsoQuant-Full , which realizes the full six degrees of freedom of SO (4), and IsoQuant-Fast , which retains a single isoclinic factor for lower overhead. The same framework also admits a lightweight 2D planar special case, which we treat as an auxiliary operating point rather than the primary method. At d = 128, IsoQuant-Full reduces forward rotation cost from approximately 2 ,408 FMAs in RotorQuant to 1 ,024, while IsoQuant-Fast reduces it further to 512. Across 18 fused CUDA benchmark settings spanning d ∈ { 128 , 256 , 512 }, bit widths {2, 3, 4}, and both FP16 and FP32 execution, IsoQuant-Full, IsoQuant-Fast, and the 2D special case achieve mean kernel-level speedups of 4 .49 ×, 4 .66 ×, and 4 .66 × over RotorQuant while maintaining comparable reconstruction MSE, with peak speedups above 6 ×. Our current validation is limited to the stage-1 quantize–dequantize path on synthetic normalized vectors; full end-to-end KV-cache evaluation on real model activations remains future work. Code: 
+
+https://github.com/ParaMind2025/isoquant .
+
+# 1 Introduction 
+
+KV-cache compression has emerged as a central systems bottleneck for long-context large language model inference. A core insight behind online vector quantization methods such as TurboQuant [ 1] is that decorrelating features before scalar quantization substantially improves rate–distortion behavior. In particular, a random orthogonal transform spreads information across coordinates, making per-coordinate Lloyd–Max quantization far more effective than quantization in the original basis. The main drawback is cost. For a head dimension d, a dense orthogonal transform requires O(d2) parameters and arithmetic, which is difficult to justify in latency-sensitive settings such as autoregressive decoding. RotorQuant [ 2]addresses this issue by replacing the dense transform with sparse blockwise rotations in the geometric algebra Cl(3 , 0). This preserves the qualitative benefit of local decorrelation while reducing complexity to linear in d.Despite this progress, the 3D block structure leaves performance on the table. First, it is not hardware aligned: common head dimensions such as 64, 128, and 256 are powers of two, so partitioning into triples creates awkward remainder handling and non-ideal memory layout. For example, d = 128 yields forty-two full 3D blocks plus one 2D tail. Second, a 3D rotation has only three intrinsic degrees of freedom, which limits how aggressively each local subspace can mix correlated coordinates. This paper studies a different operating point. We move from 3D Clifford blocks to 4D quaternion blocks and leverage the Lie-theoretic decomposition 
+
+so (4) ∼= su (2) ⊕ su (2) , (1) which implies that every 4D rotation can be represented by a pair of unit quaternions acting from the left and right. This yields a closed-form, low-overhead parameterization of SO (4) that is both mathematically clean and implementation-friendly. We therefore name the method IsoQuant , emphasizing the isoclinic structure underlying its blockwise SO (4) transform. 1
+
+> arXiv:2603.28430v1 [cs.LG] 30 Mar 2026
+
+Contributions. Our contributions are as follows. 1. We introduce IsoQuant , a 4D block rotation scheme for online vector quantization based on quaternion sandwich products. 2. We derive two practical 4D instantiations, IsoQuant-Full and IsoQuant-Fast , and show that the same framework also admits a lightweight 2D planar special case as an additional operating point. 3. We analyze why 4D blocks are attractive for systems deployment: they improve arithmetic efficiency, eliminate most boundary handling, and align naturally with SIMD and fused-kernel execution. 4. We provide a fused CUDA implementation and show, in fair kernel-level comparisons against RotorQuant fused CUDA kernels, that IsoQuant achieves consistent speedups while preserving reconstruction quality. 
+
+# 2 Related Work 
+
+Online vector quantization and KV-cache compression. TurboQuant [ 1] frames online vector quantization as a dense-rotation-plus-scalar-quantization pipeline and combines it with QJL residual correction [ 3]. RotorQuant [ 2]reduces the heavy dense transform by replacing it with sparse 3D Clifford rotors. Other KV-cache compression methods such as KIVI [ 4] and KVQuant [ 5] focus on calibration, asymmetric quantization, or hardware-aware packing rather than explicit geometric decorrelation. 
+
+Quaternion and geometric representations. Unit quaternions are a classical tool for representing rotations [ 6]. In machine learning, algebraically structured representations have appeared in equivariant models, geometric neural networks, and efficient transformations on structured features. RiemannFormer [ 7 ] provides a recent geometric treatment that explicitly discusses the isoclinic decomposition of SO (4) in the setting of curved-space attention. Our use of this structure is narrower and more systems-oriented: we exploit the same SO (4) factorization to design a cheap blockwise decorrelating transform for low-bit quantization. 
+
+# 3 Problem Setup 
+
+We consider the stage-1 mean-squared-error component of online vector quantization. Given an input vector x ∈ Rd,we seek an encoder E, scalar quantizer Q, and decoder D such that ˆx = D(Q(E(x))) (2) minimizes reconstruction error while keeping both parameter count and online compute small. As in prior work [1, 2], we factor the problem into three pieces: 1. an orthogonal or approximately orthogonal transform that decorrelates coordinates; 2. coordinate-wise scalar quantization in the transformed basis; 3. an inverse transform to reconstruct the vector. To stabilize the scalar quantizer, we additionally separate norm and direction. Writing 
+
+x = ρ ¯x, ρ = ∥x∥2, ∥¯x∥2 = 1 , (3) we quantize the normalized direction ¯x and store or transmit the norm ρ separately. This follows the implementation pattern used by efficient quantizers and keeps the transformed coordinates within a predictable dynamic range. 
+
+# 4 Quaternion and SO (4) Preliminaries 
+
+We begin by identifying each 4D block with a quaternion 
+
+v = x0 + x1i + x2j + x3k ∈ H, (4) where H denotes the quaternion algebra and i2 = j2 = k2 = ijk = −1 [6]. For 
+
+q = a + bi + cj + dk, (5) its quaternion conjugate is 
+
+q = a − bi − cj − dk. (6) 2Unit quaternions form the 3-sphere S3 and provide a nonsingular parameterization of rotational factors that will be central to our construction. The relevant geometric structure is the special orthogonal group in four dimensions. At the Lie-algebra level one has the classical decomposition 
+
+so (4) ∼= su (2) L ⊕ su (2) R, (7) which underlies the isoclinic decomposition of SO (4) discussed, for example, in RiemannFormer [ 7 ]. This splitting implies that every infinitesimal 4D rotation can be written as the sum of two commuting components. More precisely, if 
+
+X = XA + XB , XA ∈ su (2) L, XB ∈ su (2) R, (8) then [ XA, X B ] = 0, and therefore the corresponding group element factors as 
+
+R = exp( X) = exp( XA + XB ) = exp( XA) exp( XB ), (9) where the exponential map is given by exp : so (4) → SO (4) , X 7 → exp( X) = 
+
+> ∞
+
+X
+
+> k=0
+
+Xk
+
+k! . (10) This commuting factorization is the Lie-theoretic counterpart of the left/right isoclinic decomposition. 
+
+Proposition 1. Let qL, q R ∈ S3 be unit quaternions. Then the map 
+
+T (v) = qL v q R (11) 
+
+defines an orthogonal transformation of R4. Its inverse is 
+
+T −1(v) = qL v q R, (12) 
+
+and the pairs (qL, q R) and (−qL, −qR) induce the same element of SO (4) .Proof sketch. Quaternion multiplication by a unit quaternion preserves the Euclidean norm on H ∼= R4, both for left multiplication and for right multiplication by the conjugate. Hence the composition v 7 → qLvq R is norm-preserving and therefore orthogonal. The inverse follows immediately from associativity of quaternion multiplication together with qLqL = qRqR = 1. Finally, replacing both qL and qR by their negatives leaves the map unchanged because (−qL) v (−qR) = ( −qL) v (−qR) = qLvq R. (13) The left and right quaternion factors correspond to the left-isoclinic and right-isoclinic components, respectively. Hence a pair of unit quaternions provides a compact, closed-form parameterization of a general 4D rotation, up to the standard double-cover ambiguity. This parameterization is especially attractive for quantization because it realizes the full six degrees of freedom of SO (4) without ever requiring explicit storage of a dense 4 × 4 orthogonal matrix. 
+
+## 4.1 Block-Diagonal Rotations in SO (4 g)
+
+Let 
+
+g =
+
+ d
+
+4
+
+
+
+. (14) After zero padding when necessary, the input is naturally viewed as an element of R4g . In a fully dense formulation one would apply an unrestricted orthogonal transform in SO (4 g), which plays the role of a padded surrogate for the original d × d orthogonal rotation. IsoQuant instead restricts this transform to a structured Lie subgroup obtained from independent 4D rotational blocks. Formally, define the Lie subalgebra 
+
+g =
+
+> g
+
+M
+
+> i=1
+
+so (4) (i) ⊂ so (4 g). (15) 3Any element H ∈ g has block-diagonal form 
+
+H = diag( X1, X 2, . . . , X g ), (16) where each Xi ∈ so (4) and all off-diagonal blocks vanish. Since the exponential map preserves block-diagonal structure, one obtains exp( H) = diag(exp( X1), exp( X2), . . . , exp( Xg )) . (17) Because exp (Xi) ∈ SO (4) for each block, the resulting matrix exp (H) belongs to SO (4 g). The set of all such matrices forms an embedded Lie subgroup isomorphic to 
+
+SO (4) × SO (4) × · · · × SO (4) , (18) with g factors. In this sense, IsoQuant replaces a dense high-dimensional orthogonal transform by a block-diagonal subgroup of SO (4 g) composed of local SO (4) actions. The matrix-exponential viewpoint is primarily conceptual: it makes clear which subgroup of SO (4 g) is being used and how this subgroup arises from a direct-sum Lie algebra. In the actual computation, however, we do not construct the skew-symmetric blocks Xi or evaluate the corresponding matrix exponentials. Each local SO (4) action is instead realized more efficiently by a quaternion pair ( q(i) 
+
+> L
+
+, q (i) 
+
+> R
+
+), which yields the same block rotation in closed form while avoiding dense matrix materialization. 
+
+# 5 Method: IsoQuant 
+
+## 5.1 Blockwise 4D Rotation 
+
+We now instantiate the subgroup construction above as a stage-1 quantization transform. Let ¯x ∈ Rd denote the normalized input direction. We partition ¯ x into 
+
+g =
+
+ d
+
+4
+
+
+
+(19) blocks, ¯x =
+
+h
+
+v(1) , v (2) , . . . , v (g)i
+
+, (20) where each v(i) ∈ R4 is identified with an element of H. If d is not divisible by 4, the final block is zero padded, so the full transformed object lies in R4g .From the perspective of Section 4.1, the encoder acts on the padded vector by an element of the block-diagonal subgroup ( SO (4)) g ⊂ SO (4 g). The algorithm does not materialize this action as a dense matrix. Instead, each local 
+
+SO (4) factor is represented by one or two unit quaternions and applied directly in closed form. Accordingly, each block undergoes the sequence 
+
+v(i) 7 → ˜v(i) 7 → ˆv(i) 7 → v(i)rec . (21) That is, one first applies a local SO (4) rotation, then performs coordinate-wise scalar quantization in the rotated basis, and finally applies the inverse local rotation. The recovered blocks are concatenated and the original norm ρ
+
+is restored. 
+
+## 5.2 IsoQuant-Full 
+
+IsoQuant-Full uses the complete double-sided action of SO (4). For block i, we maintain a pair of unit quaternions (q(i) 
+
+> L
+
+, q (i) 
+
+> R
+
+) and compute ˜v(i) = q(i) 
+
+> L
+
+v(i)q(i) 
+
+> R
+
+, (22) ˆv(i) = Q
+
+
+
+˜v(i)
+
+, (23) 
+
+v(i)rec = q(i) 
+
+> L
+
+ˆv(i)q(i) 
+
+> R
+
+. (24) This uses the full six-dimensional rotational freedom of SO (4) and offers the strongest local mixing. 45.3 IsoQuant-Fast 
+
+IsoQuant-Fast restricts the transform to a single isoclinic factor: ˜v(i) = q(i) 
+
+> L
+
+v(i), (25) ˆv(i) = Q
+
+
+
+˜v(i)
+
+, (26) 
+
+v(i)rec = q(i) 
+
+> L
+
+ˆv(i). (27) Geometrically, this corresponds to a 3-dimensional subgroup of SO (4) isomorphic to SO (3). It sacrifices expressivity for lower parameter count, lower arithmetic cost, and simpler kernels. 
+
+## 5.4 A Lightweight 2D Special Case 
+
+Although IsoQuant is fundamentally motivated by blockwise SO (4) structure, the same implementation philosophy admits a degenerate planar special case on coordinate pairs. We partition the normalized input into 2D blocks 
+
+u(j) ∈ R2, (28) and apply a standard planar rotation ˜u(j) = R(θ(j))u(j), (29) ˆu(j) = Q
+
+
+
+˜u(j)
+
+, (30) 
+
+u(j)rec = R(−θ(j))ˆ u(j), (31) where 
+
+R(θ) = 
+
+cos θ − sin θ
+
+sin θ cos θ
+
+
+
+. (32) We do not present this 2D case as a separate method family; rather, we treat it as an extremely lightweight IsoQuant operating point. Its local mixing capacity is weaker than that of the 4D formulations, so IsoQuant-Full remains the primary and most expressive variant. Nevertheless, the 2D special case is useful experimentally because it clarifies how much accuracy is lost, if any, when blockwise rotation cost is pushed even lower. 
+
+## 5.5 Parameterization and Learning 
+
+To avoid constrained optimization on the manifold directly, we parameterize each unit quaternion by an unconstrained vector and normalize it on the fly: 
+
+q(i) 
+
+> L
+
+= u(i)
+
+> L
+
+∥u(i) 
+
+> L
+
+∥2
+
+, q(i) 
+
+> R
+
+= u(i)
+
+> R
+
+∥u(i) 
+
+> R
+
+∥2
+
+, (33) where u(i) 
+
+> L
+
+, u (i) 
+
+> R
+
+∈ R4 are free parameters. This keeps optimization in Euclidean space while enforcing the unit-quaternion constraint implicitly in the computation graph. A practical lightweight variant is to sample the initial 
+
+u vectors from a Gaussian distribution and keep them fixed, yielding random block rotations analogous to the randomized transform used by TurboQuant. When randomized rotations are desired, we sample from the Haar distribution on the corresponding rotation group: this reduces to uniform angle sampling for the 2D special case and to Gaussian-normalize sampling on S3 for the quaternion factors used in the 4D variants. 
+
+## 5.6 Quantization Pipeline 
+
+Algorithm 1 summarizes the stage-1 pipeline. 5Algorithm 1 IsoQuant Stage-1 Quantization 
+
+Require: Input vector x ∈ Rd, scalar quantizer Q, mode ∈ { Full , Fast , 2D } 
+
+> 1:
+
+Compute norm ρ ← ∥ x∥2 and normalized vector ¯ x ← x/ max( ρ, ε ) 
+
+> 2:
+
+Partition ¯ x into zero-padded local blocks according to the mode (4D for Full /Fast , 2D for 2D ) 
+
+> 3:
+
+for i = 1 to g do  
+
+> 4:
+
+if mode = Full then  
+
+> 5:
+
+˜v(i) ← q(i) 
+
+> L
+
+v(i)q(i) 
+
+> R
+> 6:
+
+ˆv(i) ← Q(˜ v(i)) 
+
+> 7:
+
+v(i)rec ← q(i) 
+
+> L
+
+ˆv(i)q(i) 
+
+> R
+> 8:
+
+else if mode = Fast then  
+
+> 9:
+
+˜v(i) ← q(i) 
+
+> L
+
+v(i) 
+
+> 10:
+
+ˆv(i) ← Q(˜ v(i)) 
+
+> 11:
+
+v(i)rec ← q(i) 
+
+> L
+
+ˆv(i) 
+
+> 12:
+
+else  
+
+> 13:
+
+˜u(i) ← R(θ(i))u(i) 
+
+> 14:
+
+ˆu(i) ← Q(˜ u(i)) 
+
+> 15:
+
+u(i)rec ← R(−θ(i))ˆ u(i) 
+
+> 16:
+
+end if  
+
+> 17:
+
+end for  
+
+> 18:
+
+Concatenate reconstructed blocks and drop padded coordinates  
+
+> 19:
+
+return ˆx ← ρ times the concatenated reconstructed blocks 
+
+## 5.7 Probabilistic Intuition for Random Subspace Rotations 
+
+A natural question is why low-dimensional random block rotations can still improve quantization in a high-dimensional vector. The key point is that quantization does not require full global mixing; it often suffices to isotropize energy locally within each block. Let x(b) ∈ Rk denote a fixed block with radius rb = ∥x(b)∥2, and let Rb ∼ Haar (SO (k)) be a Haar-distributed random rotation. Then 
+
+y(b) = Rbx(b) (34) is distributed as a point with fixed norm rb and uniformly random direction on the sphere Sk−1. Hence, for any coordinate j,
+
+E[y(b) 
+
+> j
+
+| x(b)] = 0 , E[( y(b) 
+
+> j
+
+)2 | x(b)] = r2
+
+> b
+
+k . (35) Thus, random block rotation redistributes the energy of a fixed block evenly across coordinates in expectation. More can be said about the marginal law of each rotated coordinate. If u ∼ Unif (Sk−1), then y(b) = rbu, and the marginal density of one normalized coordinate z = uj is 
+
+fk(z) ∝ (1 − z2) k−32 , |z| ≤ 1. (36) This highlights an important difference between k = 2 and k = 4. For k = 2, the marginal follows an arcsine law, 
+
+f2(z) = 1
+
+π√1 − z2 , (37) which places relatively more mass near the extremes. For k = 4, the marginal becomes 
+
+f4(z) = 2
+
+π
+
+p1 − z2, (38) which is more concentrated near the center and vanishes at the boundaries. Consequently, the 4D case is structurally more favorable for scalar quantization, since individual coordinates are less likely to attain extreme values. A complementary covariance-level view leads to the same intuition. Let x ∈ Rd have covariance Σ, partitioned into 
+
+k × k blocks, and let 
+
+R = diag( R1, . . . , R m), Ri ∼ Haar( SO (k)) (39) 6Table 1: Forward rotation complexity at d = 128. Method Block Structure Params FMAs TurboQuant [1] dense 128 × 128 16 ,384 16 ,384 RotorQuant [2] 43 × 3D blocks 172 ≈ 2,408 IsoQuant-2D 64 × 2D blocks 128 ≈ 256 IsoQuant-Full 32 × 4D blocks 256 1,024 IsoQuant-Fast 32 × 4D blocks 128 512 be an independent block-diagonal random rotation. Then 
+
+ER[RΣR⊤] = diag 
+
+ tr(Σ 11 )
+
+k Ik, . . . , tr(Σ mm )
+
+k Ik
+
+
+
+. (40) Therefore, each block becomes isotropic in expectation, while cross-block correlations vanish in expectation under independent random rotations. For any fixed realization of R, cross-block correlation energy is not literally removed; rather, its directions are scrambled, which mitigates worst-case structured dependencies seen by coordinate-wise quantization. 
+
+# 6 Complexity Analysis 
+
+A quaternion multiplication uses 16 scalar multiplications and 12 scalar additions. To match common systems reporting conventions, we count this as approximately 16 fused multiply-add operations. For d = 128, the forward rotation cost becomes straightforward to compare. Table 1 summarizes the forward stage-1 rotation cost at d = 128. The comparison highlights three regimes. IsoQuant-Full uses somewhat more parameters than RotorQuant because each block stores two quaternions, but it still remains tiny relative to dense rotations and cuts rotation arithmetic by more than 2 ×. IsoQuant-Fast goes further and is cheaper than RotorQuant in both parameters and compute. The 2D special case is cheaper still, but also has the weakest local mixing and should therefore be viewed as a low-cost operating point rather than the main target of the paper. More generally, if g4 = ⌈d/ 4⌉ and g2 = ⌈d/ 2⌉, then the parameter count is 8 g4 for Full, 4 g4 for Fast, and 2 g2 for the 2D special case. The forward rotation cost is 32 g4 FMAs for Full, 16 g4 FMAs for Fast, and approximately 4 g2
+
+FMAs for the 2D case. All variants therefore scale linearly in d.
+
+# 7 Systems Considerations 
+
+## 7.1 Why 4D Blocks Are Hardware Friendly 
+
+The choice of block size is not purely algebraic. It directly shapes memory layout, vectorization efficiency, and kernel fusion opportunities. 
+
+Alignment. Most transformer head dimensions are powers of two. A 4D partition therefore avoids the pathological tails induced by 3D chunking in almost every common setting. At d = 128, IsoQuant uses exactly 32 blocks with no remainder, whereas a 3D design requires 42 full blocks plus a leftover fragment. 
+
+Vectorization. Four-wide blocks fit naturally into SIMD-friendly load and store patterns such as float4 . This reduces boundary checks and helps both CPU SIMD backends and GPU kernels maintain regular control flow. 
+
+Kernel fusion. The per-block transform is a closed-form sequence of one or two quaternion products, coordinate-wise scalar quantization, and an inverse transform. This structure is especially suitable for fused kernels in online quantization pipelines because the entire block can often remain in registers from input load through output store. 77.2 Prototype Mapping 
+
+Our current prototype follows exactly this design pattern: it packs feature vectors into 4D blocks, applies either double-sided or single-sided quaternion rotation, performs scalar Lloyd-Max quantization, and reconstructs the result with a fused CUDA kernel. In addition, we include a lightweight 2D planar special case that serves as an even cheaper operating point within the same implementation family. We built a benchmark harness that directly compares these fused IsoQuant kernels against the fused RotorQuant CUDA kernel under matched tensor shapes, bit widths, and data types. 
+
+# 8 Compatibility with Residual Correction 
+
+IsoQuant is intended as a replacement for the stage-1 decorrelation transform, not as a rejection of later residual correction. In two-stage pipelines such as TurboQuant [ 1], one can keep the residual inner-product correction unchanged: 
+
+r = x − ˆxmse . (41) The residual can still be projected with a quantized Johnson-Lindenstrauss transform [ 3] or a related low-bit correction mechanism. In this sense, IsoQuant is complementary to existing stage-2 estimators: it reduces the cost of the orthogonalization step while remaining compatible with unbiased inner-product correction. 
+
+# 9 Experimental Results 
+
+## 9.1 Evaluation Protocol 
+
+This section evaluates the stage-1 quantize–dequantize path of IsoQuant. The purpose is to isolate the contribution of the decorrelation transform itself before introducing stage-2 residual correction or downstream task effects. We therefore focus on two directly attributable quantities: reconstruction MSE on normalized synthetic vectors and fused CUDA kernel latency for the blockwise stage-1 transform. All experiments in this section use synthetic normalized vectors with batch size 8192. We evaluate all combinations of 
+
+d ∈ { 128 , 256 , 512 }, b ∈ { 2, 3, 4}, dtype ∈ { fp16 , fp32 }, (42) for a total of 18 fused-kernel benchmark settings. We focus on these dimensions because they cover common per-head or grouped-KV widths in practical LLM deployments, while avoiding the large-dimension kernel-specialization regime that would otherwise dominate the discussion. On the IsoQuant side, we evaluate IsoQuant-Full, IsoQuant-Fast, and the lightweight IsoQuant-2D special case. On the baseline side, we compare against RotorQuant [ 2], including its fused CUDA kernel in rotor fused kernel.cu . TurboQuant [ 1] is used as a conceptual dense-rotation reference in the complexity analysis, not as a runtime baseline. All fused CUDA benchmarks were conducted on a single NVIDIA RTX 4090 GPU. For every configuration, RotorQuant and IsoQuant are benchmarked under the same tensor shape, bit width, and execution dtype. In addition to kernel latency, we report reconstruction MSE, parameter count, and estimated forward arithmetic cost. 
+
+## 9.2 Main Results 
+
+Table 2 reports the full fused CUDA sweep. The main takeaway is that the entire IsoQuant family is consistently faster than RotorQuant under an apples-to-apples kernel comparison while preserving essentially identical reconstruction quality. Across all 18 settings, IsoQuant-Full achieves an average speedup of 4 .49 × over RotorQuant fused CUDA, while IsoQuant-Fast and the lightweight IsoQuant-2D special case achieve nearly identical averages of 4 .66 × and 4.66 ×, respectively. The strongest settings occur in low-bit and medium-width regimes, where speedups exceed 6 ×
+
+while MSE remains unchanged up to the reported precision. The quality story is equally encouraging. In every tested setting, the MSE of all IsoQuant variants is either indistinguishable from RotorQuant or slightly lower. For example, in the largest tested FP32 configuration (d = 512 , b = 4), all three IsoQuant variants remain at the same numerical scale as RotorQuant, and in many settings the printed MSE values are exactly identical. We therefore do not observe a tradeoff in which IsoQuant wins speed by degrading reconstruction quality. 8Table 2: Fused CUDA comparisons against RotorQuant on normalized synthetic vectors with batch size 8192. Latencies are in μs.                                                                                                                                                                      
+
+> dtype bits dim RotorQuant IsoQuant -Full IsoQuant -Fast IsoQuant -2D Full speedup Fast speedup 2D speedup
+> fp16 2128 32.7 8.5 8.2 8.5 3.86 3.98 3.85
+> fp16 3128 36.4 6.2 6.1 6.2 5.92 6.00 5.92
+> fp16 4128 44.2 9.6 9.4 9.4 4.62 4.71 4.70
+> fp16 2256 32.6 8.8 8.3 8.4 3.72 3.92 3.89
+> fp16 3256 36.8 9.7 9.5 9.2 3.80 3.88 3.99
+> fp16 4256 46.7 8.1 7.5 7.5 5.76 6.24 6.20
+> fp16 2512 36.0 8.4 8.5 8.3 4.27 4.23 4.31
+> fp16 3512 39.9 9.9 8.4 9.6 4.05 4.73 4.15
+> fp16 4512 50.4 13.9 12.5 13.4 3.63 4.02 3.77
+> fp32 2128 33.4 7.3 7.1 7.0 4.60 4.68 4.77
+> fp32 3128 35.1 6.9 7.6 7.1 5.07 4.59 4.91
+> fp32 4128 44.7 8.2 8.2 8.3 5.49 5.48 5.40
+> fp32 2256 33.8 7.4 7.2 7.2 4.59 4.66 4.66
+> fp32 3256 37.9 7.2 7.0 6.9 5.29 5.45 5.47
+> fp32 4256 47.9 8.1 7.6 7.5 5.92 6.31 6.39
+> fp32 2512 37.8 12.1 11.4 10.5 3.11 3.32 3.60
+> fp32 3512 44.1 12.5 11.5 11.0 3.54 3.85 4.02
+> fp32 4512 52.9 14.8 13.5 13.9 3.56 3.91 3.79
+
+## 9.3 Result Interpretation 
+
+The full sweep reveals three robust trends. 1. IsoQuant-Fast and IsoQuant-2D are the lowest-latency operating points. Their mean speedups are nearly identical, and each variant attains the best latency in a subset of the tested settings. We therefore view the 2D case as a useful lightweight special case rather than a replacement for the 4D family. 2. The gain is strong in both FP16 and FP32. Averaged over all tested FP16 settings, IsoQuant-Full, IsoQuant-Fast, and IsoQuant-2D achieve 4 .40 ×, 4 .63 ×, and 4 .53 × speedups, respectively; the corresponding FP32 averages are 4 .57 ×, 4 .69 ×, and 4 .78 ×.3. Low-bit and medium-width settings are especially favorable. Several configurations in the ( d = 128 , 256) range exceed 6 × speedup, showing that the compact blockwise formulations amortize per-block overhead particularly well in practical KV-cache regimes. These trends are consistent with the systems argument developed earlier. Compared with RotorQuant’s 3D Clifford blocks, IsoQuant avoids the expansion to an 8-component multivector representation, keeps the per-block state smaller, and aligns naturally with two-wide or four-wide memory and register organization. The result is not a change in asymptotic complexity—all methods remain linear in d—but a real and repeatable reduction in constant factors. 
+
+## 9.4 Module-Level vs Kernel-Level Measurements 
+
+In addition to fused-kernel measurements, we also benchmarked higher-level PyTorch module paths. There, the apparent speedups can reach roughly 4 ×–10 ×, because the IsoQuant prototype currently enjoys a more streamlined execution path than the baseline RotorQuant module. However, we regard the fused CUDA comparison as the fairest measure of method-intrinsic systems advantage. The fused results therefore serve as our primary hardware claim, while the larger module-level gains should be interpreted as an implementation-dependent systems outcome. 
+
+## 9.5 Ablation Coverage 
+
+Table 3 summarizes the experimental axes covered by the current draft. The completed experiments already establish a strong stage-1 result across rotation type, bit width, and backend, but they do not yet include residual correction or downstream KV-cache task metrics. 9Table 3: Ablation axes. Completed settings in this work are marked by checkmarks. Axis Values Rotation type Full, Fast, 2D special case ✓
+
+Bit width 2, 3, 4 bits ✓
+
+Block size 3D, 4D, optionally 8D grouped variants Quaternion parameters random fixed ✓, learned normalized Residual correction off ✓, QJL-style correction on Deployment backend PyTorch ✓, fused CUDA ✓
+
+## 9.6 What Remains for a Full Submission 
+
+The current experiments establish a strong stage-1 result, but a full submission should still add downstream KV-cache metrics: 1. integration with a stage-2 residual correction module such as QJL; 2. attention-logit preservation and inner-product error under the complete two-stage pipeline; 3. retrieval and perplexity experiments on real KV tensors extracted from deployed LLMs. These follow naturally from the present implementation because IsoQuant only replaces the stage-1 transform and remains compatible with the same residual correction machinery used by TurboQuant and RotorQuant. 
+
+# 10 Limitations and Future Work 
+
+IsoQuant is not a full solution by itself. 1. Block locality. Like other block-diagonal transforms, it does not mix information across blocks, so global correlations remain unaddressed. 2. Evaluation gap. This draft now includes fused CUDA benchmarks and reconstruction experiments, but the final conference version still needs end-to-end KV-cache validation on real models and tasks. 3. Learning dynamics. Although normalized quaternion parameters are simple to optimize, the relative value of learned versus random rotations remains an empirical question. 4. Stage-2 interaction. The best coupling between 4D block decorrelation and residual correction may depend on the downstream attention estimator. Promising next steps include hierarchical cross-block mixing, jointly learned codebooks and quaternion parameters, and specialized kernels for fused KV-cache compression during autoregressive decoding. 
+
+# 11 Conclusion 
+
+IsoQuant replaces awkward 3D block rotations with a hardware-aligned 4D quaternion formulation grounded in the isoclinic decomposition of SO (4). The resulting design retains the spirit of blockwise decorrelation while offering stronger local mixing, cleaner memory alignment, and lower arithmetic cost. Our fused CUDA experiments on practical dimensions d ∈ { 128 , 256 , 512 } show that this design advantage is measurable in practice: across 18 matched settings, IsoQuant-Full, IsoQuant-Fast, and the lightweight 2D special case deliver average speedups of 4.49 ×, 4 .66 ×, and 4 .66 × over RotorQuant fused CUDA while preserving essentially identical reconstruction MSE. We therefore view the 2D case as a useful low-cost operating point, while the full 4D construction remains the primary and most expressive form of the method. These results make a strong case that blockwise isoclinic rotations are a compelling stage-1 replacement for online vector quantization, and they motivate the next step of integrating the method with residual correction and full KV-cache evaluation. An additional advantage of quaternion-pair parameterization is that it admits smooth interpolation on the underlying rotation manifold, which may be useful for shared or adaptive block rotations in future work. 
+
+# References 
+
+[1] A. Zandieh, M. Daliri, M. Hadian, and V. Mirrokni. TurboQuant: Online vector quantization with near-optimal distortion rate. In International Conference on Learning Representations , 2026. 10 [2] J. D. Pope. RotorQuant: Clifford algebra vector quantization for LLM KV cache compression. 2026. https: //www.scrya.com/rotorquant/ . Code: https://github.com/scrya-com/rotorquant .[3] A. Zandieh, M. Daliri, and I. Han. QJL: 1-bit quantized JL transform for KV cache quantization with zero overhead. arXiv preprint arXiv:2406.03482 , 2024. [4] Z. Liu, J. Yuan, H. Jin, S. Zhong, Z. Xu, V. Braverman, B. Chen, and X. Hu. KIVI: A tuning-free asymmetric 2bit quantization for KV cache. arXiv preprint arXiv:2402.02750 , 2024. [5] C. Hooper, S. Kim, H. Mohammadzadeh, M. W. Mahoney, Y. S. Shao, K. Keutzer, and A. Gholami. KVQuant: Towards 10 million context length LLM inference with KV cache quantization. arXiv preprint arXiv:2401.18079 ,2024. [6] J. B. Kuipers. Quaternions and Rotation Sequences . Princeton University Press, 1999. [7] Z. Ji. RiemannFormer: A framework for attention in curved spaces. arXiv preprint arXiv:2506.07405 , 2025. 11

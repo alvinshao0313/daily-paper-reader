@@ -1,0 +1,610 @@
+Title: From Inference Routing to Agent Orchestration: Declarative Policy Compilation with Cross-Layer Verification
+
+URL Source: https://arxiv.org/pdf/2603.27299v1
+
+Published Time: Tue, 31 Mar 2026 00:50:46 GMT
+
+Number of Pages: 28
+
+Markdown Content:
+# From Inference Routing to Agent Orchestration 
+
+Declarative Policy Compilation with Cross-Layer Verification 
+
+Huamin Chen 1 Xunzhuo Liu 1 Bowei He 2,∗ Xue Liu 1,2,3,4
+
+> 1
+
+vLLM Semantic Router Project, 2MBZUAI, 3McGill University, 4Mila, ∗Corresponding author 
+
+Abstract. The Semantic Router DSL is a non-Turing-complete policy language deployed in production for per-request LLM inference routing: content signals (embedding similarity, PII detection, jailbreak scoring) feed into weighted projections and priority-ordered decision trees that select a model, enforce privacy policies, and produce structured audit traces—all from a single declarative source file. Prior work has established conflict-free compilation for probabilistic predicates and positioned the DSL within the Workload–Router–Pool inference architecture. This paper extends the same language from stateless, per-request routing to stateful, multi-step agent workflows—the full path from inference gateway to agent orchestration to infrastructure deployment. We propose declarative policy compilation : the DSL compiler emits verified decision nodes for orchestration frameworks (LangGraph), Kubernetes artifacts (NetworkPolicy, Sandbox CRD, ConfigMap), YANG/NETCONF payloads, and protocol-boundary gates (MCP, A2A)—all from the same .sr source. Because the language is non-Turing-complete, the compiler adds guarantees that complement each target’s own checks: exhaustive routing, conflict-free branching, referential integrity across deployment artifacts, and audit traces structurally coupled to the decision logic. Because signal definitions are shared across all targets, a threshold change propagates from inference gateway to agent gate to infrastructure artifact in one compilation step—eliminating the cross-team coordination that is the primary source of policy drift. We ground the approach in four pillars—auditability, cost efficiency, verifiability, and tunability—and identify the precise verification boundary at each layer. A critical analysis examines each claim, identifies necessary caveats, and characterizes the conditions under which the unified policy approach provides the most value. 
+
+Date: March 2026 SEMANTIC ROUTER 
+
+## 1 Introduction 
+
+The Semantic Router DSL is a non-Turing-complete policy language that governs per-request LLM inference routing in production. A routing policy declares content Signal s—embedding similarity, PII classifiers, jailbreak detectors, keyword matchers—that feed into weighted projections (composite scores mapped to discrete bands via thresholds), which in turn feed into priority-ordered decision trees 
+
+that select a model backend. The compiler emits a YAML routing configuration consumed by the inference gateway, which evaluates the policy on every request, producing a fully traceable routing decision before any model call occurs (Chen et al., 2026a). 1
+
+> arXiv:2603.27299v1 [cs.LG] 28 Mar 2026
+
+Three prior papers establish the DSL’s foundations. Transparent Discrete Networks (Chen et al., 2026a) shows that the DSL’s signals–projections–decisions pipeline is isomorphic to a discrete feedforward network whose parameters are analytically optimizable from execution traces—tuning is symbolic program transformation, not gradient descent. ProbPol (Liu et al., 2026) formalizes conflict detection for policies whose conditions are probabilistic ML signals, introducing a three-level decidability hierarchy and Voronoi normalization via temperature-scaled softmax to eliminate co-firing. The Workload–Router– Pool architecture (WRP; Chen et al., 2026b) positions the DSL as the Router pillar’s policy language within the full LLM inference optimization space. All three papers treat the DSL as a stateless, per-request decision function : a request arrives, signals fire, a model is selected, and the decision is traced. Yet LLM-powered applications are increasingly multi-step agent workflows : a user request triggers a chain of model calls, tool invocations via the Model Context Protocol (MCP; Anthropic, 2024), delegations to other agents via Agent2Agent (A2A; Google, 2025), and external API calls—each step carrying its own cost, latency, safety, and compliance implications. Frameworks such as LangGraph (LangChain, Inc., 2024), Temporal (Temporal Technologies, 2024), and CrewAI (CrewAI, 2024) orchestrate these workflows by managing state, control flow, and fault tolerance. These orchestration frameworks excel at their job—state management, fault tolerance, control flow—but 
+
+static analysis of the policy decisions embedded in each step (which model to call, whether a tool invocation is safe, whether routing logic is exhaustive) is orthogonal to orchestration and currently left to ad-hoc Python functions. This paper asks: can the same DSL that already governs per-request inference routing extend to multi-step agent workflows, and if so, what does a unified policy language across the full stack provide that separate, ad-hoc implementations cannot? 
+
+The answer is a multi-target compiler . The DSL remains a policy language—it evaluates signals and returns decisions—while orchestration frameworks handle step sequencing, retries, and state. What changes is the compilation target : the same .sr source that today emits YAML routing configuration for the inference gateway now also emits verified LangGraph decision nodes, OpenClaw gateway policy bundles, Kubernetes deployment artifacts (NetworkPolicy, Sandbox CRD, ConfigMap), YANG/NETCONF payloads, and protocol-boundary gates for MCP and A2A. A threshold change in the DSL source propagates to every target on recompilation—the property that is hardest to maintain when each layer is coded independently. This framing yields four concrete contributions: 
+
+C1. A multi-target compilation from DSL constructs ( Signal , Decision_Tree , Signal_Group ) to four target layers: inference routing, orchestration decision nodes, protocol gates, and infrastructure artifacts (§3). 
+
+C2. A four-pillar analysis —auditability, cost efficiency, verifiability, tunability—showing that the guar-antees established for inference routing extend to agent workflows with explicit boundaries on what each pillar covers (§4). 
+
+C3. A complementarity argument showing how a single DSL source adds a consistent policy layer across the agent–inference–tool boundary (§5), with the same signal definitions governing all three. 
+
+C4. A critical analysis that examines each claim against anticipated objections, identifies necessary caveats, and characterizes when the overhead is justified (§7). Figure 1 summarizes the architecture. The inference routing layer (top) is the established deployment; the agent, protocol, and infrastructure layers are the extensions proposed in this paper. A single .sr 
+
+source file generates artifacts for all four layers, with cross-layer consistency enforced by the compiler. 2Single .sr source 
+
+> signals, thresholds,
+
+trees, networks, agents 
+
+Inference routing (Semantic Router) YAML config, model selection, trace API 
+
+Agent orchestration (LangGraph / Open-Claw) Safety gates, intent routing, tool authz 
+
+Protocol boundaries (MCP / A2A / AP2) Content-aware gating at call boundaries 
+
+Infrastructure (Kubernetes / YANG) NetworkPolicy, Sandbox CRD, NETCONF 
+
+> deployed
+> this paper
+> this paper
+> this paper
+
+Figure 1 End-to-end compilation targets from a single DSL source. Inference routing is the established deployment; this paper extends the same language to agent orchestration, protocol boundaries, and infrastructure artifacts. Signal definitions, thresholds, and verification guarantees are shared across all targets; a change in one DSL parameter propagates to every layer on recompilation. 
+
+## 2 Background 
+
+2.1 The Semantic Router DSL 
+
+The DSL is a non-Turing-complete policy language with five core block types: Signal (a probabilistic ML detector returning a score in [0 , 1] , thresholded to Boolean), Route (a priority-ordered rule with a 
+
+When clause composing signals via And /Or /Not ), Backend (a model or action target), Plugin 
+
+(a middleware), and Global (default settings). Two additional constructs address the probabilistic nature of signals: Signal_Group (softmax normalization over a set of signals to guarantee at most one fires) and Decision_Tree (a tree of If /Else branches compiled as a Firewall Decision Diagram). The language is deliberately constrained: no mutable state, no side effects, no loops, no recursion, finite typed signal space. This restriction is what enables static analysis. The design follows the same philosophy as NetKAT (Anderson et al., 2014): a domain-specific algebra whose restricted expressiveness admits decidable verification. The compiler emits multiple targets from a single source. The established target is YAML routing configuration consumed by the Semantic Router inference gateway, where the DSL governs per-request model selection, privacy routing, and confidence-based model escalation (Chen et al., 2026a). Additional targets include Kubernetes CRDs and Helm values. This paper proposes extending the compiler to emit decision nodes for orchestration frameworks, protocol-boundary gates, and YANG/NETCONF payloads—reusing the same signal definitions and verification guarantees that are already validated at the inference routing layer. 
+
+2.2 Orchestration Frameworks 
+
+Agent orchestration takes two architectural forms. Graph-based frameworks such as LangGraph (LangChain, Inc., 2024), Temporal (Temporal Technologies, 2024), and CrewAI (CrewAI, 2024) model a workflow as a directed graph of nodes (computation steps) connected by edges (control flow). State flows through the graph as a typed record; routing decisions are expressed as conditional edges : a user-defined function inspects the updated state and selects the next node. Gateway-based platforms such as OpenClaw (OpenClaw Contributors, 2025) take a different approach: a central gateway 3Table 1 Complementary checks performed by orchestration compilers and the DSL compiler. Each focuses on its own concern.             
+
+> Property Orchestration DSL
+> Graph structure
+> Node connectivity ✓
+> Edge targets exist ✓
+> State schema validation ✓
+> Routing semantics
+> Routing exhaustiveness ✓
+> Branch conflict detection ✓∗
+> Dead branch detection ✓∗
+> Signal co-firing prevention ✓
+> Referential integrity ✓
+> Cross-artifact consistency ✓
+> Structured audit traces ✓
+> ∗Decidable for crisp and geometric signals; empirical only for classifiers.
+
+routes inbound messages to isolated agents via a configuration-driven binding table, with tool access, sandboxing, and session policies declared in JSON configuration and enforced by plugin hooks. The agent’s internal loop (an embedded coding agent runtime) is LLM-driven, but host-level policy—which tools are available, which channels are accepted, how sandboxing is applied—is static and declarative. In both forms, the framework validates its own structural concerns: graph-based compilers check node reachability and schema consistency; gateway platforms validate binding tables and tool profiles. Semantic properties of the policy logic —exhaustiveness, conflict-freedom, cross-gate consistency—fall outside the orchestration layer in both cases. Table 1 illustrates how the DSL compiler contributes a complementary set of semantic checks. 
+
+2.3 Opportunities for a Policy Layer 
+
+The Semantic Router already provides a full policy layer for single-request inference: content signals evaluate the request, projections aggregate signal scores, and a priority-ordered decision tree selects the model backend (Chen et al., 2026a). In multi-step workflows, the same policy concerns recur at every step —but each step is currently coded independently. Three areas rely on ad-hoc application code where the DSL’s established inference-routing machinery can help: 1. Agent → Inference. Agent frameworks typically assign a fixed model per node. The DSL already performs per-request content-aware model selection at the inference gateway; compiling the same policy into an agent workflow’s conditional edges brings that capability to per-step selection—e.g., routing a simple summarization step to a 4B model and a complex reasoning step to a 70B model within the same workflow. 2. Agent → Tool calling. Policy systems like OPA (Styra, Inc., 2024) and Cedar (Amazon Web Services, 2023) excel at identity-based and structural authorization ( who may call which tool). A complementary content-aware layer can evaluate what the call contains (e.g., PII in the payload) before forwarding—the same signal definitions used for inference safety gates, now applied at tool-call boundaries. 3. Inference → Tool calling. A safety gate that evaluates the user’s input is a valuable first line of defense. An additional gate on the LLM’s proposed tool call can defend against indirect prompt injection (OWASP Foundation, 2025), where malicious content enters via tool responses rather than user input. 4DSL source 
+
+> policy.sr
+
+Compiler 
+
+Inference 
+
+> YAML config
+
+Orchestration 
+
+> LangGraph OpenClaw
+
+Protocols 
+
+> MCP / A2A gates
+
+Infrastructure     
+
+> K8s / YANG
+> deployed §3.3 §3.4 §3.5
+> Figure 2 Multi-target compilation. A single DSL source emits artifacts for four target classes. Cross-target consistency (same thresholds, same source hash) is enforced by the compiler.
+
+The key insight is that these are not new policy problems requiring new signal definitions—they are the same content-aware decisions (jailbreak, PII, intent, authorization) that the DSL already evaluates at the inference layer, now compiled into additional targets. A single set of signal declarations governs the full stack. 
+
+## 3 Multi-Target Compilation 
+
+3.1 Compilation Architecture 
+
+The DSL compiler translates a single .sr source into artifacts for four target classes (Figure 2). At each target, the compiler emits only policy decision logic—it has no constructs for step sequencing, loops, retries, state management, or side effects. What it contributes is verified routing at each policy checkpoint: the same signal evaluations, the same decision tree, the same thresholds, emitted in the format each target requires. The compiler performs five cross-target checks before emission: (i) exhaustiveness (every input reaches a decision), (ii) conflict-freedom (no two branches fire on the same input for geometric signals), (iii) dead branch detection, (iv) referential integrity (all signal and backend references resolve), and (v) source hash consistency (all emitted artifacts carry the same hash). 
+
+3.2 Inference Routing Target 
+
+The established target. The compiler emits a YAML routing configuration consumed by the Semantic Router inference gateway (Chen et al., 2026a). Signal s become signal evaluators in the gateway’s pipeline; Decision_Tree branches become priority-ordered rules; Backend references become model pool entries. The gateway evaluates the compiled policy on every request, producing a routing decision with a full execution trace before any model call occurs. This target is in production. The three targets below extend the same compilation pipeline to new domains. 53.3 Orchestration Targets 
+
+Two orchestration architectures are validated: a graph-based framework (LangGraph) where the DSL compiles into in-loop decision nodes, and a gateway-based platform (OpenClaw) where the DSL compiles into host-level configuration and plugin hooks. 
+
+3.3.1 LangGraph (graph-based) 
+
+Three compilation strategies map DSL constructs to LangGraph’s routing primitives (full code in Appendix A; implementation notes in Appendix B). 
+
+Strategy A: conditional edges. The DSL generates: (i) a signal evaluation node that computes all 
+
+Signal scores (including Signal_Group softmax normalization) and writes them to the graph state, and (ii) a conditional edge function from the Decision_Tree that reads scores and returns the target node name. 
+
+Strategy B: Command-returning node. A single node evaluates signals, traverses the decision tree, and returns a routing command combining the state update, audit trace, and target node in one atomic step. 
+
+Strategy C: policy nodes in a full workflow. DSL-compiled policy nodes appear at decision points within a larger workflow alongside application nodes. The developer writes the workflow skeleton; the compiler fills in the policy gates. 
+
+3.3.2 OpenClaw (gateway-based) 
+
+OpenClaw (OpenClaw Contributors, 2025) routes inbound messages from channels (WhatsApp, Slack, Discord, Telegram) to isolated agents via a deterministic binding table. Policy is expressed as JSON configuration enforced by the gateway—a fundamentally different surface from LangGraph’s compiled graph. The DSL compiles into five artifact types: 1. Agent definitions (agents.list ): per-agent model, workspace, and sandbox mode from Agent 
+
+and Deploy blocks. 2. Routing bindings : channel-to-agent mappings from Decision_Tree branches, with match fields (peer, guild, account) derived from signal context. 3. Tool policy (tools.allow /deny ): skill-based allow lists from Network endpoints, with deny lists for tools that lack declared network access. 4. Session send policy : safety Signal thresholds (jailbreak, PII) compiled into message filtering rules evaluated before outbound delivery. 5. Plugin hook code : a before_tool_call function (TypeScript) that evaluates the same Signal 
+
+definitions used by other targets, returning allow/deny with an audit trace. The key difference from LangGraph is where policy evaluates: LangGraph embeds policy inside graph node execution; OpenClaw evaluates policy at the gateway boundary before the agent loop runs. Both receive the same signal definitions and thresholds from the same DSL source. 6Table 2 DSL construct → orchestration target mapping for graph-based (LangGraph) and gateway-based (OpenClaw) architectures.                      
+
+> DSL construct LangGraph OpenClaw
+> Signal Evaluation node; writes score to graph state Plugin hook signal check; session send policy
+> Signal_Group Softmax normalization in node Not applicable (no in-loop routing)
+> Decision_Tree Conditional edge function (A) or Command node (B)
+> before_tool_call hook; routing bindings
+> Route +Priority Priority-sorted branch Tiered binding match order
+> Backend Target node name Agent model assignment
+> Network —tools.allow + skill mapping
+> Agent —agents.list entry
+> Deploy —Sandbox config + workspace path
+> Test Test fixture invoking compiled graph Assertion against generated config
+
+3.3.3 Construct mapping 
+
+Table 2 summarizes how DSL constructs map to both orchestration targets. Four DSL constructs do not map cleanly to either ( Algorithm confidence , Algorithm rl_driven , Plugin semantic_-cache , Plugin rag )—each would require multi-node subgraph generation or custom skill packs, left as future work. 
+
+3.4 Protocol Boundary Target 
+
+The compiler generates a gate function for each protocol boundary: MCP tools/call , A2A tasks/send ,and tool response inspection. Each gate extracts text from the protocol message (tool name + arguments for MCP, text parts for A2A), evaluates the same Signal definitions used by the other targets, applies the Decision_Tree , and returns allow/deny with a structured audit trace. Seven agent protocols were surveyed (MCP, A2A, ACP, ANP, AP2, OpenAI Commerce, UCP). Each defines transport semantics, capability negotiation, and message formats. The DSL layers on top as a policy evaluation point at each boundary—the protocol handles transport; the DSL adds decision verification. 
+
+3.5 Infrastructure Target: Kubernetes and YANG 
+
+Kubernetes. The DSL’s Network and Deploy blocks generate three Kubernetes artifacts: Net-workPolicy (egress rules from declared endpoints), ConfigMap (structured routing policy with signal thresholds and model references), and Sandbox CRD instances for the agent-sandbox project (Kuber-netes SIG Apps, 2026) with proposed PolicySpec annotations. The compiler cross-references across artifacts: skills in Agent blocks must match Network endpoints; signal evaluation models must have network access; backend addresses must be reachable. These cross-artifact checks are difficult to maintain manually when NetworkPolicy and ConfigMap are written independently. 
+
+YANG / NETCONF. YANG (Bjorklund, 2016) defines structural schemas; the DSL defines semantic policy. They are complementary: YANG validates that a configuration conforms to a schema , while the DSL verifies that the policy decisions within that configuration are conflict-free .The EmitYANG compiler target generates an RFC 7950 YANG module and packages the policy as a NETCONF (Enns et al., 2011) <edit-config> payload. A three-pass validation pipeline results: 7(i) structural schema validation, (ii) DSL semantic conflict checks, and (iii) NETCONF payload well-formedness. All three run before the policy reaches any production instance. 
+
+3.6 Signal Group Tie-Breaking 
+
+When two intent signals in a Signal_Group receive equal raw scores, softmax normalization yields 
+
+≈ 1/k for each of the k tied signals. The routing function’s > 1/k check fails for all tied candidates, falling through to the default branch. This behavior is consistent with ProbPol’s Voronoi normalization— the input lies on a cell boundary—but may not match the administrator’s intent. Section 7 discusses three resolutions. 
+
+## 4 Four Pillars 
+
+4.1 Auditability 
+
+Compliance frameworks (EU AI Act Article 86 (European Parliament and Council, 2024), GDPR Article 22) require verifiable evidence of every automated decision. Orchestration frameworks provide useful operational visibility—node-by-node state changes showing what happened . For compliance purposes, a complementary record of why —which signals fired, at what scores, which thresholds were crossed, which branch was selected—is also needed. The DSL compiler generates audit trace entries as part of the state update at every decision node:  
+
+> trace = { "ts": time.time(), "tree": "outbound_delegation_gate", "branch": "allow_jira", "signals": { "jb_guard": 0.05, "pii_detector": 0.08, "jira_intent": 0.9991, "slack_intent": 0.0009, "authz_jira": True}, }
+> return Command( update={"audit_trace": [trace], ...}, goto="action_jira")
+
+The trace materializes five transparency properties desirable for interpretable decision systems: named components (signal names), known formulas (threshold comparisons), observable intermediates (scores), explicit boundaries (thresholds), and structural traces (tree + branch names). The trace is written to the orchestration state, preserved by the framework’s checkpointing mechanism, and available for compliance queries. 
+
+Structural correspondence. The trace structure is generated from the same AST that generates the routing logic. It is not possible for the trace to describe a different decision tree than the one that executed. When the policy changes and the DSL is recompiled, the trace structure updates automatically. This is a compiler guarantee, not a coding convention. 
+
+Integrity. The audit trace channel uses an append-only reducer. Downstream nodes can append but not overwrite previous entries. For compliance-grade integrity, the compiler can be extended to generate a cryptographic hash chain: each entry includes prev_hash = hash(previous) , enabling external tamper detection. 
+
+Boundary. The DSL audits decisions given signal scores , not signal correctness . A jailbreak classifier returning 0.05 on an actual jailbreak produces a clean trace leading to a wrong decision. Signal 8accuracy is a calibration problem, orthogonal to decision auditability. Stating this boundary explicitly is important: the audit trace validates the decision , not the signal accuracy .
+
+4.2 Cost Efficiency 
+
+The DSL does not reduce the latency of any individual inference call. It does not change model architectures, batching, or GPU utilization. The policy gate itself executes in under 1 ms. The expensive operations—ML classifier calls for embedding similarity, PII detection, jailbreak scoring—have identical cost whether invoked by DSL-compiled code or hand-written Python. The efficiency contribution operates at a different level: cost-correct routing .
+
+Per-step model selection. A Decision_Tree model_selector evaluates complexity signals and routes to the appropriate model tier. If a 253B-parameter model costs ∼60 × a 4B model per token, and 60% of traffic is simple enough for the small model, the selector avoids roughly half the inference spend on those requests. Python can implement the same conditional logic; the DSL compiler guarantees the selection is exhaustive (no unhandled range) and conflict-free (no overlapping thresholds). 
+
+Tool call gating. A safety gate that blocks a request before a tool invocation avoids the cost and latency of the external API call. When the gate denies a request, the downstream tool node never fires. 
+
+Correct routing avoids misrouting cost. A threshold bug in hand-written Python can silently misroute traffic to the wrong model tier for weeks. The DSL’s compile-time checks catch such errors before deployment. 
+
+4.3 Verifiability 
+
+Orchestration compilers validate graph structure—the right check for workflow composition. The DSL compiler adds a complementary layer of semantic checks on the policy logic within nodes, catching issues like a missing default case that would otherwise surface only at runtime. The DSL compiler provides verification at three levels, and it is important to distinguish what each level actually guarantees. 
+
+Compiler-level verification (all inputs). Five properties hold for every possible input: 1. Exhaustiveness. Decision_Tree requires an Else branch. Every input reaches exactly one leaf. 2. Dead branch detection. Each non-Else branch’s When clause is checked for satisfiability. A branch whose condition is a strict subset of a higher-priority branch is flagged as shadowed. 3. Signal co-firing prevention. Signal_Group with Voronoi normalization (ProbPol Theorem 2 (Liu et al., 2026)): with threshold θ > 1/k and temperature τ → 0, at most one signal in the group fires. 4. Referential integrity. Every signal reference in a When clause resolves to a defined Signal . Every 
+
+Backend reference resolves. Every skill in a Network block cross-references against Route 
+
+definitions. 5. Cross-compilation consistency. The same Decision_Tree produces the same logic across all emission targets. A structural hash verifies consistency. 9Decidability by signal type. Not all signals admit the same analysis. Crisp predicates (authorization, keyword match) are fully decidable: the compiler can enumerate all satisfying assignments. Geometric predicates (embedding similarity) are decidable under geometric assumptions about the embedding space (ProbPol Section 4). Classifier predicates (jailbreak, PII) are opaque functions; only empirical testing is possible. This three-level hierarchy is itself a contribution: it makes the verification boundary explicit. The administrator knows which properties are compiler-guaranteed and which require empirical validation— a distinction that is difficult to maintain in ad-hoc application code. 
+
+Validation (specific inputs). Test blocks compile to executable test cases that invoke the compiled graph and assert routing decisions. These are validation (checking known cases), not verification 
+
+(proving properties for all cases). They complement the compiler-level guarantees above. 
+
+4.4 Tunability 
+
+Agent workflows have dozens of tunable parameters: signal thresholds, embedding candidates, model selections, priority orderings, tool permissions. In typical Python implementations, these are scattered across files as constants, environment variables, and configuration fragments. In the DSL, every tunable parameter is a first-class declaration:        
+
+> SIGNAL embedding code_task { threshold: 0.72 candidates: ["write code", "fix bug"] }
+> ROUTE code_route {
+> PRIORITY 200
+> WHEN embedding("code_task") AND authz("dev_role")
+> MODEL "nemotron-ultra" (reasoning = true) }
+
+Changing threshold: 0.72 to 0.68 triggers recompilation, which re-checks exhaustiveness, conflict-freedom, referential integrity, and re-runs Test blocks—before any artifact is deployed. Figure 3 shows the full loop. The cycle can be formalized as an MDP over policy parameters: the DSL’s declared parameters form the action space (thresholds ∈ [0 , 1] , priorities ∈ Z, model choices from the backend pool), audit traces provide the observation , and the compiler’s verification acts as a 
+
+safety constraint on the transition function—no parameter change that introduces a conflict or dead branch can reach production. The key property is that the verification step is automatic and fast (< 1 s for typical policies). In Python, changing a threshold requires manual re-examination of all dependent logic. In the DSL, the compiler does this on every compilation. 
+
+## 5 Complementing Orchestration with Policy 
+
+Section 2 identified three areas where a declarative policy layer complements existing orchestration and authorization tools. Here we describe concretely how the DSL contributes to each, and what remains outside its scope. 
+
+5.1 Gap 1: Agent → Inference 
+
+Agent frameworks typically assign a model at the node level—a reasonable default for many workflows. At the inference gateway, the Semantic Router already performs this selection on every request: content 10 1. Declare — thresholds, models, objectives 
+
+# 2. Compile + verify — check properties, regenerate 
+
+# 3. Deploy + observe — traces record scores, cost 
+
+# 4. Diagnose — localize to signal + threshold 
+
+# 5. Adjust — change one DSL parameter 
+
+iterate  
+
+> Figure 3 The tuning loop. Each iteration changes one DSL parameter, recompiles (with full re-verification), deploys, and observes. Causal tracing (Chen et al., 2026a) localizes the parameter responsible for misrouting.
+
+signals (complexity, domain, intent) feed into projections and decision trees that pick the right model tier, with optional confidence-based escalation from a smaller to a larger model (Chen et al., 2026a). Compiling the same Decision_Tree model_selector into an agent workflow’s conditional edges brings this per-request capability to per-step selection within a multi-step workflow. The signal definitions, thresholds, and verification guarantees are inherited from the inference routing policy—no duplication, no drift. For example, a summarization step routes to a 4B model while a subsequent reasoning step routes to a 70B model, based on the same complexity signals. A Decision_Tree safety_gate fires before the first inference call, evaluating jailbreak and PII signals—the same classifiers already deployed at the inference gateway, now compiled as an agent workflow node. Requests that violate policy are denied before any model call occurs. 
+
+5.2 Gap 2: Agent → Tool Calling 
+
+Tools invoked via MCP are typically authorized by caller identity and tool name—which is the right check for access control. The DSL’s outbound_gate adds a complementary content-aware check: it evaluates the tool call’s payload against intent, authorization, and safety signals. For example, a request to “create a Jira issue” containing PII (“SSN: 123-45-6789”) is caught before it reaches the Jira API, even though the user has valid Jira permissions. Identity-based and content-based gating work together: the first ensures only authorized users reach the tool, the second ensures the content is safe 11 Agent Inference Tool call    
+
+> safety gate model selector
+> outbound gate intent + authz
+> response gate injection check
+> Gap 1 Gap 2
+> Gap 3
+> Gap 1 Gap 2 Gap 3
+
+Figure 4 Three DSL-compiled gates add a policy layer between agent orchestration, inference, and tool calling. All three are compiled from the same DSL source, ensuring consistent policy across the workflow. 
+
+Without DSL       
+
+> Gateway LangGraph MCP gate
+> jb: 0.75 jb: 0.80 jb: 0.75
+> ←drift →
+
+With DSL  
+
+> .sr source
+
+Compiler 
+
+> Gateway
+> LangGraph
+> MCP gate
+> all: jb = 0.75
+
+Figure 5 Policy drift without vs. with the DSL. Left: three teams maintain gateway config, LangGraph gate, and MCP middleware independently; a threshold update reaches two artifacts but not the third. Right: one 
+
+.sr source compiles to all three; consistency is a compiler invariant. 
+
+to send. 
+
+5.3 Gap 3: Inference → Tool Calling 
+
+After the LLM responds, it may propose tool calls. An input safety gate is a valuable first defense, but indirect prompt injection (OWASP Foundation, 2025)—where malicious instructions arrive via tool responses, repository content, or web pages—enters after the input gate has already approved the request. The DSL can generate a tool_response_gate that adds a second checkpoint: it fires after a tool returns and before its response is passed back to the LLM, evaluating the tool’s output for injected prompts, sensitive data, or policy violations using the same signal definitions as the input gate. The input gate and response gate together form a defense-in-depth pattern. 
+
+5.4 Cross-Cutting: Consistency and Observability 
+
+All three gates—plus the inference gateway’s routing policy—are compiled from the same DSL source. The jailbreak Signal definition used in the gateway’s safety_gate is the same definition used in the agent workflow’s outbound_gate and tool_response_gate , and the same definition that generates the Kubernetes NetworkPolicy and YANG/NETCONF payload. If the administrator changes the jailbreak threshold from 0.8 to 0.75, every target—inference routing, agent gates, protocol gates, infrastructure artifacts—updates on recompilation. Figure 5 illustrates the consistency problem. Without the DSL, each target artifact is maintained independently—a threshold update that reaches the inference gateway and MCP middleware but misses the LangGraph gate produces silent policy drift. With the DSL, a single parameter change 12 recompiles into every target, and the source hash embedded in each artifact enables automated drift detection. Every gate writes to the same structured audit trace. A single query returns a unified record across the full stack: gateway: route to 70B (complexity=0.8) → safety_gate: allow (jb=0.05, pii=0.08) →
+
+model_selector: nano (complexity=0.3) → outbound_gate: allow_jira (intent=0.92) . This end-to-end trace—from inference routing through agent decisions to tool authorization—is the observability benefit of a unified policy language. 
+
+5.5 What This Does Not Solve 
+
+The DSL cannot verify: 
+
+• Whether the LLM’s output is factually correct 
+
+• Whether a tool executed correctly 
+
+• Whether the orchestration step ordering is correct 
+
+• Whether the agent’s system prompt matches its domain These are outside the policy layer’s scope. The DSL guarantees that at each decision point, the routing is exhaustive, conflict-free, and auditable. What happens between decision points is the orchestration framework’s responsibility. 
+
+## 6 Domain-Specific Considerations 
+
+Section 3 describes the compilation mechanics for each target. This section discusses domain-specific considerations: why each target benefits from DSL-compiled policy, and what unique properties each domain contributes to the end-to-end story. 
+
+6.1 YANG / NETCONF: Delivery Audit Trail 
+
+NETCONF’s confirmed-commit mechanism adds operator identity, commit-id, and timestamp to the delivery audit trail, completing the policy lifecycle: authoring ( .sr file in git) → compilation (verification output) → delivery (NETCONF commit log) → runtime (audit traces in orchestration state). No other target provides this delivery-layer auditability. The DSL’s source-hash field in the YANG data model enables automated detection of configuration drift between the NETCONF datastore and the running policy. 
+
+6.2 Kubernetes: Cross-Artifact Consistency 
+
+The primary benefit of DSL compilation for Kubernetes is cross-artifact consistency. When Net-workPolicy, ConfigMap, and Sandbox CRD are written independently, an operator can add a new tool endpoint to the ConfigMap but forget to open the corresponding egress rule in the NetworkPolicy. The DSL compiler catches this at compile time: a Network endpoint referenced by a skill must have a corresponding egress rule in the generated NetworkPolicy. The proposed PolicySpec extension to the agent-sandbox Sandbox CRD (Kubernetes SIG Apps, 2026) would add a semantic policy layer to the runtime envelope: declaring permitted network endpoints, referencing the policy ConfigMap, and setting an audit level. The Sandbox controller could then generate a scoped NetworkPolicy as a child resource, owned by the Sandbox, eliminating the manually-maintained NetworkPolicy artifact entirely. 13 6.3 Gateway Platforms: Multi-Layer Policy Bundles 
+
+Gateway-based agent platforms like OpenClaw (OpenClaw Contributors, 2025) manage policy across multiple configuration surfaces simultaneously: agent definitions, channel routing bindings, tool access profiles, sandbox settings, and session policies. When maintained by hand, these surfaces drift independently—an operator adds a new skill to an agent but forgets to update the tool allow list, or opens a channel binding without tightening the DM policy. The DSL compiler emits all five artifact types from the same source, with cross-artifact validation at compile time: a skill referenced by an Agent block must have a corresponding Network endpoint, and the tool allow list must include the skill’s tool entry. The same safety Signal thresholds that govern inference routing and LangGraph gates also compile into the gateway’s session send policy and before_tool_call hook, ensuring that a threshold change propagates across graph-based and gateway-based orchestration simultaneously. This multi-layer emission distinguishes the gateway target from the graph-based target: LangGraph receives in-loop decision code; OpenClaw receives a validated policy bundle spanning five configuration surfaces. 
+
+6.4 Agent Protocols: Transport–Policy Separation 
+
+The seven protocols surveyed (MCP, A2A, ACP, ANP, AP2, OpenAI Commerce, UCP) each define transport semantics, capability negotiation, and message formats—the plumbing for multi-agent communication. None defines a declarative policy evaluation point. The DSL fills this gap by providing a content-aware gate that operates independently of the transport layer. The same Signal definitions that govern inference routing and agent orchestration also evaluate protocol messages: a jailbreak attempt in an MCP tools/call argument is caught by the same classifier, at the same threshold, as one arriving via the inference gateway. This transport–policy separation means that adding a new protocol (e.g., the forthcoming OpenAI Responses API) requires only a message extraction adapter—the policy evaluation and audit trace generation are reused from the existing compilation target. 
+
+## 7 Limitations and Discussion 
+
+7.1 Limitations 
+
+This paper is a position paper, not an empirical study. The compilation strategies were validated with prototype implementations using real signal models from the vLLM Semantic Router project (Appendix A, Table 3), not against production workloads. We do not report throughput, latency distributions, or cost savings on real traffic. The DSL compiler’s conflict detection for embedding signals requires access to the embedding model at compile time (to compute vector distances). In practice, most deployment pipelines do not include model inference in the build step. An offline calibration pass could precompute the needed distances, but this workflow does not exist yet. The Kubernetes compilation target generates valid NetworkPolicy, ConfigMap, and Sandbox CRD arti-facts, but the proposed PolicySpec CRD enhancement requires upstream adoption by the agent-sandbox 
+
+project (Kubernetes SIG Apps, 2026). The YANG/NETCONF target generates a structurally valid YANG module and well-formed <edit-config> payload, but integration with a live NETCONF server has not been tested. The agent protocol gates demonstrate the compilation pattern at MCP, A2A, and tool-response boundaries but are not integrated into a running protocol server. 14 Two orchestration architectures are validated: graph-based (LangGraph) and gateway-based (Open-Claw). The OpenClaw target emits configuration and plugin hooks, not in-loop graph nodes; it demonstrates that the DSL applies to configuration-driven platforms, not only to compiled-graph frameworks. Mappings for Temporal, CrewAI, and AutoGen would require separate analysis of each framework’s execution model. A framework-agnostic intermediate representation could address this but does not exist yet. 
+
+7.2 Auditability: Structural Correspondence vs. Trace Integrity 
+
+The audit trace’s core strength is structural correspondence : the trace format is generated from the same AST as the routing logic, making it impossible for the trace to describe a different decision tree than the one that executed. This is a compiler guarantee that hand-written logging cannot provide—standard linters check syntax, not the relationship between decision logic and its log output. The caveat is integrity . The append-only trace mechanism prevents downstream nodes from overwriting previous entries, but direct access to the underlying persistence layer could modify them. For compliance-grade assurance, a cryptographic hash chain (each entry includes hash(previous) ) would enable external tamper detection. This is a proposed extension, not a current implementation. A second boundary: the DSL audits decisions given signal scores , not signal correctness . A miscalibrated classifier produces a clean trace leading to a wrong decision. Signal accuracy is an orthogonal concern addressed by runtime calibration monitoring (Guo et al., 2017) and causal tracing of the decision graph, not by the policy compiler. 
+
+7.3 Efficiency: Cost Savings, Not Speedup 
+
+The DSL does not reduce inference latency. The policy gate executes in under 1 ms; the ML classifier calls have identical cost in DSL-compiled and hand-written code. The efficiency contribution is 
+
+cost-correct routing : directing each request to the appropriate model tier and gating tool calls before invocation to avoid wasted spend. The Signal_Group softmax normalization, listed earlier, is properly a correctness mechanism (preventing co-firing signals) rather than a performance optimization. Its computational overhead is negligible in either direction. 
+
+7.4 Verifiability: Three Levels of Assurance 
+
+The compiler’s exhaustiveness check (requiring an Else branch) is necessary but, taken alone, straight-forward. The deeper contribution is what the compiler checks about the non-Else branches: dead branch detection (a branch whose condition is a strict subset of a higher-priority branch) and proba-bilistic overlap detection (two branches that can both match the same input due to embedding space geometry). The decidability hierarchy from ProbPol (Liu et al., 2026) applies: crisp predicates (authorization, keyword match) are fully decidable at compile time; geometric predicates (embedding similarity) are decidable under assumptions about the embedding model’s vector space; classifier predicates (jailbreak, PII) are opaque functions for which only empirical Test -block validation is available. The contribution is making this verification boundary explicit : the administrator knows which properties are compiler-guaranteed and which require empirical validation—a distinction that is difficult to maintain in application code. 15 7.5 Signal Group Tie-Breaking 
+
+Equal-distance inputs produce softmax outputs of ≈ 1/k for groups of size k. Three resolutions are available: (i) use ≥ 1/k instead of > 1/k as the threshold, selecting by declaration order on ties; (ii) add an explicit tie_break: priority_order option to Signal_Group ; (iii) emit a compiler warning when a group of size 2 is used without a tie-breaking strategy. 
+
+7.6 Comparison with General-Purpose Code 
+
+Every capability described in this paper—content-aware routing, structured logging, per-step model selection, tool gating—can be implemented in Python. The contribution is not enabling new behavior but automating the properties that are hardest to maintain by hand . Consistency across multiple gates is easy to establish initially; it becomes difficult after several developers modify different files independently over months. Writing a custom routing analyzer is possible but rarely prioritized. Maintaining structured logging in sync with decision logic is possible but fragile. The DSL compiler makes exhaustiveness, conflict-freedom, and audit-trace correspondence automatic on every compilation. The value scales with policy complexity ×artifact count ×compliance requirements ×
+
+team size × time. 
+
+7.7 The Unification Argument 
+
+The strongest case for the DSL is not any individual pillar but the unification across layers. The Semantic Router already deploys the DSL for per-request inference routing in production (Chen et al., 2026a)—that layer is not hypothetical. This paper extends the same language, the same signal definitions, and the same compiler to agent orchestration, protocol boundaries, and infrastructure. In practice, each of these layers is typically maintained by a different team using a different language: Python for agent logic, YAML for Kubernetes manifests, ad-hoc code for protocol middleware, separate configuration for the inference gateway. When a jailbreak threshold changes, it must be updated in every layer independently—a process that is slow, error-prone, and unauditable. A single DSL source compiled to multiple targets eliminates this coordination burden. The jailbreak 
+
+Signal defined once in the .sr file propagates to the inference gateway’s routing config, the LangGraph safety gate, the OpenClaw before_tool_call hook and session send policy, the MCP protocol gate, the Kubernetes NetworkPolicy annotations, and the YANG/NETCONF payload—all in one compilation step. Cross-target consistency is not a convention to be followed; it is a compiler invariant. This is the same design principle that makes infrastructure-as-code valuable: a single source of truth compiled to multiple deployment targets, with drift detected by the toolchain rather than by incident reports. 
+
+7.8 Applicability Conditions 
+
+The approach adds overhead—a new language to learn, a compiler to maintain, a constraint that policy logic must fit a non-Turing-complete model. This overhead is not justified in all settings: 
+
+• Single model, single tool, no compliance requirements. The DSL adds a layer with no corresponding benefit. 
+
+• Solo developer, short-lived project. Consistency and tunability benefits scale with team size and project lifetime. 16 • Policy logic that requires loops, mutable state, or complex orchestration. The DSL is deliberately non-Turing-complete. Such logic should remain in the host language. The approach provides the most value when multiple agents with different policy requirements are deployed across multiple environments, with compliance obligations and a team that evolves the policy over time—precisely the setting where inference routing, agent orchestration, and infrastructure deployment must share consistent policy definitions. 
+
+## 8 Related Work 
+
+LLM routing. RouteLLM (Ong et al., 2024) trains a preference-based router; FrugalGPT (Chen et al., 2023) cascades from cheap to expensive models; HybridLLM (Ding et al., 2024) learns a quality-cost boundary; Dekoninck et al. (2025) unify routing and cascading. All use learned routers. The DSL’s routers are declared : the administrator writes signal conditions and decision trees, and the compiler checks them. The approaches are complementary: a learned router can be a Signal within the DSL, and the DSL provides the verification layer around it. 
+
+Policy languages. NetKAT (Anderson et al., 2014) and ProbNetKAT (Foster et al., 2016) provide algebraic foundations for network policy. The DSL shares NetKAT’s design philosophy—restricting expressiveness to enable decidable analysis—but targets LLM routing signals rather than packet-header predicates. OPA (Styra, Inc., 2024), Cedar (Amazon Web Services, 2023), and XACML (Turkmen et al., 2017) evaluate crisp predicates over metadata. The DSL extends this model to probabilistic 
+
+predicates: signals returning scores in [0 , 1] , thresholded to Boolean. This extension introduces the co-firing problem that ProbPol’s Voronoi normalization addresses. 
+
+Firewall analysis. Firewall Decision Diagrams (Gouda and Liu, 2007) and firewall policy analysis (Al-Shaer and Hamed, 2004) detect conflicts in priority-ordered rule sets. The DSL’s Decision_Tree 
+
+is compiled as an FDD. ProbPol extends the classical conflict taxonomy with three probabilistic conflict types not present in the firewall literature. 
+
+Configuration verification. Xu et al. (2016) detect configuration errors by cross-referencing system artifacts. The DSL compiler performs analogous cross-artifact checks: Network endpoints must align with Route signals, tool profiles must be compatible with declared skills, and generated Kubernetes resources must be consistent with the routing policy. 
+
+Declarative agent pipelines. PayPal’s Declarative Agent Pipeline Language (PayPal AI Research, 2025) defines multi-step agent workflows declaratively. It focuses on step composition and tool orchestration. The DSL focuses on the policy decisions within each step. The two operate at different layers and could be combined: the pipeline language defines step ordering, and the DSL provides verified gates at each step boundary. 
+
+Agent safety. OWASP LLM Top 10 (OWASP Foundation, 2025) identifies excessive agency (LLM08) and prompt injection (LLM01) as primary threats. The Kubernetes agent-sandbox project (Kubernetes SIG Apps, 2026) addresses runtime isolation. The DSL complements both: sandboxing provides runtime isolation, and the DSL adds content-aware gating and structured audit traces—together addressing both the infrastructure and semantic layers that OWASP recommends. 17 9 Conclusion 
+
+The Semantic Router DSL is already deployed for per-request LLM inference routing, where it governs model selection, privacy policies, and safety gates from a single declarative source. This paper extends the same language—the same signal definitions, the same compiler, the same verification guarantees—from stateless, per-request routing to multi-step agent workflows, protocol boundaries, and infrastructure deployment. The extension is a multi-target compiler . A single .sr source file now emits: YAML routing configu-ration for the inference gateway, verified decision nodes for graph-based orchestration (LangGraph), validated policy bundles for gateway-based orchestration (OpenClaw), content-aware gates at MCP and A2A protocol boundaries, Kubernetes artifacts (NetworkPolicy, Sandbox CRD, ConfigMap), and YANG/NETCONF payloads. At each target, the compiler adds the same guarantees: exhaustive routing, conflict-free branching, referential integrity, and structured audit traces. Four pillars structure the analysis. Auditability comes from traces structurally coupled to the decision AST. Cost efficiency comes from correct routing—the right model for each step, tool calls gated before invocation. Verifiability comes from the compiler, with an explicit three-level boundary per signal type. 
+
+Tunability comes from named, typed parameters with re-verification on every change. The strongest argument, however, is not any single pillar but the unification across layers. Without the DSL, each layer—inference gateway, agent logic, protocol middleware, Kubernetes manifests—is maintained independently, in different languages, by different teams. A threshold change must be coordinated across all of them. With the DSL, a single parameter change recompiles into every target simultaneously, and cross-target consistency is a compiler invariant rather than a coordination convention. Several caveats apply: the efficiency contribution is cost savings from correct routing, not computational speedup; verification is bounded by signal type (fully decidable for crisp predicates, empirical for classifiers); and the approach adds overhead that is not justified for simple, single-model deployments. With these caveats acknowledged, the position is clear: the DSL does not replace Python or the orchestration framework. It adds a layer of automatic, cross-target guarantees on top of them—from the inference gateway where it is already deployed, through the agent workflow, to the infrastructure that hosts both. 
+
+## References 
+
+Ehab S. Al-Shaer and Hazem H. Hamed. Modeling and management of firewall policies. IEEE Transactions on Network and Service Management , 1(1):2–10, 2004. Amazon Web Services. Cedar: A language for expressing authorization policies. https://www. cedarpolicy.com , 2023. Carolyn Jane Anderson, Nate Foster, Arjun Guha, Jean-Baptiste Jeannin, Dexter Kozen, Cole Schlesinger, and David Walker. NetKAT: Semantic foundations for networks. In Proceedings of the 41st ACM SIGPLAN-SIGACT Symposium on Principles of Programming Languages , pages 113–126, 2014. Anthropic. Model context protocol. https://modelcontextprotocol.io , 2024. Martin Bjorklund. The YANG 1.1 data modeling language. RFC 7950, 2016. Huamin Chen, Xunzhuo Liu, Bowei He, and Xue Liu. Transparent discrete networks: Analytical optimization of LLM routing policies. arXiv preprint , 2026a. To appear. 18 Huamin Chen, Xunzhuo Liu, Bowei He, Fuyuan Lyu, Yankai Chen, Xue Liu, Yuhan Liu, and Junchen Jiang. The workload–router–pool architecture for LLM inference optimization: A vision paper from the vLLM Semantic Router project. arXiv preprint arXiv:2603.21354 , 2026b. Lingjiao Chen, Matei Zaharia, and James Zou. FrugalGPT: How to use large language models while reducing cost and improving performance. arXiv preprint arXiv:2305.05176 , 2023. CrewAI. CrewAI: Framework for orchestrating role-playing autonomous AI agents. https://github. com/crewAIInc/crewAI , 2024. Jasper Dekoninck, Maximilian Baader, and Martin Vechev. A unified approach to routing and cascading for LLMs. In International Conference on Machine Learning , 2025. Dujian Ding, Ankur Mallick, Chi Wang, Robert Sim, Subhabrata Mukherjee, Victor Ruhle, Laks V. S. Lakshmanan, and Ahmed Hassan Awadallah. Hybrid LLM: Cost-efficient and quality-aware query routing. In International Conference on Learning Representations , 2024. Rob Enns, Martin Bjorklund, Juergen Schoenwaelder, and Andy Bierman. Network configuration protocol (NETCONF). RFC 6241, 2011. European Parliament and Council. Regulation (EU) 2024/1689 laying down harmonised rules on artificial intelligence (AI Act). Official Journal of the European Union, 2024. Nate Foster, Dexter Kozen, Konstantinos Mamouras, Mark Reitblatt, and Alexandra Silva. Probabilistic NetKAT. In Proceedings of the 25th European Symposium on Programming , pages 282–309, 2016. Google. Agent2agent protocol. https://google.github.io/A2A , 2025. Mohamed G. Gouda and Alex X. Liu. Structured firewall design. Computer Networks , 51(4):1106–1120, 2007. Chuan Guo, Geoff Pleiss, Yu Sun, and Kilian Q. Weinberger. On calibration of modern neural networks. In International Conference on Machine Learning , 2017. Kubernetes SIG Apps. agent-sandbox: Management of isolated, stateful, singleton workloads for AI agent runtimes. https://github.com/kubernetes-sigs/agent-sandbox , 2026. LangChain, Inc. LangGraph: Build stateful multi-actor applications with LLMs. https://github. com/langchain-ai/langgraph , 2024. Xunzhuo Liu, Hao Wu, Huamin Chen, Bowei He, and Xue Liu. Conflict-free policy languages for probabilistic ML predicates: A framework and case study with the Semantic Router DSL. arXiv preprint arXiv:2603.18174 , 2026. Isaac Ong, Amjad Almahairi, Vincent Wu, Wei-Lin Chiang, Tianhao Wu, Joseph E. Gonzalez, M Waleed Kadous, and Ion Stoica. RouteLLM: Learning to route LLMs with preference data. arXiv preprint arXiv:2406.18665 , 2024. OpenClaw Contributors. OpenClaw: Personal AI assistant gateway. https://github.com/openclaw/ openclaw , 2025. OWASP Foundation. OWASP top 10 for large language model applications. https://owasp.org/ www-project-top-10-for-large-language-model-applications/ , 2025. PayPal AI Research. Declarative agent pipeline language for multi-agent orchestration. arXiv preprint arXiv:2512.19769 , 2025. Styra, Inc. Open policy agent. https://www.openpolicyagent.org , 2024. Temporal Technologies. Temporal: Durable execution platform. https://temporal.io , 2024. 19 Table 3 Signal models used for evaluation. All are publicly available on HuggingFace.        
+
+> Signal type Model
+> Jailbreak llm-semantic-router/mmbert32k-jailbreak-detector-merged (307M, sequence classification, 2 classes) PII llm-semantic-router/mmbert-pii-detector-merged (149M, token classification, 35 entity types) Embedding sentence-transformers/all-MiniLM-L12-v2 (33M, 384-dim, cosine similarity)
+
+Fatih Turkmen, Jerry den Hartog, Silvio Ranise, and Nicola Zannone. Formal analysis of XACML policies using SMT. Computers & Security , 66:185–203, 2017. Tianyin Xu, Xinxin Jin, Peng Huang, Yuanyuan Zhou, Shan Lu, Long Jin, and Shankar Pasupathy. Early detection of configuration errors to reduce failure damage. In USENIX Symposium on Operating Systems Design and Implementation , 2016. 
+
+## A DSL Source and Generated Artifacts 
+
+A.1 DSL Source: Multi-Gate Policy 
+
+Listing 1 shows a complete DSL policy with safety, model selection, and tool-call authorization. The compiler generates LangGraph nodes, Kubernetes NetworkPolicy, and routing configuration from this single file. Thresholds are calibrated to the signal models listed in Table 3. 
+
+A.2 Signal Models 
+
+Table 3 lists the HuggingFace models used for signal evaluation. All are public, from the vLLM Semantic Router project’s model registry, and run on CPU without paid API keys. 
+
+A.3 Generated: LangGraph Decision Node (Strategy A) 
+
+Listing 2 shows the Python code generated by the compiler from the Decision_Tree outbound_gate 
+
+in Listing 1. 
+
+A.4 Generated: Kubernetes Artifacts 
+
+All three Kubernetes artifacts below are generated from the same DSL source (Listing 1) and carry a consistent source-hash label. Listing 3 shows the NetworkPolicy, Listing 4 shows the Sandbox CRD instance (agent-sandbox v1alpha1) with the proposed PolicySpec annotations, and Listing 5 shows the ConfigMap carrying the structured routing configuration. 
+
+A.5 Generated: Audit Trace Entry 
+
+Listing 6 shows a runtime audit trace entry from a successful Jira routing decision. Signal scores are from the real models in Table 3. 
+
+A.6 Generated: YANG Module (RFC 7950) 
+
+Listing 7 shows the YANG module generated by the EmitYANG compiler target. It defines signal types as YANG identities, signal parameters as a keyed list with constrained types ( decimal64{fraction-digits 
+
+20 Listing 1 DSL policy with three decision gates. 
+
+# === Signals === 
+
+SIGNAL jailbreak jb_guard { threshold: 0.50 model: "mmbert32k-jailbreak-detector" }
+
+SIGNAL pii pii_detector { threshold: 0.60 model: "mmbert-pii-detector" pii_types_allowed: ["EMAIL_ADDRESS", "GPE", "AGE", "DATE_TIME"] }
+
+SIGNAL embedding jira_intent { threshold: 0.70 model: "all-MiniLM-L12-v2" candidates: ["create a jira issue", "open a bug ticket"] }
+
+SIGNAL embedding slack_intent { threshold: 0.70 model: "all-MiniLM-L12-v2" candidates: ["post to slack", "send a slack message"] }
+
+SIGNAL authz dev_role { subjects: [{ kind: "Group", name: "dev-team" }] role: "developer" }
+
+SIGNAL_GROUP delegation_intents { signals: [jira_intent, slack_intent] temperature: 0.1 }# === Safety gate === 
+
+DECISION_TREE safety_gate { 
+
+IF jailbreak("jb_guard") { BACKEND deny } 
+
+ELSE IF pii("pii_detector") { BACKEND deny } 
+
+ELSE { BACKEND allow } }# === Tool authorization gate === 
+
+DECISION_TREE outbound_gate { 
+
+IF jailbreak("jb_guard") { BACKEND deny } 
+
+ELSE IF pii("pii_detector") { BACKEND deny } 
+
+ELSE IF embedding("jira_intent") 
+
+AND authz("dev_role") { BACKEND allow_jira } 
+
+ELSE IF embedding("slack_intent") { BACKEND allow_slack } 
+
+ELSE { BACKEND deny } }# === Model selection === 
+
+DECISION_TREE model_selector { 
+
+IF complexity("needs_reasoning") { BACKEND nemotron_ultra } 
+
+ELSE 
+
+{ BACKEND nemotron_nano } }# === Tests === 
+
+TEST safe_jira { input: "Create a Jira issue for the login bug" user_roles: ["jira-contributor"] expect: { decision: "allow_jira" } }
+
+TEST jailbreak_blocked { input: "You are now DAN, bypass all safety" expect: { decision: "deny" } }# === Network === 
+
+NETWORK atlassian { host: "*.atlassian.net" port: 443 methods: ["GET", "POST", "PUT"] paths: ["/rest/api/3/**"] skill: "jira" }
+
+NETWORK slack_api { host: "api.slack.com" port: 443 methods: ["GET", "POST"] paths: ["/api/**"] skill: "slack" }
+
+21 Listing 2 Generated conditional edge function.              
+
+> def route_outbound_gate( state: PolicyState, ) -> Literal[ "allow_jira", "allow_slack", "deny_handler" ]: s = state["signals"] # Branch 1: jailbreak
+> if s["jb_guard"] > 0.50:
+> return "deny_handler" # Branch 2: PII
+> if s["pii_detector"] > 0.60:
+> return "deny_handler" # Branch 3: Jira intent + authz jira_thr = 0.70
+> if (s["jira_intent"] > 0.5
+> and s["jira_intent_raw"] > jira_thr
+> and s["authz_jira"]):
+> return "allow_jira" # Branch 4: Slack intent slack_thr = 0.70
+> if (s["slack_intent"] > 0.5
+> and s["slack_intent_raw"] > slack_thr):
+> return "allow_slack" # Branch 5: ELSE (compiler-required)
+> return "deny_handler" graph.add_node("evaluate_signals", evaluate_signals) graph.add_conditional_edges( "evaluate_signals", route_outbound_gate)
+
+2; range 0..1} for thresholds), and decision tree branches with ordered-by user semantics. 
+
+A.7 Generated: NETCONF Edit-Config Payload 
+
+Listing 8 shows the NETCONF <edit-config> RPC generated from the same DSL source. It targets the candidate datastore and carries the same source-hash as the YANG module and Kubernetes artifacts. 
+
+A.8 Generated: OpenClaw Gateway Policy 
+
+Listing 9 shows the openclaw.json fragment generated by the compiler. Two agents with different sandbox modes, four channel bindings, and tool allow/deny lists derived from Network endpoints are emitted from the same DSL source. Listing 10 shows the before_tool_call plugin hook compiled from the outbound_gate decision tree. The hook evaluates the same jailbreak and PII signals used by LangGraph and protocol gate targets, at the same thresholds, returning allow/deny with an audit trace that includes the source hash. 
+
+A.9 Agent Protocol Policy Gates 
+
+The same DSL-compiled policy evaluator runs at three protocol boundaries. Each gate uses the signal models from Table 3 and applies the same decision tree, with thresholds tuned for protocol message context (embedding threshold lowered from 0.70 to 0.65 because protocol messages include tool names and structured metadata that reduce cosine similarity). 
+
+MCP tools/call gate. The tool name is concatenated with the argument values to form the evaluated text, providing semantic context beyond raw JSON. The gate catches jailbreak and PII content in tool 22 Listing 3 Generated Kubernetes NetworkPolicy. 
+
+apiVersion: networking.k8s.io/v1 kind: NetworkPolicy metadata: name: dev-assistant-egress namespace: agents labels: app.kubernetes.io/managed-by: dsl-compiler dsl-framework.io/source-hash: 94b69c9d annotations: dsl-framework.io/networks: > atlassian,slack_api,huggingface dsl-framework.io/skills: jira,slack spec: podSelector: matchLabels: app.kubernetes.io/name: dev-assistant policyTypes: [Egress] egress: - to: # DNS - namespaceSelector: matchLabels: kubernetes.io/metadata.name: kube-system podSelector: matchLabels: k8s-app: kube-dns ports: - { protocol: UDP, port: 53 } - { protocol: TCP, port: 53 } - to: # SaaS endpoints - ipBlock: cidr: 0.0.0.0/0 except: - 10.0.0.0/8 - 172.16.0.0/12 - 192.168.0.0/16 ports: - { protocol: TCP, port: 443 } 
+
+Listing 4 Generated Sandbox CRD instance with PolicySpec annotations. 
+
+apiVersion: agents.x-k8s.io/v1alpha1 kind: Sandbox metadata: name: dev-assistant namespace: agents labels: app.kubernetes.io/name: dev-assistant app.kubernetes.io/managed-by: dsl-compiler dsl-framework.io/source-hash: 94b69c9d annotations: dsl-framework.io/policy-configmap: dev-assistant-routing-policy dsl-framework.io/networkpolicy: dev-assistant-egress dsl-framework.io/audit-level: full dsl-framework.io/skills: jira,slack dsl-framework.io/permitted-hosts: > *.atlassian.net,api.slack.com spec: podTemplate: metadata: labels: app.kubernetes.io/name: dev-assistant spec: containers: - name: agent image: agent-runtime:v1.2 resources: requests: { cpu: "1", memory: 2Gi } limits: { cpu: "1", memory: 2Gi } env: - name: POLICY_CONFIG value: /etc/policy/policy.json - name: AUDIT_LEVEL value: full volumeMounts: - name: policy-config mountPath: /etc/policy readOnly: true volumes: - name: policy-config configMap: name: dev-assistant-routing-policy volumeClaimTemplates: - metadata: { name: agent-workspace } spec: accessModes: [ReadWriteOnce] resources: requests: { storage: 5Gi } replicas: 1 
+
+23 Listing 5 Generated ConfigMap with structured routing policy. 
+
+> apiVersion: v1 kind: ConfigMap metadata: name: dev-assistant-routing-policy namespace: agents labels: app.kubernetes.io/managed-by: dsl-compiler dsl-framework.io/source-hash: 94b69c9d data: policy.json: | {"version": "v2026.03.27", "source_hash": "94b69c9d", "signals": { "jb_guard": { "kind": "jailbreak", "threshold": 0.50 }, "pii_detector": { "kind": "pii", "threshold": 0.60, "pii_types_allowed": [ "EMAIL_ADDRESS","GPE","AGE"] }, "jira_intent": { "kind": "embedding", "threshold": 0.70, "candidates": [ "create a jira issue", "open a bug ticket"] } }, "signal_models": { "jb_guard": "llm-semantic-router/...", "pii_detector": "llm-semantic-router/..." }}
+
+arguments while allowing legitimate tool calls. 
+
+A2A tasks/send gate. Text parts from the A2A message are concatenated and evaluated. Safe delegations are allowed; injection attempts are blocked by the same jailbreak signal. 
+
+Tool response gate. Evaluates tool output for indirect prompt injection before passing it back to the LLM, forming a defense-in-depth pattern with the input gate. 
+
+A.10 Threshold Tuning Examples 
+
+This section illustrates the tuning loop described in §4.4. 
+
+LangGraph compilation. Initial thresholds (jailbreak: 0.75, embedding: 0.78) were calibrated to placeholder evaluators. When replaced with the models in Table 3, several test cases failed: the embedding model produces cosine similarities in the 0.70–0.75 range (not 0.85+), and the PII token classifier flags geopolitical entities (GPE) that are not sensitive PII. The fix required changing only DSL declarations: threshold: 0.70 for embeddings, threshold: 0.50 for jailbreak (matching the model’s decision boundary), and adding GPE , AGE , DATE_TIME to pii_types_allowed . No routing logic, graph structure, or application code changed. After recompilation, all test cases passed. 
+
+Protocol gate compilation. The same thresholds from the orchestration target were applied to protocol gates, where tests initially failed. Protocol messages (MCP JSON-RPC, A2A task payloads) include tool names and structured metadata that reduce the embedding model’s cosine similarity compared to direct user queries. The embedding threshold was lowered from 0.70 to 0.65 in the DSL declaration—a single-line change that recompiled into all three protocol gates simultaneously. After recompilation, all test cases passed. 
+
+Cross-target consistency. In both cases, threshold changes in DSL declarations propagated to all compiler targets (LangGraph nodes, Kubernetes ConfigMap, NETCONF payload, protocol gates) on recompilation. The source hash embedded in all artifacts ensures version consistency across targets. 24 Listing 6 Audit trace entry with real model scores. 
+
+> {"ts": 1711540200.123, "policy_version": "v2026.03.27", "source_hash": "a3f8c2d1", "tree": "outbound_delegation_gate", "branch": "allow_jira", "branch_idx": 3, "signals": { "jb_guard": 0.0000, "pii_detector": 0.0000, "jira_intent": 0.9983, "jira_intent_raw": 0.7465, "slack_intent": 0.0017, "slack_intent_raw": 0.1113, "authz_jira": True }, "thresholds_crossed": { "jira_intent": "0.9983 > 0.5 (group)", "jira_intent_raw": "0.7465 > 0.70", "authz_jira": "True" }}
+
+## B LangGraph Implementation Notes 
+
+This appendix documents the framework-specific details underlying the compilation strategies of §3. The observations are based on the LangGraph v1.1.3 source code (modules graph/state.py ,
+
+pregel/main.py , pregel/_validate.py ). 
+
+State and channels. StateGraph is a builder whose state type is a TypedDict or Pydantic model. Each field becomes a channel with an optional reducer function. Nodes are Python callables (state ) →
+
+partial_update . Edges are static ( add_edge ), conditional ( add_conditional_edges(source, path_-fn) ), or implicit via Command(update=. . . , goto=. . . ) returned from a node. 
+
+Compilation. Calling .compile() invokes .validate() , which checks: (i) no orphan nodes, (ii) all edge targets exist, (iii) START has outgoing edges. It then builds a Pregel graph whose execution model is channel-driven message passing : nodes fire when their trigger channels receive writes, producing state updates and routing writes to branch:to:X channels. 
+
+Conditional edge dispatch (Strategy A). The conditional edge function is registered via add_conditional_-edges . At runtime, BranchSpec.run() reads fresh state (including the signal evaluation node’s writes) and invokes the edge function. The return type annotation ( Literal["allow", "deny", . . . ] )provides build-time validation that all targets are registered nodes. 
+
+Command dispatch (Strategy B). When a node returns Command(update=. . . , goto=. . . ) , Lang-Graph’s _control_branch processes the goto field into channel writes, combining state update, audit trace, and routing target in one atomic operation. 
+
+Audit trace channel. The audit_trace field uses an append reducer ( Annotated[list, operator.add] ). Downstream nodes can append but not overwrite previous entries. The checkpointer persists all state channels, making the full audit trail available for compliance queries. 25 Listing 7 Generated YANG module (truncated). 
+
+module vllm-sr-policy { namespace "urn:vllm:semantic-router:policy"; prefix vsr; revision 2026-03-27; identity signal-kind; identity authz { base signal-kind; } identity embedding { base signal-kind; } identity jailbreak { base signal-kind; } identity pii { base signal-kind; } container policy { leaf version { type string; } leaf source-hash { type string { length "8"; } } container signals { list signal { key "name"; leaf name { type string; } leaf kind { type identityref { base signal-kind; } } leaf threshold { type decimal64 { fraction-digits 2; range "0.00..1.00"; } } leaf model { type string; } leaf-list candidates { type string; } leaf-list pii-types-allowed { type string; } }}container routing { list decision-tree { key "name"; leaf name { type string; } list branch { key "priority"; ordered-by user; leaf priority { type uint8; } leaf condition { type string; } leaf backend { type string; } }}}container network { list network-endpoint { key "name"; leaf name { type string; } leaf host { type string; } leaf port { type uint16; } leaf skill { type string; } }}}}
+
+26 Listing 8 Generated NETCONF edit-config RPC (truncated). 
+
+<? xml version ="1.0" encoding="UTF-8"?> <rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="1"> <edit-config ><target >< candidate /></ target ><config ><policy xmlns= "urn:vllm:semantic-router:policy"> <version >v2026.03.27</ version ><source-hash>74f51a63</source-hash> <signals ><signal ><name >jb-guard</ name ><kind >vsr:jailbreak</ kind ><threshold >0.50</ threshold ><model >llm-semantic-router/ mmbert32k-jailbreak-detector -merged</ model ></ signal ><!-- ... pii, embedding signals ... --> </ signals ><routing ><decision-tree> <name >outbound-gate</ name ><branch ><priority >1</ priority ><condition >jb-guard</ condition ><backend >deny</ backend ></ branch ><!-- ... remaining branches ... --> </decision-tree> </ routing ></ policy ></ config ></edit-config ></ rpc >
+
+Listing 9 Generated OpenClaw agent configuration (truncated). 
+
+{"_dsl_metadata": { "source_hash": "ec1ff3ed", "policy_trees": ["safety_gate", "outbound_gate", "model_selector"] }, "agents": { "list": [ { "id": "dev-assistant", "model": "anthropic/claude-sonnet-4", "sandbox": { "mode": "non-main" }, "tools": { "allow": ["bash", "read", "write", "skill:jira", "skill:slack"], "deny": ["browser", "canvas", "cron"] }}, { "id": "ops-monitor", "model": "openai/gpt-4o-mini", "sandbox": { "mode": "all" }, "tools": { "allow": ["bash", "read", "write", "skill:slack"], "deny": ["browser", "canvas", "cron"] }}]}, "bindings": [ { "agentId": "dev-assistant", "match": { "channel": "slack", "guildId": "T0123DEVTEAM" }}, { "agentId": "ops-monitor", "match": { "channel": "telegram", "peer": "ops-group-123" }} ], "channels": { "slack": { "dmPolicy": "pairing" }, "telegram": { "dmPolicy": "allowlist" } }, "session": { "sendPolicy": { "dsl_safety_gates": [ { "signal": "jb_guard", "threshold": 0.50 }, { "signal": "pii_detector", "threshold": 0.60, "pii_types_allowed": ["EMAIL_ADDRESS","GPE","AGE"] } ]}}}
+
+27 Listing 10 Generated OpenClaw before_tool_call plugin hook (truncated). 
+
+// Auto-generated by DSL compiler // (source_hash: ec1ff3ed) // Decision tree: outbound_gate 
+
+import { evaluateSignal } 
+
+from "./dsl-signal-evaluator"; export async function beforeToolCall({ toolName, toolArgs, sessionKey, agentId, }) { const text = ‘${toolName} ${JSON.stringify(toolArgs)}‘; const jb_score = await evaluateSignal({ kind: "jailbreak", model: "llm-semantic-router/" + "mmbert32k-jailbreak-detector-merged", 
+
+input : text, }); 
+
+if (jb_score > 0.5) { 
+
+return { action: "deny", signal: "jb_guard", score: jb_score, source_hash: "ec1ff3ed" }; }const pii = await evaluateSignal({ kind: "pii", model: "llm-semantic-router/" + "mmbert-pii-detector-merged", 
+
+input : text, piiTypesAllowed: ["EMAIL_ADDRESS", "GPE", "AGE", "DATE_TIME"], }); 
+
+if (pii.score > 0.6) { 
+
+return { action: "deny", signal: "pii_detector", score: pii.score, source_hash: "ec1ff3ed" }; }
+
+return { action: "allow", tree: "outbound_gate", source_hash: "ec1ff3ed" }; }
+
+28

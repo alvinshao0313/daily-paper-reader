@@ -1,0 +1,328 @@
+Title: TurboAngle: Near-Lossless KV Cache Compression via Uniform Angle Quantization
+
+URL Source: https://arxiv.org/pdf/2603.27467v1
+
+Published Time: Tue, 31 Mar 2026 01:05:56 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+# TurboAngle: Near-Lossless KV Cache Compression via Uniform Angle Quantization 
+
+Dipkumar Patel LLMs Research Inc. 
+
+dipkumar@llmsresearch.ai 
+
+March 31, 2026 
+
+Abstract 
+
+We compress KV cache entries by quantizing angles in the Fast Walsh-Hadamard domain, where a random ±1 diagonal rotation makes consecutive element pairs uniformly distributed on the unit circle. We extend this angular quantizer with per-layer early-boost : independently configuring K and V codebook sizes at each layer, with higher precision for a model-specific subset of critical layers. Across seven models (1B to 7B parameters), per-layer early-boost achieves lossless compression ( ∆PPL ≤ 0) on four models and near-lossless quality ( ∆PPL ≤
+
+0.002 ) on two more, at 3.28 to 3.67 angle bits per element. Adding norm quantization with asymmetric K/V bit allocation (8-bit linear K norms, 4-bit log-space V norms) yields an end-to-end rate of 6.56 total bits on Mistral-7B with only ∆PPL = +0 .0014 , requiring zero calibration. A layer-group sensitivity analysis reveals that the critical layers, bottleneck type (K-dominated vs V-dominated), and even the existence of negative-transfer layers where increased precision degrades quality are all model-specific, providing actionable rules for configuring the quantizer on new architectures. 
+
+# 1 Introduction 
+
+KV cache memory scales as O(LHT d ) for a transformer with L layers, H attention heads, head dimension d, and T cached tokens. At long contexts, KV cache dominates model weight storage, making quantization essential for efficient inference. Existing methods [10, 7, 13, 5, 14] apply scalar or vector quantization to raw activations, but KV entries exhibit outliers, channel-dependent scales, and non-Gaussian marginals that complicate uniform quantization. These methods compensate with per-channel calibration, asymmetric codebooks, or fine-grained grouping. TurboAngle takes a different approach: transform the activations into a coordinate system where the distribution is provably uniform, then apply the information-theoretically optimal quantizer (uniform bins) with zero calibration. Applying a random ±1 diagonal rotation followed by the normalized FWHT produces output pairs whose angles on S1 are uniformly distributed in the large-d limit. The simplest possible quantizer is also the optimal one. The uniform-angle approach is effective but treats all layers identically. Transformers do not have uniform layer sensitivity: early layers typically encode broad contextual features that are more sensitive to quantization error, while later layers can tolerate coarser precision. We exploit this by introducing per-layer MixedKV , which assigns independent K-cache and V-cache codebook sizes to each layer. 1
+
+> arXiv:2603.27467v1 [cs.LG] 29 Mar 2026
+
+Contributions. 
+
+• We show that FWHT with random sign rotation produces uniform angles on S1 for consecutive element pairs, and build TurboAngle, an angular quantizer that exploits this property at log 2 n
+
+> 2
+
+bits per element. On Mistral-7B at 3.0 angle bits, TurboAngle achieves 14 .8× lower perplexity degradation than TurboQuant [13] sym4-g4 at 4.0 bits. 
+
+• We introduce per-layer MixedKV early-boost: assigning higher angular precision to the first 
+
+nearly layers (or model-specific critical layer groups) while keeping remaining layers at baseline. This achieves lossless compression ( ∆PPL ≤ 0) on 4 of 7 models and near-lossless ( ∆PPL ≤
+
+0.002 ) on 6 of 7, at 3.28–3.67 angle bits. 
+
+• We characterize per-model sensitivity patterns across seven architectures, discovering K-dominated vs V-dominated bottlenecks, non-monotonic layer-count scaling, and negative-transfer layers where boosting precision actively degrades quality. 
+
+• We quantize the per-pair norms with asymmetric K/V bit allocation, finding that K norms require 8-bit precision while V norms tolerate 4-bit log-space quantization. The best end-to-end configuration on Mistral-7B ( d = 128 ) achieves 6.56 total bits at ∆PPL = +0 .0014 with zero calibration. 
+
+# 2 Background 
+
+Fast Walsh-Hadamard Transform. The normalized Hadamard matrix H ∈ { + 1√d , − 1√d }d×d
+
+defines an orthogonal transform computable in O(d log d) via a butterfly decomposition. Because 
+
+H is symmetric and orthonormal, it is self-inverse: H−1 = HT = H. The forward and inverse transforms are identical, and the transform preserves norms. 
+
+Angle uniformity after random rotation. Let D = diag( s1, . . . , s d) with si ∼ Uniform( {+1 , −1})
+
+drawn independently, and define y = HDx for an input x ∈ Rd. Each output coordinate yj =
+
+> 1√d
+
+P 
+
+> i
+
+siHji xi is a weighted sum of d independent sign-randomized terms. As d grows, the Cen-tral Limit Theorem drives yj toward a Gaussian. The consecutive pair (y2i, y 2i+1 ) approaches a spherically symmetric 2D Gaussian N (0 , σ 2I2), because the random diagonal D breaks the inter-coordinate correlations that would otherwise arise from Hadamard structure. For any spherically symmetric 2D distribution, the angle θ = atan2( y2i+1 , y 2i) is exactly Uniform([0 , 2π)) , independent of the radius r =
+
+q
+
+y22i + y22i+1 .At d = 128 (Mistral-7B’s head dimension), the Gaussian approximation is already tight, and angular uniformity holds empirically to high precision. At d = 64 (used by TinyLlama, SmolLM2, OLMo, phi-1.5, and StableLM-2), the approximation remains effective for practical purposes, as confirmed by our experiments. 
+
+# 3 Method 
+
+3.1 Angular Quantization 
+
+TurboAngle encodes each KV cache vector by transforming it into the Hadamard domain with a random sign rotation, decomposing consecutive output pairs into polar coordinates, quantizing 2Algorithm 1 TurboAngle Encode 
+
+Require: KV cache tensor x ∈ Rd, number of angle bins n, rotation matrix D (shared)  
+
+> 1:
+
+y ← H · D · x {normalized FWHT after ±1 diagonal rotation}  
+
+> 2:
+
+for i = 0 to d/ 2 − 1 do  
+
+> 3:
+
+ri ←
+
+q
+
+y22i + y22i+1  
+
+> 4:
+
+θi ← atan2( y2i+1 , y 2i) 
+
+> 5:
+
+ki ← ⌊ n · θi/(2 π)⌉ mod n {uniform angular quantization}  
+
+> 6:
+
+end for  
+
+> 7:
+
+return {(ri, k i)}d/ 2−1
+
+> i=0
+
+the angles uniformly, and storing the norms separately. Algorithm 1 states the compression path. Figure 1 shows the full encode-decode pipeline. Reconstruction maps each stored pair (ri, k i) back to Cartesian coordinates: ˆy2i = ri cos(2 πk i/n ),
+
+ˆy2i+1 = ri sin(2 πk i/n ). The original-domain approximation follows from the inverse transform 
+
+ˆx = DH ˆy, using the self-inverse property H−1 = H and D−1 = D.
+
+Rate accounting. Each angle index ki ∈ { 0, . . . , n −1} requires log 2 n bits. With one index per pair of elements, the angular bit rate is log 2 n 
+
+> 2
+
+bits per element. These rates count only angle storage; each pair norm ri is stored in fp32 (equivalently 16 bits per element). 
+
+Implementation. The diagonal D is sampled once from a seeded PRNG and shared across all layers, heads, and tokens. The FWHT operates head-dimension-wise using in-place butterfly oper-ations in PyTorch, adding negligible latency relative to attention. 
+
+3.2 Per-Layer MixedKV Early-Boost 
+
+Uniform angular quantization applies the same codebook size n to every layer and to both key and value caches. We relax both constraints. Per-layer MixedKV assigns an independent pair (n(ℓ) 
+
+> K
+
+, n (ℓ) 
+
+> V
+
+)
+
+of angle codebook sizes to layer ℓ, where n(ℓ) 
+
+> K
+
+controls key precision and n(ℓ) 
+
+> V
+
+controls value precision. The average angle bit rate across L layers is: 
+
+¯b = 1
+
+L
+
+> L
+
+X
+
+> ℓ=1
+
+log 2 n(ℓ) 
+
+> K
+
++ log 2 n(ℓ)
+
+> V
+
+4 (1) where the factor of 4 accounts for the pair-to-element ratio ( ÷2) and the K/V average ( ÷2). The simplest and most effective allocation strategy is early-boost : assign higher precision to the first nearly layers while keeping the rest at the uniform baseline ( nK = 128 , n V = 64 , i.e., 3.25 bits). A typical early-boost configuration uses (n(ℓ) 
+
+> K
+
+, n (ℓ) 
+
+> V
+
+) = (256 , 128) for ℓ < n early , adding approximately 0.5 bits per element to those layers. Not all models respond to simple early-boost. On phi-1.5, we find that a selective configuration is necessary: boosting layers 0–7 and 16–23 while keeping layers 8–15 at baseline (Section 4.4). This demonstrates that per-layer MixedKV enables configurations that contiguous early-boost cannot express. The full configuration search involves two decisions: which layers to boost, and what codebook sizes to assign. We find a simple heuristic works well in practice: (1) test nearly ∈ { 4, 8, 16 } with 
+
+(256 , 128) and (128 , 256) for early layers, (2) pick whichever gives lower ∆PPL , (3) adjust nearly if improvement continues. This procedure requires three to five evaluation runs per model. 3Figure 1: TurboAngle pipeline. Top: the compression path applies a random diagonal rotation D,the normalized FWHT H, polar decomposition of consecutive pairs, and uniform angle quantization on S1, storing angle indices ki and norms ri. Bottom: reconstruction maps (ki, r i) back to Cartesian coordinates via trigonometric lookup, then applies the inverse FWHT to recover the approximate KV vector. 
+
+3.3 Norm Quantization 
+
+Angular quantization preserves angles but stores the per-pair norm ri in fp32, adding 16 bits per element overhead. For a deployable compressor, the norms must also be quantized. We apply per-vector min-max scalar quantization at bnorm bits: given a vector of d/ 2 norms, we store the minimum and maximum in fp32 (64 bits of overhead per vector) and map each norm to a bnorm -bit unsigned integer via 
+
+ˆri = round 
+
+ ri − rmin 
+
+rmax − rmin 
+
+· (2 bnorm − 1) 
+
+
+
+. (2) 
+
+Log-space variant. Pair norms ri are strictly positive and right-skewed. Quantizing log( ri)
+
+instead of ri spreads the codebook more evenly across the distribution, allocating finer granularity to the dense region of small norms and coarser granularity to the sparse tail of large norms. At 8 bits, linear and log-space quantization perform comparably. At 4 bits, log-space quantization reduces perplexity degradation substantially because the 16 available levels cover the dynamic range more efficiently. 
+
+Asymmetric K/V norm bits. K-cache norms are 10–20 × more sensitive to quantization error than V-cache norms. Quantizing K norms to 4 bits produces catastrophic degradation on most models, while V norms tolerate 4-bit log-space quantization with negligible quality loss. We therefore 4adopt an asymmetric allocation: 8-bit linear norms for K, 4-bit log-space norms for V (denoted K8V4-log). 
+
+Total bit rate. Each element’s total storage cost combines the angle bits, the norm bits, and the per-vector min-max overhead: 
+
+btotal = bangle + bnorm 
+
+2 + 64 
+
+d (3) where bnorm /2 accounts for one norm per pair of elements, and 64 /d distributes the two fp32 min-max scalars across d elements. For the K8V4-log configuration with bangle = 3 .25 and d = 128 (Mistral-7B), this gives btotal = 3 .25 + (8 + 4) /(2 · 2) + 64 /128 = 3 .25 + 3 .0 + 0 .5 = 6 .75 bits per element. Averaging over K and V separately (K gets 3.25 + 4 .0 + 0 .5 = 7 .75 , V gets 3.25 + 2 .0 + 0 .5 = 5 .75 ), the K/V-averaged rate is 6.75 bits; the per-layer early-boost adjustment yields the final rate of approximately 6.56 bits reported in Section 4.6. For d = 64 models, the 64 /d = 1 .0 overhead term is larger, pushing total rates to 7.3–8.3 bits. 
+
+# 4 Experiments 
+
+4.1 Setup 
+
+We evaluate seven models spanning 1B to 7B parameters and four architecture families: TinyLlama-1.1B [15], Mistral-7B-v0.1 [8], SmolLM2-1.7B [1], phi-1.5 [9], StableLM-2-1.6B [2], StarCoder2-3B [11], and OLMo-1B [4]. Perplexity is measured on the first 32,768 tokens of WikiText-2 [12] validation split, divided into 32 non-overlapping 1,024-token chunks. All experiments use a fixed random diagonal D (same seed across configurations). KV quantization is applied at every layer to both key and value caches. The uniform baseline uses nK = 128 , nV = 64 (3.25 angle bits per element) applied identically to all layers. This serves as the reference point for per-layer early-boost comparisons. All ∆PPL 
+
+values are relative to fp16 inference with no quantization. 
+
+4.2 Comparison with Scalar Quantization 
+
+Table 1 compares TurboAngle against TurboQuant [13] scalar quantization on Mistral-7B and TinyLlama. On Mistral-7B, TurboAngle with n = 64 (3.0 angle bits) achieves ∆PPL = +0 .0010 ,while TurboQuant sym4-g4 at 4.0 bits degrades by +0 .0148 : 14 .8× more distortion at a higher bit rate. At the same 3.0 bits, TQ-sym3-g4 degrades by +0 .1224 , making TurboAngle 122 × better. On TinyLlama, the best TurboAngle point is n = 56 at ∆PPL = +0 .0108 , versus sym4-g4’s +0 .1295 :
+
+12 .0× lower degradation with 1.1 fewer bits. 
+
+4.3 Per-Layer Early-Boost Results 
+
+Table 2 reports per-layer early-boost results across all seven models. Six of seven models achieve 
+
+∆PPL ≤ 0.0012 , with four achieving lossless compression ( ∆PPL ≤ 0). Table 3 details the optimal configuration for each model, including the type of precision bottle-neck and the layers that require boosting. The results reveal three distinct sensitivity patterns: 5Table 1: Angular vs scalar quantization. ∆PPL (lower is better). TurboAngle bit rates count angle bits only; norms are stored in fp32.                                
+
+> Method Bits/elem ∆PPL ↓
+> Mistral-7B TinyLlama TurboAngle ( n= 32 )2.50 +0.0104 +0.0694 TurboAngle ( n= 48 )2.79 +0.0034 +0.0150 TurboAngle ( n= 64 )3.00 +0.0010 +0.0176 †
+> TurboAngle ( n= 128 )3.50 +0.0030 +0.0036 TQ-sym4-g4 4.00 +0.0148 +0.1295 TQ-sym3-g4 3.00 +0.1224 +0.7814
+> †Non-monotone: n=64 is worse than n=56 on TinyLlama (Section 4.8).
+
+Table 2: Per-layer early-boost results on seven models. WikiText-2 perplexity at 32K tokens. “Uniform” is the K128V64 baseline (3.25 angle bits/element). Best per-layer config is the optimal configuration found through systematic sweep. Angle bits count only angular indices; norms are in fp32.                                          
+
+> Model LPPL base Uniform (3.25b) Best per-layer
+> ∆PPL ∆PPL bits TinyLlama-1.1B 22 8.913 +0.0011 −0.0022 3.34 Mistral-7B 32 5.844 +0.0018 +0 .0002 3.31 SmolLM2-1.7B 24 8.930 +0.0071 −0.0003 3.67 phi-1.5 24 28.63 +0.0245 0.0000 3.58 StableLM-2-1.6B 32 9.790 +0.0207 +0 .0012 3.63 StarCoder2-3B 40 11.11 +0.0051 −0.0007 3.45 OLMo-1B 32 14.82 +0.0136 +0 .0063 3.28
+
+Concentrated sensitivity (E4 optimal). TinyLlama, Mistral-7B, and OLMo-1B concentrate their quantization sensitivity in layers 0–3. For TinyLlama, the bottleneck is in the value cache: boosting nV from 64 to 256 for the first four layers produces lossless compression, while boosting 
+
+nK instead provides no improvement. For Mistral-7B, the reverse holds: nK = 256 is required while 
+
+nV = 128 is sufficient. For OLMo-1B, only K precision matters, and nV = 64 is sufficient for all layers. In all three cases, extending the boost beyond four layers degrades quality. 
+
+Broad sensitivity (E16–E24 optimal). SmolLM2, StableLM-2, and StarCoder2 require boost-ing a large fraction of their layers. SmolLM2 achieves lossless quality only at E20 (20 of 24 layers), with E18 still showing ∆PPL = +0 .0019 . StableLM-2 shows a sharp quality cliff: E23 gives 
+
+∆PPL = +0 .0042 , while E24 drops to +0 .0012 . StarCoder2 exhibits non-monotonic scaling: E4 gives +0 .0020 , E8 gives +0 .0017 , E12 gives +0 .0024 (worse), and E16 drops to −0.0007 (lossless). 
+
+Selective sensitivity (phi-1.5). phi-1.5 requires a non-contiguous configuration. A layer-group analysis (Section 4.4) reveals that layers 8–15 exhibit negative transfer. The optimal configuration boosts layers 0–7 and 16–23 while keeping layers 8–15 at baseline, achieving ∆PPL = 0 .0000 at 3.58 angle bits. Contiguous early-boost (E8) achieves only +0 .0052 at 3.42 bits, and extending to E16 adds the harmful mid-layer range without improvement. 6Table 3: Optimal per-layer configurations. nearly  
+
+> K
+
+, n early  
+
+> V
+
+are the angle codebook sizes for boosted layers; remaining layers use nK =128 , n V =64 .                                         
+
+> Model Boosted layers nearly
+> Knearly
+> VType Notes TinyLlama 0–3 128 256 V-dom V=256 required; K=128 sufficient Mistral-7B 0–3 256 128 K-dom K=256 required; E8 is worse SmolLM2 0–19 256 128 K+V Lossless requires 20 of 24 layers phi-1.5 0–7, 16–23 256 128 K-sel Skip 8–15 (negative transfer) StableLM-2 0–23 256 128 K+V 24 of 32 layers; sharp cliff at E24 StarCoder2 0–15 256 128 K+V 16 of 40 layers; non-monotonic OLMo 0–3 256 64 K-dom E8 is 2.4 ×worse than E4
+
+4.4 Layer Sensitivity Analysis 
+
+To understand why some models exhibit non-contiguous sensitivity, we conduct a layer-group sen-sitivity sweep on phi-1.5. We partition the 24 layers into six groups of four (G0: layers 0–3, G1: 4–7, . . . , G5: 20–23) and measure ∆PPL when boosting exactly one group to nK = 256 , n V = 128 
+
+while keeping all others at the uniform baseline. Table 4: Layer-group sensitivity for phi-1.5. Each row boosts one 4-layer group to K256V128 (3.33 angle bits) while the rest stays at K128V64 (3.25 bits). Uniform baseline ∆PPL = +0.0245.                      
+
+> Group Layers ∆PPL Interpretation G0 0–3 +0.0122 Most beneficial (50% reduction) G1 4–7 +0.0175 Second most beneficial G5 20–23 +0.0157 Third; unexpectedly helpful G2 8–11 +0.0192 Marginal improvement G4 16–19 +0.0210 Marginal improvement G3 12–15 +0.0263 Negative transfer : worse than uniform
+
+Table 4 shows that group contributions are not additive. G0 provides the largest single-group benefit, reducing ∆PPL from 0.0245 to 0.0122. G3 (layers 12–15) is the only group that increases degradation above the uniform baseline, from 0.0245 to 0.0263. When combinations are tested: 
+
+• E8 (G0+G1): ∆PPL = +0 .0052 (synergistic; better than either group alone) 
+
+• E8+G4 (layers 0–7, 16–19): +0 .0035 (adding G4 to E8 helps) 
+
+• E8+G5 (layers 0–7, 20–23): +0 .0035 (adding G5 to E8 helps equally) 
+
+• E8+G4+G5 (layers 0–7, 16–23): 0.0000 (lossless; combining both helps further) 
+
+• E8+G2+G4+G5 (layers 0–11, 16–23): +0 .0052 (adding G2 erases the G4+G5 benefit) The last result is particularly informative: adding G2 (layers 8–11) to the lossless E8+G4+G5 configuration restores the degradation to exactly the E8 floor of 0.0052. Layers 8–15 as a whole introduce interference that offsets gains from other groups. The optimal configuration for phi-1.5 is precisely the complement of this harmful mid-range: layers 0–7 and 16–23. 7Table 5: Norm quantization results. ∆PPL relative to fp16 inference. “FP32” column reproduces the best per-layer angle-only results from Table 2. “norm8” applies 8-bit per-vector min-max quan-tization to all norms. “K8V4-log” uses 8-bit linear K norms and 4-bit log-space V norms. Total bits includes angle bits, norm bits, and per-vector min-max overhead.                                            
+
+> Model dFP32 ∆PPL norm8 ∆PPL K8V4-log ∆PPL K8V4-log bits TinyLlama-1.1B 64 −0.0022 +0.0011 +0.0104 ∼6.84 Mistral-7B 128 +0.0002 +0.0012 +0.0014 ∼6.56 SmolLM2-1.7B 64 −0.0003 +0.0027 +0.0030 ∼7.67 phi-1.5 64 0.0000 −0.0017 +0.0017 ∼7.58 StableLM-2-1.6B 64 +0.0012 +0.0021 +0.0123 ∼7.63 StarCoder2-3B 64 −0.0007 −0.0007 +0.0061 ∼7.45 OLMo-1B 64 +0.0063 +0.0118 +0.0344 ∼7.28
+
+4.5 K vs V Sensitivity 
+
+The early-boost experiments differentiate between K-cache and V-cache bottlenecks. On TinyLlama (d = 64 , GQA 8:1), the bottleneck is in V: E4 with (nK , n V ) = (128 , 256) gives ∆PPL = −0.0022 ,while (256 , 128) gives +0 .0030 . On Mistral-7B ( d = 128 , GQA 4:1), the reverse holds: (256 , 128) 
+
+gives +0 .0002 while (128 , 256) gives +0 .0016 . On OLMo-1B ( d = 64 ), only K precision matters: 
+
+(256 , 64) at ∆PPL = +0 .0063 outperforms (256 , 128) at +0 .0072 , and nK = 512 makes things worse (+0 .0118 ). Empirically, the pattern correlates with head dimension: models with d = 64 tend toward either V-dominated (TinyLlama) or K-dominated (OLMo, phi-1.5) bottlenecks, while d = 128 (Mistral) is K-dominated. This is consistent with the observation that larger head dimensions spread angular information more evenly across K and V, while smaller dimensions concentrate it. 
+
+4.6 Norm Quantization Results 
+
+Table 5 reports end-to-end results when norm quantization replaces fp32 norm storage. We compare three configurations: fp32 norms (the angle-only reference from Table 2), 8-bit linear norms applied to both K and V (norm8), and asymmetric K8V4-log (8-bit linear K norms, 4-bit log-space V norms). The 8-bit norm configuration (norm8) adds minimal degradation on most models: five of seven show |∆PPL | ≤ 0.003 , and two (phi-1.5 and StarCoder2) actually improve over fp32 norms. OLMo-1B is the most sensitive, degrading from +0 .0063 to +0 .0118 .The K8V4-log configuration reveals a sharp asymmetry. V norms tolerate 4-bit log-space quan-tization well: the V-only contribution to degradation is small across all models. K norms, by contrast, are 10–20 × more sensitive. Reducing K norms to 4 bits (tested but not shown) produces catastrophic degradation on five of seven models, confirming that K-cache attention scores depend on precise norm scaling. The K8V4-log compromise preserves K norm fidelity at 8 bits while saving 2 bits per V norm element through log-space 4-bit quantization. On Mistral-7B ( d = 128 ), K8V4-log achieves ∆PPL = +0 .0014 at 6.56 total bits per element. For d = 64 models, the higher per-vector overhead ( 64 /d = 1 .0 vs 0.5) pushes total rates to 6.8–7.7 bits. The norm8 configuration provides a safer option at approximately 7.8 bits (for d = 128 ) or 8.3 bits (for d = 64 ) with consistently lower degradation. 8Table 6: Comparison with calibration-based KV cache quantizers. ∆PPL is the reported perplexity degradation on the respective evaluation model. TurboAngle requires zero calibration data and no per-channel statistics.                         
+
+> Method Total bits ∆PPL Calibration Source CQ-2c8b [6] 4.00 +0.03 (Mistral) Yes NeurIPS 2024 KVQuant-4b-1% [7] 4.32 +0.01 (LLaMA-7B) Yes NeurIPS 2024 AQUA-KV 3b [3] ∼3.0 +0.03 (Llama-3.1-8B) Yes ICML 2025 TurboAngle K8V4-log 6.56 +0.0014 (Mistral) No This work TurboAngle norm8 7.81 +0.0012 (Mistral) No This work
+
+4.7 Competitive Comparison 
+
+Table 6 places TurboAngle in context with recent calibration-based KV cache quantizers. TurboAngle operates at a fundamentally different point on the rate-quality tradeoff. At 6.56 total bits, K8V4-log uses 50–65% more bits than the calibration-based methods but achieves 7–21 ×
+
+lower perplexity degradation ( +0.0014 vs +0.01 to +0.03). The norm8 configuration at 7.81 bits achieves even better quality ( +0.0012). Both TurboAngle configurations require zero calibration data, no per-channel statistics, and no model-specific tuning of the quantizer itself (only the layer-boost schedule is model-specific). The comparison is not apples-to-apples: different evaluation models and datasets are used across methods. The bit rates also differ substantially. The key takeaway is that calibration-free angular quantization can match or exceed the quality of calibration-based methods by spending moderately more bits, and the quality gap at matched bit rates would require future work to establish. For deployment scenarios where calibration is impractical (e.g., serving many model variants, frequent model updates, or edge deployment), TurboAngle offers a competitive alternative at higher bit rates. 
+
+4.8 Non-Monotone Behavior 
+
+Two forms of non-monotonic behavior appear in our experiments. The first, reported in prior work on TurboAngle, occurs at power-of-2 bin counts: on TinyLlama, n = 64 (∆PPL = +0 .0176 )is worse than both n = 56 (+0 .0108 ) and n = 128 (+0 .0036 ). We conjecture this arises from algebraic aliasing between the quantization grid and the Hadamard butterfly structure, where n = 2 k
+
+causes quantization boundaries to align with the quadrant structure produced by butterfly stages, producing coherent rather than independent errors. The second form is new: non-monotonic nearly scaling. On OLMo-1B, E4 gives ∆PPL = +0 .0063 
+
+while E8 gives +0 .0154 (2.4 × worse). On StarCoder2, E12 ( +0 .0024 ) is worse than E8 ( +0 .0017 ), but E16 ( −0.0007 ) is the best. These patterns indicate that boosting some intermediate layers introduces more quantization error than it removes, likely because those layers have internal repre-sentations that are less robust to angular perturbation. 
+
+# 5 Related Work 
+
+KV cache quantization methods differ along three axes: whether they operate on raw activations or a transformed domain, what quantizer structure they use, and whether they require calibration data. KIVI [10] applies per-channel asymmetric 2-bit quantization directly to raw KV activations, handling channel-dependent distributions through per-channel parameters. KVQuant [7] extends 9this with per-vector quantization and explicit outlier handling for long-context inference. Both work in the original coordinate system and rely on calibration. TurboAngle eliminates calibration entirely by transforming to a domain where the distribution is known a priori .CQ [6] couples key and value quantization at 1 bit per channel, leveraging the observation that K and V tensors within the same layer share structural correlations. At 4.0 total bits on Mistral-7B, CQ achieves ∆PPL ≈ +0 .03 ; TurboAngle at 6.56 bits achieves 21 × lower degradation without any calibration or coupling assumptions. AQUA-KV [3] pushes KV cache compression to approximately 3 bits through adaptive quan-tization with learned per-channel scales, achieving ∆PPL ≈ +0 .03 on Llama-3.1-8B. The method requires calibration data and per-model tuning of channel-level parameters. TurboQuant [13] introduced the FWHT with random diagonal rotation as preprocessing before scalar quantization, showing that the transform reduces outliers and concentrates energy. TurboAn-gle replaces scalar quantization with angular quantization, targeting the distributional property (an-gle uniformity) rather than the secondary effect (reduced kurtosis). The difference is fundamental: TurboQuant applies a generic quantizer to approximately Gaussian transformed coordinates, while TurboAngle applies the provably optimal quantizer for the exact angular distribution. PolarQuant [5] also quantizes angular components, and its stronger variant applies random preconditioning. However, the post-rotation angular distribution in PolarQuant is concentrated rather than uniform, requiring k-means codebooks. TurboAngle uses the same class of random rotation but exploits uniformity directly, replacing learned codebooks with a fixed grid. QJL [14] applies a Johnson-Lindenstrauss random projection followed by 1-bit sign quantization, trading extreme compression for higher approximation error. The projection is spiritually similar to TurboAngle’s rotation in that both randomize the coordinate system. Our per-layer MixedKV approach relates to DiffKV-style differentiated precision [10], where K and V caches receive different bit widths based on their sensitivity. We extend this principle to per-layer granularity with independent K/V codebook sizing, and provide systematic evidence across seven models for when and why asymmetric allocation helps. 
+
+# 6 Conclusion 
+
+TurboAngle demonstrates that the FWHT’s angular uniformity property enables near-lossless KV cache compression. Per-layer early-boost, which allocates higher angular precision to model-specific critical layers, achieves lossless compression on four of seven tested models and near-lossless quality on six of seven, at 3.28 to 3.67 angle bits per element. Adding norm quantization with asymmetric K/V allocation (8-bit linear K norms, 4-bit log-space V norms) yields end-to-end rates of 6.56 total bits on Mistral-7B at ∆PPL = +0 .0014 and 7.3–7.7 total bits on d = 64 models, all without calibration data. The norm quantization experiments reveal a previously unreported asymmetry: K-cache norms are 10–20 × more sensitive to quantization error than V-cache norms. Reducing K norms below 8 bits causes catastrophic degradation, while V norms tolerate 4-bit log-space quantization with negligible quality loss. This K/V norm asymmetry parallels the K/V angle sensitivity discovered in the early-boost experiments, reinforcing that key and value caches play fundamentally different roles in attention and should be quantized asymmetrically. Three practical insights emerge from this work. First, early layers (0–3 or 0–7) are universally the most sensitive to quantization. Second, K vs V sensitivity correlates with head dimension and attention structure, providing a heuristic for initial configuration. Third, a small number of evaluation runs (3–5) suffices to find near-optimal per-layer configurations for new models. 10 Limitations. We evaluate perplexity on WikiText-2 only; downstream task accuracy and long-context benchmarks (e.g., LongBench) remain untested. Runtime overhead of the FWHT en-code/decode path has not been measured under realistic batch and sequence sizes. The uniformity argument is asymptotic in d; finite-dimension errors may affect models with very small head dimen-sions ( d < 32 ). Confidence intervals over multiple seeds for the random diagonal D are not reported; 
+
+∆PPL differences below approximately 0.001 should be interpreted with appropriate caution. The competitive comparison (Table 6) uses numbers from different evaluation setups (different models, datasets, and sequence lengths), so the quality ratios are indicative rather than definitive. 
+
+# References 
+
+[1] Loubna Ben Allal, Anton Lozhkov, Elie Bakouch, Gabriel Martín Blázquez, Guilherme Penedo, Lewis Tunstall, Andrés Marafioti, Hynek Kydlíček, et al. SmolLM2: When smol goes big – data-centric training of a small language model. arXiv preprint arXiv:2502.02737 , 2025. [2] Marco Bellagente, Jonathan Tow, Dakota Mahan, Duy Phung, Maksym Zhuravinskyi, Reshinth Adithyan, James Baicoianu, Ben Brooks, Nathan Cooper, Ashish Datta, et al. Stable LM 2 1.6B technical report. arXiv preprint arXiv:2402.17834 , 2024. [3] Haojie Duanmu, Zhihang Zhuo, Xiuhan Jia, Xijie Li, Ao Sun, Fangcheng Ye, Yibo Wang, Shiyu Liu, and Hao Zhang. AQUA-KV: Adaptive quantization for attention key-value cache. arXiv preprint arXiv:2501.19392 , 2025. ICML 2025. [4] Dirk Groeneveld, Iz Beltagy, Pete Walsh, Akshita Bhagia, Rodney Kinney, Oyvind Tafjord, Ananya Harsh Jha, Hamish Ivison, Ian Magnusson, Yizhong Wang, et al. OLMo: Accelerating the science of language models. arXiv preprint arXiv:2402.00838 , 2024. [5] Insu Han, Praneeth Kacham, Amin Karbasi, Vahab Mirrokni, and Amir Zandieh. PolarQuant: Quantizing KV caches with polar transformation. arXiv preprint arXiv:2502.02617 , 2025. [6] Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Amir Gholami, Kurt Keutzer, Michael W. Mahoney, and Yakun Sophia Shao. KV Cache is 1 Bit Per Channel: Efficient large language model inference with coupled quantization. In Advances in Neural Information Processing Systems , 2024. [7] Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W. Mahoney, Yakun Sophia Shao, Kurt Keutzer, and Amir Gholami. KVQuant: Towards 10 million context length LLM inference with KV cache quantization. In Advances in Neural Information Processing Systems ,2024. [8] Albert Q. Jiang, Alexandre Sablayrolles, Arthur Mensch, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Florian Bressand, Gianna Lengyel, Guillaume Lample, Lucile Saulnier, Lélio Renard Lavaud, Marie-Anne Lachaux, Pierre Stock, Teven Le Scao, Thibaut Lavril, Thomas Wang, Timothée Lacroix, and William El Sayed. Mistral 7b. arXiv preprint arXiv:2310.06825 , 2023. [9] Yuanzhi Li, Sébastien Bubeck, Ronen Eldan, Allie Del Giorno, Suriya Gunasekar, and Yin Tat Lee. Textbooks are all you need II: phi-1.5 technical report. arXiv preprint arXiv:2309.05463 ,2023. 11 [10] Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. KIVI: A tuning-free asymmetric 2bit quantization for KV cache. In 
+
+International Conference on Machine Learning , 2024. [11] Anton Lozhkov, Raymond Li, Loubna Ben Allal, Federico Cassano, Joel Lamy-Poirier, Noua-mane Tazi, Ao Tang, Dmytro Pykhtar, Jiawei Liu, Yuxiang Wei, et al. StarCoder 2 and The Stack v2: The next generation. arXiv preprint arXiv:2402.19173 , 2024. [12] Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture models. arXiv preprint arXiv:1609.07843 , 2016. [13] Amir Zandieh, Majid Daliri, Majid Hadian, and Vahab Mirrokni. TurboQuant: Online vector quantization with near-optimal distortion rate. arXiv preprint arXiv:2504.19874 , 2025. [14] Amir Zandieh, Majid Daliri, and Insu Han. QJL: 1-bit quantized JL transform for KV cache quantization with zero overhead. In Proceedings of the AAAI Conference on Artificial Intelli-gence , 2025. [15] Peiyuan Zhang, Guangtao Zeng, Tianduo Wang, and Wei Lu. TinyLlama: An open-source small language model. arXiv preprint arXiv:2401.02385 , 2024. 12

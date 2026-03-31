@@ -1,0 +1,422 @@
+Title: KVSculpt: KV Cache Compression as Distillation
+
+URL Source: https://arxiv.org/pdf/2603.27819v1
+
+Published Time: Tue, 31 Mar 2026 01:40:07 GMT
+
+Number of Pages: 9
+
+Markdown Content:
+# KVS CULPT : KV Cache Compression as Distillation 
+
+Bo Jiang 
+
+Temple University 
+
+bo.jiang@temple.edu 
+
+Sian Jin 
+
+Temple University 
+
+sian.jin@temple.edu 
+
+Abstract 
+
+KV cache compression is critical for efficient long-context LLM inference. Approaches that reduce the per-pair footprint—quantization and low-rank decomposition—are orthogonal to those that reduce the sequence length of the cache. Along the sequence-length dimension, existing methods range from pure eviction— selecting which KV pairs to keep—to merging, which combines similar pairs into fewer ones. Both remain anchored to the original cache en-tries. We propose KVS CULPT , which moves to the other end of this spectrum: instead of selecting or combining original pairs, we opti-mize a smaller set of unconstrained KV pairs in continuous embedding space to preserve each layer’s attention behavior. Keys are optimized via L-BFGS and values are solved in closed form via least squares, alternating every few steps. On top of this, we introduce adaptive budget allocation , which uses a cheap pilot compression run to redistribute the compres-sion budget across layers and KV heads based on per-component difficulty. On Qwen2.5-1.5B-Instruct with 2048-token contexts, KVS CULPT reduces KL diver-gence by 3.5–4.1× compared to Select+Fit— attention-score eviction with least-squares value fitting—across compression ratios r ∈{0.3, 0.5, 0.7}. Adaptive allocation provides an additional 1.3× KL reduction at no extra inference cost. Analysis reveals that compres-sion difficulty is highly non-uniform: per-layer pilot MSE varies by up to 100 × across layers, and the two KV heads within a single layer can differ by up to 467 ×—demonstrating that fine-grained budget allocation is essential. 
+
+1 Introduction 
+
+Autoregressive large language models (LLMs) cache key-value (KV) pairs from all previously generated tokens to avoid recomputation during in-ference (Vaswani et al., 2017). For long contexts, this KV cache becomes the dominant memory bot-tleneck, consuming tens of gigabytes for a single sequence (Kwon et al., 2023). KV cache compres-sion is therefore essential for practical deployment. KV cache compression broadly falls into two dimensions: reducing the size of each pair (quan-tization, low-rank) and reducing the number of pairs (sequence length). Along the sequence-length dimension, methods range from pure eviction to merging. Eviction selects k pairs to keep: criteria include attention score accumulation (Zhang et al., 2023), recency with attention sinks (Xiao et al., 2024), persistence of importance (Liu et al., 2023), and pyramidal allocation (Cai et al., 2024). Merg-ing combines similar pairs, modifying values but remaining anchored to the original cache structure. A hybrid variant fits new values for the selected positions via least squares (Devoto et al., 2024), but the keys —and thus which regions of embed-ding space are represented—remain constrained to original cache entries. We argue that this discrete selection framework is unnecessarily restrictive. After RoPE encoding (Su et al., 2024), KV pairs are vectors in a continu-ous embedding space with no inherent ordering— their positional information is already baked into the embeddings. There is no reason the compressed cache must be a subset of the original; any set of k
+
+vectors that reproduces the correct attention behav-ior is equally valid. We propose KVS CULPT , which reformulates KV cache compression as distillation (Hinton et al., 2015) into a smaller cache (Figure 1). Given a full KV cache of N pairs per layer, we optimize 
+
+k unconstrained key-value pairs such that the atten-tion output under the compressed cache matches the original. Keys are optimized with L-BFGS (Liu and Nocedal, 1989), a quasi-Newton method well-suited to the smooth but non-convex attention landscape; values are solved analytically via ridge regression, given the attention weights induced by 1
+
+> arXiv:2603.27819v1 [cs.LG] 29 Mar 2026
+
+the current keys. Optimization is per-layer and per-head, enabling trivial parallelism and bounded memory. Beyond the core optimizer, we introduce adap-tive budget allocation : a short pilot compression run reveals the per-layer and per-head compression difficulty, which is then used to redistribute the fixed total budget. Layers and heads that are harder to compress receive more pairs; easy ones receive fewer. At inference time this is free—the same total budget, just redistributed—and the pilot cost is amortized into the compression step. Our contributions: 1. We reformulate KV cache compression from discrete selection to distillation, eliminating the combinatorial search over positions. 2. We propose an L-BFGS + least-squares alternat-ing optimizer that achieves 3.5–4.1× lower KL divergence than the best eviction baseline. 3. We introduce pilot-based adaptive allocation at the layer and head granularity, with per-layer redistribution alone yielding 1.3× lower KL at no extra inference cost. 4. We provide analysis showing that compression difficulty is highly structured—varying by or-ders of magnitude across layers and KV heads— and that per-layer errors compound through the transformer, identifying the bottleneck for fu-ture work. 
+
+2 Related Work 
+
+Sequence-length reduction. Eviction methods select a subset of KV pairs and discard the rest. H2O (Zhang et al., 2023) accumulates attention scores across queries and evicts the lowest-scoring pairs. StreamingLLM (Xiao et al., 2024) keeps an attention sink window plus recent tokens. Scis-sorHands (Liu et al., 2023) exploits the persistence of importance across decoding steps. PyramidKV (Cai et al., 2024) allocates different cache sizes per layer based on attention pattern structure. FastGen (Ge et al., 2024) uses attention profiling to decide per-head compression policies. Rather than dis-carding pairs entirely, merging methods combine similar ones: CaM (Zhang et al., 2024) merges low-importance pairs into neighboring important ones via weighted averaging, D2O (Wan et al., 2025) dis-tinguishes active and passive tokens and merges the passive ones, and DMC (Nawrot et al., 2024) learns a per-head gate that decides whether to append or merge each incoming token. Both families remain anchored to the original cache entries—eviction keeps a subset unchanged, and merging produces weighted combinations of the originals. 
+
+KV cache quantization and low-rank meth-ods. Orthogonal lines of work reduce memory by quantizing KV values to lower precision (Hooper et al., 2024) or exploiting low-rank structure in the cache. These approaches are complementary to ours: quantization can be applied on top of the distilled cache, and low-rank compression can be combined with pair reduction. 
+
+Adaptive per-layer budgets. PyramidKV (Cai et al., 2024) and PyramidInfer (Yang et al., 2024) allocate different cache sizes per layer based on attention entropy. Devoto et al. (2024) use L2 norm of values as a compression difficulty signal. Our work shares the insight that uniform allocation is suboptimal, but differs in signal (dynamic pilot MSE vs. static attention patterns) and scope (we also allocate across KV heads within a layer). 
+
+3 Method 
+
+3.1 Problem Formulation 
+
+Consider a single KV head in an attention layer with hq query heads and hkv KV heads, where the head serves g = hq/h kv query heads (GQA group size). After processing a context of N tokens, the head holds a full KV cache that we partition into a 
+
+compress zone (the oldest N −m pairs) and a retain zone (the most recent m pairs, kept unchanged): 
+
+Kfull = [ Kold 
+
+|{z}  
+
+> N−m
+
+; Kret 
+
+|{z} 
+
+> m
+
+], Vfull = [ Vold 
+
+|{z}  
+
+> N−m
+
+; Vret 
+
+|{z} 
+
+> m
+
+]
+
+(1) where Kfull , Vfull ∈ RN ×d and all keys include RoPE positional encoding. The goal is to distill the compress zone into k
+
+freely optimized pairs (Kc, Vc) ∈ Rk×d such that the compressed cache 
+
+Kcat = [ Kc ; Kret ], Vcat = [ Vc ; Vret ] (2) preserves the attention output for any future query. The compression ratio is r = ( k + m)/N .
+
+Relationship to eviction and merging. Eviction constrains Kc to a k-element subset of rows of 
+
+Kold ; merging restricts each row to a weighted com-bination of original rows. Our feasible set contains 
+
+2(a) Eviction             
+
+> compress zone retain
+> select top-k
+> subset of original
+> (b) Merge
+> compress zone retain
+> group & avg
+> avg of neighbors
+> (c) KVS CULPT (Ours)
+> compress zone retain
+> L-BFGS (K) lstsq (V)
+> free in Rd
+> Keys constrained to: original positions (a) →combinations of originals (b) →unconstrained Rk×d(c)
+
+Figure 1: Three paradigms for KV cache sequence-length reduction. (a) Eviction selects a subset of original KV pairs. (b) Merge combines similar pairs, modifying values but remaining anchored to original positions. 
+
+(c) KVS CULPT distills the compress zone into k unconstrained pairs (orange) freely optimized in Rd via L-BFGS (keys) and least squares (values). All three keep the retain zone (green) intact. The key distinction is the degree of freedom: from discrete subset to weighted combination to fully continuous optimization. 
+
+both: any eviction or merge solution lies in Rk×d,so in principle our optimum cannot be worse. More broadly, our formulation is a direct answer to the sequence-length reduction problem itself—given a budget of k pairs, find the k pairs in Rk×d that best preserve attention behavior, with no structural con-straints. Since RoPE already encodes position into the key embedding, Kc is free to land at “virtual” positions that need not correspond to any original token. In practice, the non-convexity of the soft-max landscape means the global optimum is not guaranteed, but L-BFGS with warm-start initial-ization consistently finds solutions that outperform both eviction and merging (Section 5). 
+
+3.2 Loss Function 
+
+We optimize Kc and Vc to match the full-cache at-tention output for a set of training queries Q ∈
+
+Rg×nq ×d (construction detailed in Section 3.3). Following the chunked attention decomposition used in FlashAttention (Dao et al., 2022), the con-text chunk’s contribution to any future decode step is fully determined by the partial output o and the log-sum-exp ℓ = log P exp( scores ) (which sub-sumes the max score μ). As long as these match between the compressed and full cache, the final combined output is identical regardless of the fu-ture decode chunk. This motivates a two-term loss: 
+
+L = ∥ ˆY − Y∥2
+
+> F
+
+| {z }
+
+> output MSE
+
++ ∥ ˆℓ − ℓ∥2
+
+> F
+
+| {z }
+
+> LSE matching
+
+(3) where Y = softmax( QK ⊤
+
+> full
+
+/√d) Vfull is the full-cache output, ˆY is the compressed-cache output, and ℓ = LSE( QK ⊤
+
+> full
+
+/√d) is the log-sum-exp of the full-cache scores (and ˆℓ the compressed counterpart). The LSE term ensures that the atten-tion mass assigned to the context chunk is correct, which is critical when the context chunk is later combined with future decode tokens. We weight both terms equally ( λ = 1 ); in practice they are comparable in magnitude because both are normal-ized by the number of queries. 
+
+3.3 Training Query Construction 
+
+The loss in Eq. 3 requires a set of training queries, but the actual future decode queries are unavailable at compression time. A natural proxy is the retain queries —the m real queries from the retain zone— since they are the most recent and thus closest to fu-ture decode queries. However, retain queries carry RoPE at positions [N −m, . . . , N −1] , while future decode queries will have positions [N, N +1 , . . . ];this positional mismatch can bias the optimization. 
+
+De-RoPE factorization. Since q =
+
+RoPE (qc, p ) where qc = Wqh is a position-independent content vector, we can recover 
+
+qc = RoPE −1(q, p ) by inverting the rotation. Empirically, qc is approximately stationary: consecutive content vectors have cosine similarity 
+
+0.91 –0.93 , and a PCA basis fitted on context tokens captures 81 –86% of decode variance, with only ∼2% decay per 2048 tokens. The effective dimensionality is ∼60 out of 128, indicating a concentrated low-dimensional structure. 
+
+Synthetic future queries. We uniformly sub-sample ns content vectors across the full con-text, then re-apply RoPE at future positions 3N, N +1 , . . . , N +ns−1:
+
+Qsynth = RoPE  qc[uniform_indices ], [N, . . . , N +ns−1] 
+
+(4) Uniform sampling provides broad temporal cov-erage of the content distribution. We tested alter-native strategies (bootstrap from recent tokens, k-means centroids, farthest-point sampling, PCA ex-trapolation with subspace rotation); none improved over uniform, because the distributional drift sig-nals are too small in magnitude to reliably exploit from context alone (Section 5.3). 
+
+Final training set. The training queries are the union of all m retain queries (at their original positions) and ns synthetic future queries, giv-ing nq = m + ns total queries per query head (Q ∈ Rg×nq ×d in Eq. 3). The retain queries anchor the optimization to real attention patterns, while the synthetic queries improve generalization to future positions. 
+
+3.4 Optimization 
+
+The loss in Eq. 3 is differentiable w.r.t. Kc (through the softmax) but has a favorable structure for Vc:given fixed attention weights, the optimal Vc is a linear least-squares solution. 
+
+Alternating K-optimization and V-solve. We alternate between: 1. K step : update Kc via L-BFGS (Liu and No-cedal, 1989) with Vc frozen. L-BFGS uses cur-vature information from gradient history, which is critical for navigating the non-convex soft-max landscape—first-order methods (Adam) get trapped in poor local minima (Section 5.2). 2. V step (every 5 K steps): solve V∗ 
+
+> c
+
+=arg min Vc ∥AcVc+ArVret −Y∥2 
+
+> F
+
++λr∥Vc∥2
+
+> F
+
+via ridge regression ( λr = 10 −3), where A =softmax( QK ⊤
+
+> cat
+
+/√d) ∈ Rnq ×(k+m) is parti-tioned as [Ac ; Ar] over the compressed and retained key positions. 
+
+Initialization. We initialize Kc from the top-
+
+k positions by attention importance score (sum of softmax attention weights across all queries), which provides a warm start near a good basin. 
+
+Per-head independence. With grouped-query at-tention (Ainslie et al., 2023), each KV head serves a group of query heads independently. The loss decomposes across KV heads, so we optimize each head separately. This enables per-head budget allo-cation (Section 3.5). 
+
+3.5 Adaptive Budget Allocation 
+
+The standard approach allocates the same num-ber of compressed pairs k to every layer and head. However, compression difficulty varies dramati-cally across components. 
+
+Pilot-MSE signal. We run a short pilot com-pression with uniform allocation to obtain a per-component MSE signal (60 L-BFGS steps for per-layer allocation; 30 steps per head for per-head allo-cation). This signal captures the sequence-specific 
+
+compression difficulty of each layer and head— unlike static signals such as value norm or attention entropy, which are model properties independent of the input. 
+
+Two-level allocation. Given a fixed total budget 
+
+B = k ×L×hkv (where L is the number of layers): 1. Per-layer : compute mean pilot MSE across heads for each layer; allocate layer budgets proportional to MSE 0.5 
+
+> l
+
+(square-root dampen-ing prevents outlier layers from consuming the entire budget). 2. Per-head within layer : given the layer budget, redistribute across KV heads proportional to MSE 0.5 
+
+> l,h
+
+.The square-root dampening is critical: undamp-ened MSE ( α = 1 .0) causes over-allocation to out-lier layers (e.g., Layer 0, whose MSE is 10 –100 ×
+
+the median), starving other layers and worsening overall quality. 
+
+4 Experimental Setup 
+
+Model and data. We use Qwen2.5-1.5B-Instruct (Qwen Team, 2025), a 28-layer model with grouped-query attention (12 query heads, 2 KV heads, head dimension 128). We sample sequences from the PG19 test set with context length N =2048 and evaluate on 128 continuation tokens. Baseline experiments use 20 sequences; detailed analysis and ablations use a 5-sequence subset. 
+
+Evaluation metric. We measure KL divergence between the output logits under compressed KV and the ground-truth logits under the full cache, computed over the 128 continuation tokens with teacher forcing. Lower KL indicates better preser-vation of the model’s output distribution. 
+
+Compression ratios. We test r ∈{0.1, 0.2, 0.3, 0.5, 0.7}. The retain zone is 4Table 1: KL divergence ( ↓) on 5 sequences (mean). KVS CULPT consistently outperforms all eviction base-lines by a wide margin.                      
+
+> Method r=0 .3r=0 .5r=0 .7
+> Random 2.50 1.80 1.54
+> Attn Score 2.54e -12.04e -11.39e -1
+> Select+Fit 2.33e -11.86e -11.25e -1
+> Joint Opt 2.24e -11.80e -11.15e -1
+> KVS CULPT 5.75 e-24.63 e-23.58 e-2
+> vs. Select+Fit 4.1×4.0×3.5×
+
+m = 256 tokens (the most recent 12.5% of the context). 
+
+Baselines. We compare against four methods: • Random : randomly select k positions to keep. • Attention Score : keep the top-k positions by accumulated attention score across all queries (Zhang et al., 2023). • Select+Fit : select positions by attention score, then fit values via ridge regression. Inspired by Devoto et al. (2024), who use L2 norm for selec-tion; we substitute attention-score selection for a stronger baseline. • Joint Optimization : learn binary gates via Hard Concrete relaxation (Louizos et al., 2018) jointly with KV values; the discrete selection analogue of our method. 
+
+KVS CULPT configuration. L-BFGS with learn-ing rate 0.5, strong Wolfe line search, 10 inner iter-ations per step; 100 outer steps per layer; V solved via ridge regression ( λ = 10 −3) every 5 steps; 128 synthetic future queries; retain zone m = 256 .
+
+5 Results 
+
+5.1 Main Results: Distillation vs. Eviction 
+
+Table 1 compares KVS CULPT against baselines across compression ratios. KVS CULPT achieves 3.5–4.1× lower KL than Select+Fit, the strongest eviction baseline, across all tested ratios. The advantage is most pronounced at aggressive compression ( r = 0 .3, 4.1×) where the discrete selection problem is hardest. 
+
+The role of continuous keys. Joint Optimization uses the same per-layer MSE objective as KVS- 
+
+> CULPT
+
+and also optimizes values, but constrains keys to original cache positions via Hard Concrete gates. It barely improves over Select+Fit ( 2.24 vs. 
+
+Table 2: Per-sequence KL at r=0 .3. KVS CULPT 
+
+achieves near-lossless compression on easy sequences and remains superior on hard ones.                      
+
+> Seq Select+Fit KVS CULPT Improvement
+> 0 (easy) 1.28e -18.1e -315 .8×
+> 1 (hard) 1.39e -11.17e -11.2×
+> 2 (hard) 2.61e -11.43e -11.8×
+> 3 (easy) 3.92e -19.7e -340 .5×
+> 4 (easy) 2.46e -19.6e -325 .5×
+> Mean 2.33e -15.75e -24.1×
+
+2.33e -1 at r=0 .3), showing that optimizing values alone is insufficient —the key advantage of KVS- 
+
+> CULPT
+
+is moving keys freely in Rd, not just fitting better values. 
+
+Per-sequence variation. We label sequences with KVS CULPT KL < 0.01 at r=0 .3 as easy (3 of 5) and the rest as hard . Select+Fit remains at KL 
+
+> 0.1 for all sequences, including the easy ones. On harder sequences (Seq 1, Seq 2), the advantage narrows to 1.2–1.8× but never reverses (Table 2). 
+
+5.2 L-BFGS vs. Adam and Near-Optimality 
+
+The choice of optimizer is critical. Replacing L-BFGS with Adam (the standard first-order opti-mizer for neural network training) degrades per-layer MSE by 17 –95 × (Table 3). This translates to 
+
+8–15 × worse end-to-end KL on easy sequences. The softmax in the attention computation creates a loss landscape with sharp, narrow valleys. L-BFGS’s curvature approximation navigates these efficiently, while Adam’s diagonal preconditioning is insufficient. 
+
+Near-optimality. To assess how close L-BFGS gets to the best achievable per-layer solution, we run an oracle search: 100 random restarts with the best result taken as an empirical upper bound. Ta-ble 3 shows that a single L-BFGS run (1 restart) already reaches within 2–8% of the 100-restart or-acle. This near-optimality has an important im-plication: the per-layer optimization problem is essentially solved . The remaining gap to perfect end-to-end quality is not due to suboptimal per-layer compression, but due to error accumulation across layers—a limitation of the per-layer objec-tive itself (Section 6). 
+
+5.3 Query Strategy Ablation 
+
+We compare five strategies for constructing the syn-thetic future queries described in Section 3.3, eval-5Table 3: Per-layer MSE ( r=0 .3). L-BFGS (1 restart) is 17 –95 × better than Adam and within 2–8% of the 100-restart oracle, indicating near-optimal per-layer so-lutions.                 
+
+> Layer Adam L-BFGS Oracle Gap
+> L2 1.78e -31.05e -49.67e -58%
+> L14 7.97e -21.28e -31.20e -37%
+> L26 1.14e -11.20e -31.18e -32%
+
+Table 4: Query sampling strategies. Uniform spread provides the best overall trade-off, especially at far hori-zons.             
+
+> Strategy Near attn cos Far attn cos
+> Bootstrap (last 128) 0.950 0.737 Uniform spread 0.948 0.759
+> Random sample 0.948 0.756
+> k-means centroids 0.947 0.756 Farthest-point 0.925 0.758
+
+uated on attention cosine similarity at near (128 tokens) and far (4096 tokens) horizons (Table 4). Bootstrap (sampling recent tokens only) wins at the near horizon but degrades at far horizons be-cause the content vector distribution shifts slightly over time. Uniform spread sacrifices 0.2% near-term accuracy for 3% far-term improvement by covering the full temporal span of the context. Ad-vanced strategies (PCA extrapolation, subspace ro-tation prediction, norm correction) were tested but none improved over uniform—the distributional drift signals ( ∼2% subspace rotation per 2048 to-kens, 5% norm growth) are too small to reliably exploit. 
+
+5.4 Adaptive Budget Allocation 
+
+The preceding sections establish the core optimizer; we now turn to how to distribute the compression budget . Since optimization is per-head, we can measure each component’s difficulty and allocate accordingly. 
+
+Static signals fail across sequences. We first test allocation based on value norm ( ∥V∥), a static model property. While ∥V∥0.5-weighted allocation improves Seq 1 by 25%, it worsens Seq 2 by 73% (Table 5). The mean KL across 5 sequences is 27% worse than uniform. The problem is that ∥V∥ is a model property invariant across sequences, but compression difficulty is sequence-dependent. 
+
+Pilot-MSE allocation. A 60-step pilot run at uni-form allocation produces a per-layer MSE signal 
+
+Table 5: Static allocation ( ∥V∥0.5) is unstable across sequences. Multipliers are relative to uniform allocation (r=0 .3).                
+
+> Seq Uniform KL ∥V∥0.5vs. Uni.
+> 08.1e -31.05 ×
+> 11.17e -10.75 ×
+> 21.43e -11.73 ×
+> 39.7e -30.84 ×
+> 49.6e -31.23 ×
+> Mean 5.75e -21.27 ×
+
+Table 6: Pilot-MSE 0.5 allocation wins 4/5 sequences with 25% mean KL reduction ( r=0 .3).                      
+
+> Seq Uniform Pilot-MSE 0.5vs. Uniform
+> 08.14e -38.93e -31.10 ×
+> 11.170e -17.01e -20.60 ×
+> 21.433e -11.208e -10.84 ×
+> 39.67e -38.64e -30.89 ×
+> 49.59e -37.77e -30.81 ×
+> Mean 5.75e -24.31e -20.75 ×
+
+that is sequence-specific . Allocating proportional to MSE 0.5 wins on 4/5 sequences and reduces mean KL by 25% (Table 6). The improvement is largest on hard sequences (Seq 1: 0.60 ×) and slightly negative on the easiest sequence (Seq 0: 1.10 ×), where the baseline KL is already near zero and reallocation adds noise. 
+
+Square-root dampening. Undampened alloca-tion ( MSE 1.0) is too aggressive: it gives Layer 0 (which has 10 –100 × the median MSE) an extreme share of the budget, starving other layers. At 
+
+α = 1 .0, mean KL is only 0.97 × uniform (barely improved), while α = 0 .5 achieves 0.75 ×.
+
+5.5 Per-Head Allocation 
+
+Per-layer allocation treats each layer as a unit, but with grouped-query attention, the model has 2 KV heads per layer. These heads serve qualitatively different functions: Layer 15 is consistently the most asymmetric across all sequences (17–56 ×
+
+head MSE ratio), with Head 0 easy to compress and Head 1 hard; Layer 0 shows the opposite pat-tern with even larger ratios (up to 467 ×). This structural asymmetry persists across all tested se-quences, motivating per-head budget redistribution. Quantitatively, the per-head pilot MSE ratio av-erages 3.7–21 .5× across layers (Table 7). Table 8 isolates the effect of per-head redistribu-tion. Here, “per-layer” uses a 30-step per-head pi-lot averaged to layer level (noisier than the 60-step 6Table 7: Head MSE asymmetry: mean and max ratio of per-head pilot MSE within the same layer ( r=0 .3).                                        
+
+> Seq Mean ratio Max ratio Layer
+> 021 .5×467 ×L0 15.5×31 ×L15 26.1×33 ×L15 33.7×17 ×L15 46.2×56 ×L15
+> Table 8: Per-head allocation always improves over per-layer alone. All numbers relative to uniform ( r=0 .3).
+> Seq Per-layer Per-layer+head ∆
+> 00.82 ×0.81 ×−1%
+> 11.37 ×1.15 ×−16%
+> 20.88 ×0.84 ×−5%
+> 30.87 ×0.86 ×−1%
+> 41.77 ×0.75 ×−58%
+> Mean 1.05 ×0.92 ×−8%
+
+joint pilot in Table 6, hence the weaker per-layer numbers). Adding per-head allocation on top con-sistently improves KL, by 1–58% depending on the sequence; the per-layer+per-head strategy wins 4 of 5 sequences. 
+
+6 Analysis: Limits of Per-Layer Optimization 
+
+The results above show that KVS CULPT nearly solves the per-layer optimization problem (within 2–8% of the oracle). Yet hard sequences still ex-hibit high KL. We now investigate why: the bottle-neck is not per-layer quality, but how errors prop-agate across layers and concentrate in specific to-kens. 
+
+6.1 Error Accumulation Across Layers 
+
+Per-layer optimization does not guarantee end-to-end quality because errors compound through the transformer. We measure hidden state MSE at each layer during decoding with compressed KV and find that errors compound by two to three orders of magnitude from the first to the last layer ( 220 × for easy sequences, up to 5800 × for hard ones). Crucially, the per-layer compression MSE and end-to-end KL are only weakly correlated. Se-quence 0 has 2.4× higher per-layer MSE than Se-quence 1, yet Sequence 1 has 14 × higher end-to-end KL. Some sequences are structurally more sen-sitive to small perturbations—an effect invisible to the per-layer objective. 
+
+6.2 Per-Token KL Concentration 
+
+KL divergence is not spread uniformly across continuation tokens. On the hardest sequence at 
+
+r = 0 .3, 82% of the total KL is concentrated in just 5 of 128 tokens. The maximum per-token KL is 
+
+7.17 , while the mean is 0.117 (a 61 × ratio). These “sensitive” tokens tend to occur at high-entropy de-cision points (e.g., first token of a new clause), where the softmax distribution is flat and small logit perturbations cause large probability shifts. 
+
+7 Discussion 
+
+Why does continuous optimization help so much? As shown in Section 5.1, optimizing val-ues while keeping keys at original positions (Joint Optimization) barely helps. The decisive factor is key freedom: a distilled key can “summarize” multiple original keys by positioning itself in em-bedding space such that its attention pattern approx-imates their combined effect—a representation that no single original token contains. This is why the eviction-to-distillation gap ( 4×) far exceeds the eviction-to-joint-optimization gap ( 1.04 ×). 
+
+Deployment scenario. KVS CULPT is designed for the offline setting: given a long context that will be queried many times (e.g., a document, a system prompt, a retrieved passage), the compression cost is amortized over many decode steps. At 100 L-BFGS steps per layer, compression takes ∼170s for a 2048-token context on a single A100 GPU. 
+
+The next bottleneck. Our analysis shows that the per-layer problem is essentially solved (within 2–8% of the oracle), yet hard sequences remain far from lossless. The bottleneck is cross-layer error propagation: small per-layer perturbations com-pound by 2–3 orders of magnitude. Cascade-aware optimization—where each layer’s target accounts for upstream compression error—is a natural next step, and the per-head decomposition makes this tractable. 
+
+8 Conclusion 
+
+We introduced KVS CULPT , which reframes KV cache compression from discrete token selection to continuous distillation. The key insight is that after RoPE encoding, KV pairs are free vectors in 
+
+Rd—there is no reason the compressed cache must be a subset of the original. By optimizing keys with L-BFGS and solving values in closed form, KVS CULPT achieves near-lossless compression on 7easy sequences (KL < 0.01 ) at ratios where evic-tion baselines remain an order of magnitude worse. Adaptive budget allocation, guided by a cheap pi-lot signal, provides a further 1.3× reduction by exploiting the extreme non-uniformity of compres-sion difficulty across layers and heads. Our anal-ysis identifies cross-layer error propagation as the remaining bottleneck, suggesting cascade-aware optimization as a promising direction. 
+
+Limitations 
+
+• Single model : All experiments use Qwen2.5-1.5B-Instruct. Validation on other architectures (Llama, Mistral) and scales (7B+) is needed. • Fixed context length : We test only N = 2048 .Long-context scenarios ( 8K– 128 K) may exhibit different compression dynamics. • Compression cost : At ∼170s per context on an A100, KVS CULPT is suitable for of-fline/amortized settings but not for online single-pass decoding. • KL-only evaluation : We measure logits KL di-vergence but do not evaluate downstream task accuracy (e.g., MMLU, summarization quality). • No merge baselines : We compare against evic-tion methods but not merging approaches (CaM, D2O, DMC). While our formulation theoretically subsumes merging, empirical comparison would strengthen the claim. • No comparison with quantization : KV quan-tization (Hooper et al., 2024) is complementary and could be combined with KVS CULPT , but this is not explored. • Per-layer optimization : Errors accumulate across layers in ways not captured by the per-layer objective. Global or cascade-aware opti-mization could improve hard sequences. 
+
+References 
+
+Joshua Ainslie, James Lee-Thorp, Michiel de Jong, Yury Zemlyanskiy, Federico Lebrón, and Sumit Sanghai. 2023. GQA: Training generalized multi-query trans-former models from multi-head checkpoints. In Pro-ceedings of the 2023 Conference on Empirical Meth-ods in Natural Language Processing .Zefan Cai, Yichi Zhang, Bofei Gao, Yuliang Liu, Tianyu Liu, Keming Lu, Wayne Xiong, Yue Dong, Baobao Chang, Junjie Hu, and Wen Xiao. 2024. Pyra-midKV: Dynamic KV cache compression based on pyramidal information funneling. arXiv preprint arXiv:2406.02069 .Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. 2022. FlashAttention: Fast and memory-efficient exact attention with IO-awareness. In Advances in Neural Information Processing Sys-tems .Alessio Devoto, Yu Zhao, Simone Scardapane, and Pasquale Minervini. 2024. A simple and effective L2 norm-based strategy for KV cache compression. In Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing .Suyu Ge, Yunan Zhang, Liyuan Liu, Minjia Zhang, Jiawei Han, and Jianfeng Gao. 2024. Model tells you what to discard: Adaptive KV cache compression for LLMs. In International Conference on Learning Representations .Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. 2015. Distilling the knowledge in a neural network. In 
+
+NIPS Deep Learning and Representation Learning Workshop .Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W. Mahoney, Yakun Sophia Shao, Kurt Keutzer, and Amir Gholami. 2024. KVQuant: To-wards 10 million context length LLM inference with KV cache quantization. Advances in Neural Informa-tion Processing Systems .Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. 2023. Effi-cient memory management for large language model serving with PagedAttention. In Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles .Dong C. Liu and Jorge Nocedal. 1989. On the limited memory BFGS method for large scale optimization. 
+
+Mathematical Programming , 45:503–528. Zichang Liu, Aditya Desai, Fangshuo Liao, Weitao Wang, Victor Xie, Zhaozhuo Xu, Anastasios Kyril-lidis, and Anshumali Shrivastava. 2023. Scis-sorhands: Exploiting the persistence of importance hypothesis for LLM KV cache compression at test time. In Advances in Neural Information Processing Systems .Christos Louizos, Max Welling, and Diederik P. Kingma. 2018. Learning sparse neural networks through L0
+
+regularization. In International Conference on Learn-ing Representations .Piotr Nawrot, Adrian Ła´ ncucki, Marcin Chochowski, David Tarjan, and Edoardo M. Ponti. 2024. Dynamic memory compression: Retrofitting LLMs for accel-erated inference. In Proceedings of the 41st Interna-tional Conference on Machine Learning .
+
+8Qwen Team. 2025. Qwen2.5 technical report. arXiv preprint arXiv:2412.15115 .Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen Bo, and Yunfeng Liu. 2024. RoFormer: En-hanced transformer with rotary position embedding. 
+
+Neurocomputing , 568:127063. Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. Attention is all you need. Advances in Neural Information Process-ing Systems , 30. Zhongwei Wan, Xinjian Wu, Yu Zhang, Yi Xin, Chaofan Tao, Zhihong Zhu, Xin Wang, Siqi Luo, Jing Xiong, Longyue Wang, and Mi Zhang. 2025. D2O: Dynamic discriminative operations for efficient long-context inference of large language models. In International Conference on Learning Representations .Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient streaming lan-guage models with attention sinks. In International Conference on Learning Representations .Dongjie Yang, XiaoDong Han, Yan Gao, Yao Hu, Shilin Zhang, and Hai Zhao. 2024. PyramidInfer: Pyramid KV cache compression for high-throughput LLM inference. In Findings of the Association for Compu-tational Linguistics: ACL 2024 .Yuxin Zhang, Yuxuan Du, Gen Luo, Yunshan Zhong, Zhenyu Zhang, Shiwei Liu, and Rongrong Ji. 2024. CaM: Cache merging for memory-efficient LLMs inference. In Proceedings of the 41st International Conference on Machine Learning .Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuan-dong Tian, Christopher Ré, Clark Barrett, Zhangyang Wang, and Beidi Chen. 2023. H2O: Heavy-hitter oracle for efficient generative inference of large lan-guage models. In Advances in Neural Information Processing Systems .
+
+A Full Baseline Results (20 Sequences) 
+
+Table 9 reports KL divergence across all 20 se-quences and 5 compression ratios for the baseline methods. 
+
+Table 9: KL divergence (mean ± std, 20 sequences) at representative ratios. Joint Opt marginally improves over Select+Fit; both are far behind KVS CULPT .                    
+
+> Method r=0 .1r=0 .3r=0 .5r=0 .7
+> Random 3.43 ±1.21 2.60 ±0.45 2.06 ±0.62 1.83 ±0.57
+> Attn Score .322 ±.105 .198 ±.084 .137 ±.065 .086 ±.056
+> Select+Fit .322 ±.107 .185 ±.076 .129 ±.057 .080 ±.050
+> Joint Opt .311 ±.113 .182 ±.073 .121 ±.058 .073 ±.047
+
+B Dampening Exponent Sensitivity 
+
+Table 10 shows the effect of the dampening ex-ponent α in ∥V∥α-weighted allocation on Seq 1 (r=0 .3). The relationship is non-monotonic: α =0.5 is optimal. Pilot-MSE allocation shows the same dampening pattern ( 0.97 × at α=1 .0, 0.75 ×
+
+at α=0 .5, mean over 5 sequences). 
+
+Table 10: Dampening exponent α for ∥V∥α per-layer allocation (Seq 1, r=0 .3). α=0 .5 is optimal; higher values over-allocate to outlier layers.                         
+
+> αKL vs. Uniform kmin kmax
+> 0 (uniform) 1.170e -1ref 358 358 0.3 1.175e -11.00 ×277 480
+> 0.5 8.83 e-20.75 ×231 578 0.7 1.328e -11.14 ×191 689 1.0 9.27e -20.79 ×140 880
+
+9
