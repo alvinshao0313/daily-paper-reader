@@ -1,0 +1,314 @@
+Title: ATLAS-RTC: Closing the Loop on LLM Agent Output with Token-Level Runtime Control
+
+URL Source: https://arxiv.org/pdf/2603.27905v1
+
+Published Time: Tue, 31 Mar 2026 01:26:53 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+# ATLAS-RTC: Closing the Loop on LLM Agent Output with Token-Level Runtime Control 
+
+Christopher Cruz 
+
+Purdue University 
+
+cruz209@purdue.edu chris2004@gmail.com 
+
+March 29, 2026 
+
+# Abstract 
+
+LLM agents fail at the output boundary. Tool calls arrive malformed, JSON schemas break mid-generation, and structured payloads that downstream systems depend on are never well-formed in the first place. External governance layers, including the authors’ prior work on world-state admissibility gating in ATLAS v1 [15] and prompt-level context management in Adaptive Focus Memory [13], cannot evaluate what they cannot parse. The cost is not just a failed request: in production agentic pipelines, a malformed first attempt triggers retry loops that spike latency and inference cost before any safety predicate has been checked. We present ATLAS-RTC , a token-level run-time controller for LLM generation. Rather than operating at the prompt layer or validating out-put post-hoc, ATLAS-RTC intercepts genera-tion at the logit distribution before each to-ken is sampled. At every decode step, a run-time controller observes the generation trajec-tory, scores structural drift against a formal out-put contract, and applies a graduated sequence of interventions: logit biasing, temperature mod-ulation, token masking, and mid-step rollback with re-steering, all without modifying model weights. This positions ATLAS-RTC in the fam-ily of constrained decoding systems, but with a key architectural distinction: rather than en-forcing a static grammar, ATLAS-RTC enforces stateful, stage-aware output contracts through a closed-loop graduated policy with observability and mid-generation correction. We evaluate ATLAS-RTC on two settings that characterize its operating regime. Un-der ambiguous prompting conditions that cause uncontrolled generation to fail via markdown wrapping and structural drift, ATLAS-RTC im-proves first-attempt JSON schema satisfaction from 56.7% to 76.7% (+20pp) overall, with a +40pp improvement on the hardest schema task. On an agent tool call benchmark measuring first-attempt reliability without retries, ATLAS-RTC improves success from 28.3% to 58.3% (+30pp), with the search tool recovering from 0% to 90% baseline-to-controlled. We charac-terize the failure modes honestly: ATLAS-RTC degrades on schemas requiring multiline string values and adds latency overhead when baseline already saturates, defining the operating regime where runtime control is and is not worth its cost. Code and benchmarks are released at 
+
+[https://github.com/cruz209/ATLAS-RTC] .
+
+# 1 Introduction 
+
+Large language model agents are increasingly deployed in production pipelines where they must produce structured outputs: tool call pay-loads, JSON schemas, and API request bod-ies that downstream systems depend on being well-formed. When they are not, the conse-quences compound quickly. A malformed tool call does not merely fail validation; it fails before any safety predicate has been evaluated, before any governance layer has had the opportunity to inspect it. The pipeline breaks at the out-1
+
+> arXiv:2603.27905v1 [cs.LG] 29 Mar 2026
+
+put boundary, and the only recourse is a retry, doubling latency, duplicating inference cost, and in the worst case triggering silent failures that propagate downstream undetected. Existing mitigations address this problem at the wrong layer. Prompt engineering operates on the model’s input and has no mechanism to intercept a bad decision mid-generation. Post-hoc validation catches failures after they have already occurred. Constrained decoding enforces structural rules but operates on static grammars; it does not observe generation dynamics, can-not detect semantic drift, and provides no grad-uated response between full enforcement and no enforcement. Fine-tuning modifies weights and requires retraining per task and schema. None of these approaches treat the generation step itself as a controllable process. This paper presents ATLAS-RTC , a token-level runtime controller for LLM generation that operates directly at the logit distribution, the single point in the inference pipeline where ev-ery token decision is made. ATLAS-RTC is the fourth layer in a line of work on safe, efficient, and reliable LLM deployment by the author. Adaptive Focus Memory [13] operates at the in-put layer, managing what context the model re-ceives under bounded token budgets. VIGIL [14] operates as an out-of-band reflective runtime, su-pervising agent behavior through affective trace analysis and proposing prompt and code adap-tations post-hoc. ATLAS v1 [15] operates at the action layer, enforcing world-state admis-sibility predicates before irreversible execution. ATLAS-RTC closes the loop between generation and governance: it governs what the model emits token by token, ensuring outputs are well-formed before they reach the layer that decides whether they should execute at all. At each decode step, ATLAS-RTC maintains a runtime state encoding the generated sequence, the token distribution entropy, structural con-tract progress, and a composite drift score de-rived from heuristic and learned detectors. Agraduated ladder policy maps drift scores to con-trol actions, from no-op through logit biasing, temperature reduction, and token masking, to mid-step rollback and re-steering when the tra-jectory is critically diverged. The key architec-tural insight is stage awareness : the controller distinguishes structural decision points, where intervention is appropriate, from value genera-tion zones, where the model must be left to pro-duce content freely. Intervening during value generation corrupts output; this was the primary failure mode of every prior approach we tested. We make the following contributions: 1. ATLAS-RTC system : A token-level run-time controller with a six-level graduated intervention ladder, stage-aware JSON con-tract enforcement, mid-step KV-cache roll-back, and structure-aware logit manipulation via a stateful HuggingFace LogitsProcessor ,all without modifying model weights. 2. Formal output contract specification :A contract formalism C = ( S, T , O, V, π, Φ) with a stage machine that tracks generation phase and gates interventions to structural decision boundaries only. 3. Empirical evaluation across two regimes : On structured output under ambiguous prompts, ATLAS-RTC improves first-attempt JSON schema satisfaction from 56.7% to 76.7% (+20pp overall, +40pp peak). On agent tool call reliability without retries, it improves first-attempt success from 28.3% to 58.3% (+30pp), recovering one tool from 0% to 90%. 4. Honest failure characterization : We identify and report the conditions under which ATLAS-RTC degrades, including mul-tiline string value schemas, saturated base-lines, and preamble-first generation, defining the operating regime where runtime control is and is not worth its cost. The remainder of this paper is organized as follows. Section 2 situates ATLAS-RTC in the context of related work. Section 3 presents the system architecture and formal contract specifi-cation. Section 4 describes the control policy and intervention ladder. Section 5 presents exper-imental results across both evaluation regimes. 2Section 6 discusses limitations and failure modes. Section 7 concludes with directions for future work. 
+
+# 2 Related Work 
+
+2.1 Constrained Decoding for Struc-tured Generation 
+
+A substantial body of work has explored enforc-ing structural constraints during autoregressive decoding. Early approaches such as PICARD [1] integrate incremental parsing into the decoding loop, rejecting inadmissible tokens to ensure out-puts conform to a predefined grammar. Sub-sequent work on grammar-constrained decoding generalizes this paradigm by constructing formal grammars or automata that restrict the token space at each step, enabling structured output generation without fine-tuning [2]. More recent systems focus on improving the ef-ficiency and generality of constrained decoding. XGrammar [5] introduces optimized grammar execution for high-throughput inference, while benchmarks such as JSONSchemaBench [6] demonstrate that modern LLMs still struggle to reliably satisfy real-world JSON schemas de-spite such constraints. At the same time, several works identify limitations of rigid constraint en-forcement. Grammar-aligned decoding [4] and related approaches show that naive token mask-ing can distort the model distribution, while CRANE [7] highlights tradeoffs between struc-tural correctness and reasoning flexibility. More recent methods such as draft-conditioned con-strained decoding [8] attempt to mitigate these issues by conditioning constrained generation on auxiliary drafts. Despite these advances, existing constrained decoding approaches are largely static : they enforce structural validity through predefined grammars or token filters without modeling gen-eration as a dynamic process. They do not ex-plicitly observe trajectory-level signals such as entropy or distributional drift, nor do they pro-vide graduated or stateful intervention strategies beyond hard constraint enforcement. 
+
+2.2 Runtime Verification and Agent Governance 
+
+A parallel line of work focuses on runtime ver-ification and governance of LLM outputs and agent behavior. Systems such as RvLLM [9] apply formal specifications to validate outputs post-generation, while AgentSpec [10] introduces declarative policies for enforcing constraints over agent actions. More recent work such as Pro2Guard [11] explores proactive runtime en-forcement using probabilistic verification, and ef-forts toward verifiably safe tool use [12] aim to guarantee correctness at the action boundary. These approaches operate at a higher level of abstraction than decoding, typically validating outputs after generation or constraining agent behavior at the tool or execution layer. As a result, they cannot intervene before malformed outputs are produced, and failures at the out-put boundary still propagate into retry loops, increasing latency and cost. 
+
+2.3 Positioning of ATLAS-RTC 
+
+ATLAS-RTC sits at the intersection of these two lines of work but addresses a gap left by both. Prior constrained decoding methods en-force what tokens may be generated but treat generation as a static constraint satisfaction problem. Runtime verification systems enforce 
+
+whether outputs are acceptable but operate af-ter generation or outside the decoding process. In contrast, ATLAS-RTC models generation as a controlled stochastic process and introduces a closed-loop runtime controller operating di-rectly at the logit level. At each decoding step, the system observes trajectory-level signals, pre-dicts structural drift relative to a formal output contract, and applies a graduated sequence of interventions—including logit biasing, tempera-ture modulation, token masking, and mid-step rollback with re-steering. This positions ATLAS-RTC not as a replace-ment for constrained decoding or runtime verifi-cation, but as a complementary layer: a token-level control system that governs generation dur-ing decoding, ensuring outputs remain struc-3turally valid before they reach downstream vali-dation or execution layers. 
+
+# 3 System Architecture 
+
+3.1 Problem Formulation 
+
+We model autoregressive generation as a con-trolled stochastic process. Let x1: T denote the generated token sequence, and zt ∈ R|V | the model logits at timestep t. Standard decoding samples tokens according to: 
+
+xt+1 ∼ Softmax( zt)ATLAS-RTC introduces a control signal ut ap-plied directly to the logits prior to sampling: 
+
+xt+1 ∼ Softmax( zt + ut)The objective is to maximize output validity under a formal contract while minimizing inter-vention cost: max 
+
+> u1: T
+
+E [V (x1: T )] − λ · Cost( u1: T )where V (·) is a contract validation function and λ controls the tradeoff between correctness and intervention overhead. 
+
+3.2 Closed-Loop Control Pipeline 
+
+ATLAS-RTC operates as a closed-loop controller integrated into the decoding process. At each timestep, the system executes: 
+
+observe → predict → control → sample 
+
+→ update 
+
+Unlike post-hoc validation or static con-strained decoding, this loop executes at every token, allowing the system to detect and correct structural drift before it results in invalid output. 
+
+3.3 Runtime State 
+
+At timestep t, the controller maintains a struc-tured runtime state: 
+
+st = {x1: t, z t, P t, H t, c t, D t, F t, κ t}
+
+where: 
+
+• x1: t: generated token sequence 
+
+• zt: raw logits 
+
+• Pt: top-k token distribution 
+
+• Ht: entropy of Pt
+
+• ct: contract progress (stage and metadata) 
+
+• Dt ∈ [0 , 1]: heuristic drift score 
+
+• Ft ∈ [0 , 1]: learned failure probability 
+
+• κt: number of corrections applied This explicit state representation enables the controller to reason about both structural progress and trajectory-level uncertainty. 
+
+3.4 Output Contracts 
+
+ATLAS-RTC enforces structured outputs through a formal contract: 
+
+C = ( S, T, O, V, π, Φ) where: 
+
+• S: structural rules (e.g., JSON syntax) 
+
+• T : stage-dependent token allowlist 
+
+• O: ordering constraints 
+
+• V : validation function 
+
+• π: control policy 
+
+• Φ: semantic anchors (future work) Unlike grammar-constrained decoding, con-tracts are stateful and stage-aware . The allowlist 
+
+T evolves with contract progress ct, enabling strict enforcement at structural decision points while preserving flexibility during value genera-tion. 4Operational Semantics of Contracts. We make the contract formalism explicit through a stage machine ct ∈ C that governs admissible tokens and control actions. At each timestep, the contract induces: 
+
+• a stage ct (e.g., start , key , value ,
+
+delimiter , end )
+
+• an allowlist T (ct) ⊆ V over tokens 
+
+• a transition function ct+1 = δ(ct, x t+1 )Structural validity is enforced by masking to-kens outside T (ct) at structural decision points, while value-generation stages relax constraints to preserve distributional flexibility. The validation function V (x1: T ) is defined as satisfaction of all structural rules S and ordering constraints O un-der the induced stage trajectory. This formulation ensures that contracts are not static grammars but stateful, stage-dependent constraint systems that evolve during decoding. 
+
+3.5 Drift Detection 
+
+At each timestep, the controller computes a fea-ture vector ϕt from the current decoding state, including entropy, maximum token probability, and invalid token mass. Two complementary sig-nals are derived: 
+
+• Heuristic drift score Dt, based on structural violations and uncertainty 
+
+• Learned failure probability Ft, estimated via a lightweight classifier These are combined into a unified risk signal: 
+
+ρt = max( Dt, F t)which estimates the likelihood that the current trajectory will violate the output contract. 
+
+Drift Estimation Details. The feature vec-tor ϕt includes entropy Ht, maximum to-ken probability max Pt, invalid token mass P  
+
+> v / ∈T(ct)
+
+Pt(v), and stage-consistency indicators derived from ct.The learned failure probability Ft is estimated using a logistic classifier trained on decoding tra-jectories labeled by contract violation outcomes. The heuristic score Dt captures rule-based sig-nals such as invalid token selection and abnormal entropy spikes. The combined risk signal ρt = max( Dt, F t) is used for control decisions. Thresholds for the ladder policy are empirically tuned on a held-out validation set. 
+
+3.6 Control Actions 
+
+The controller maps risk ρt to a control signal ut
+
+applied to the logits. Four primitive actions are defined: 
+
+• noop : no intervention ( ut = 0) 
+
+• bias : additive logit shaping 
+
+• temperature : variance reduction via scal-ing 
+
+• mask : suppression of invalid tokens A fifth composite action, correct , performs mid-step rollback and re-steering. These actions operate directly on the token distribution, enabling fine-grained control over generation without modifying model weights. 
+
+3.7 Ladder Policy 
+
+ATLAS-RTC employs a graduated control pol-icy that escalates intervention strength as risk increases. The ladder policy partitions ρt into bands, mapping low-risk states to minimal in-tervention and high-risk states to aggressive cor-rection. This design avoids the brittleness of hard con-straints by applying the weakest effective in-tervention, preserving model flexibility wherever possible. 
+
+3.8 Mid-Step Rollback and Correc-tion 
+
+When ρt exceeds a critical threshold, the con-troller performs a rollback of n tokens and re-5steers generation from that point. The corrected step applies: 
+
+• amplified structural bias 
+
+• strict token masking based on contract state This enables recovery from divergence without restarting the entire sequence. Unlike prior ap-proaches that treat failure as terminal, ATLAS-RTC treats generation as a correctable trajec-tory. Rollback is implemented efficiently via KV-cache truncation, allowing recomputation from the corrected prefix without reprocessing the en-tire sequence. 
+
+Rollback Statistics. Across evaluation runs, rollback is triggered infrequently but plays a crit-ical role in recovery from divergence. On av-erage, ATLAS-RTC performs ∼ 0.8 corrections per run, with a maximum rollback depth of 3 tokens observed. Most successful recoveries oc-cur within a single rollback step, indicating that structural errors are typically localized and cor-rectable without restarting generation. 
+
+3.9 Implementation 
+
+ATLAS-RTC is implemented as a modular run-time layer with adapters for step-wise decod-ing. A custom logits processor injects control sig-nals directly into the model’s sampling pipeline, enabling true token-level intervention. Prefix caching ensures that rollback operations incur minimal overhead, making real-time control fea-sible in practice. 
+
+3.10 Discussion and Design Consider-ations 
+
+ATLAS-RTC is closely related to prior work in constrained decoding and runtime verification, and we explicitly clarify its scope relative to both. 
+
+Relation to Constrained Decoding. A nat-ural question is whether ATLAS-RTC reduces to standard grammar-constrained decoding. While both approaches restrict the token distribution during generation, constrained decoding meth-ods are typically static and rule-complete : afixed grammar or automaton defines the admissi-ble token set at each step, and decoding proceeds under hard constraints. In contrast, ATLAS-RTC is stateful and adap-tive . The controller does not assume a com-plete grammar specification, but instead esti-mates trajectory-level risk using observed sig-nals such as entropy and invalid token mass, and applies a graduated sequence of interven-tions. Crucially, ATLAS-RTC distinguishes be-tween structural decision points and value gen-eration regions, allowing it to selectively enforce constraints only when necessary. This avoids the distributional distortion and loss of flexibility as-sociated with rigid masking throughout the en-tire generation process. 
+
+Relation to Post-hoc Validation and Re-pair. Another interpretation is that ATLAS-RTC implements a form of incremental valida-tion or repair. However, post-hoc validation op-erates only after a complete output has been gen-erated, and repair mechanisms typically require either retries or heuristic string manipulation. ATLAS-RTC instead intervenes before invalid outputs are realized. By operating directly on the logit distribution, the system prevents struc-tural violations at the point of generation, reduc-ing reliance on retries and avoiding the latency and cost amplification associated with failure-recovery loops. 
+
+Why Not Enforce Hard Constraints Ev-erywhere? One might ask why ATLAS-RTC does not simply apply strict token masking at all timesteps. Empirically, enforcing constraints uniformly leads to degraded generation quality, particularly in regions where the model must produce unconstrained values such as free-form strings. This phenomenon has been observed in prior work on constrained decoding. ATLAS-RTC addresses this by introducing stage-aware control: constraints are enforced ag-gressively during structural transitions (e.g., key 6selection, delimiter placement) and relaxed dur-ing value generation. The ladder policy fur-ther ensures that intervention strength is pro-portional to estimated risk, rather than applied uniformly. 
+
+Limitations of Drift Detection. The effec-tiveness of ATLAS-RTC depends on the qual-ity of its drift detection signals. In the cur-rent implementation, detection relies on a com-bination of heuristic features and a lightweight learned model. While these signals are sufficient for structural violations, they do not yet capture semantic drift or task-level correctness. Future work will incorporate richer signals de-rived from intermediate model representations, enabling the controller to reason about semantic alignment in addition to structural validity. 
+
+Scope of Guarantees. ATLAS-RTC does not guarantee correctness of generated content be-yond the specified output contract. The system enforces structural validity and reduces the prob-ability of malformed outputs, but it does not ensure factual accuracy or semantic correctness. These concerns are orthogonal and may require complementary mechanisms at higher layers of the stack. Taken together, these design choices position ATLAS-RTC as a complementary runtime layer: it does not replace constrained decoding or val-idation, but augments them with a closed-loop control mechanism that governs generation at the point where token decisions are made. 
+
+Distinguishing Characteristics. ATLAS-RTC differs from prior constrained decoding and runtime verification approaches along three axes: 
+
+• Closed-loop control : generation is mod-eled as a controlled stochastic process with per-step observation and intervention, rather than static constraint enforcement. 
+
+• Stage-aware enforcement : constraints are applied selectively at structural decision points and relaxed during value generation, avoiding the distributional distortion of uni-form masking. 
+
+• Mid-generation recovery : rollback and re-steering enable correction of divergence within a single generation, rather than rely-ing on retries or post-hoc repair. These properties together define ATLAS-RTC as a runtime control layer distinct from both grammar-constrained decoding and post-hoc val-idation systems. 
+
+# 4 Evaluation 
+
+4.1 Experimental Setup 
+
+We evaluate ATLAS-RTC using the Qwen2.5-7B-Instruct model under step-wise decoding. All experiments are run with a single-token genera-tion loop to enable token-level intervention. Re-sults are reported over 120 total trials across two benchmark settings. We compare standard decoding (baseline )against ATLAS-RTC-controlled decoding (controlled ). All results are measured under a strict no-retry setting: each generation is evaluated on its first attempt only. 
+
+4.2 Tasks 
+
+We evaluate in two regimes that reflect common failure modes in LLM agents: 
+
+Structured Output Generation. The model is prompted to produce JSON outputs under ambiguous or underspecified prompts (e.g., name/age/city). Outputs are evaluated for schema validity. 
+
+Agent Tool Call Generation. The model generates tool call payloads for simulated APIs (search, send email, database query). Each out-put must satisfy required fields and JSON va-lidity. Failure results in downstream execution failure. 74.3 Metrics 
+
+We report: 
+
+• First-attempt success rate : percentage of outputs that satisfy the contract without retries 
+
+• Schema validity rate : percentage of syn-tactically valid outputs 
+
+• Latency : average generation time per sam-ple All metrics are computed over identical prompts for baseline and controlled settings. 
+
+4.4 Main Results 
+
+Structured Output Generation. Across 180 trials (3 tasks × 60), ATLAS-RTC im-proves first-attempt schema validity from 56.7% to 76.7% (+20.0pp). 
+
+• Task 1 (name/age/city): 73.3% → 95.0% (+21.7pp) 
+
+• Task 2 (title/year/director): 71.7% →
+
+86.7% (+15.0pp) 
+
+• Task 3 (country/capital/population): 25.0% → 48.3% (+23.3pp) Performance gains are most pronounced under ambiguous prompting conditions, where baseline decoding frequently produces non-JSON pream-bles (e.g., “Sure”, “Here”) prior to structured output. These failure modes indicate that er-rors arise from decoding behavior rather than task misunderstanding. ATLAS-RTC reduces such failures by enforcing structural constraints at early decoding steps. In addition, ATLAS-RTC reduces latency in this regime, with average generation time de-creasing substantially across all tasks. This re-duction is attributable to shorter valid genera-tions and the avoidance of long malformed out-puts. 
+
+Agent Tool Call Generation. We evaluate tool call generation across three APIs over 180 total calls (3 tools × 60 trials). ATLAS-RTC improves overall first-attempt success rate from 20.6% to 58.3% (+37.8pp). 
+
+• search: 0.0% → 96.7% (+96.7pp) 
+
+• database query: 45.0% → 78.3% (+33.3pp) 
+
+• send email: 16.7% → 0.0% (-16.7pp) The search task demonstrates near-complete recovery from systematic failure, where baseline decoding fails entirely due to malformed outputs. This suggests that failures are primarily driven by formatting artifacts rather than lack of task knowledge. Substantial improvements are also observed for database query , where ATLAS-RTC reduces JSON parsing errors and structural violations. In contrast, performance degrades on the 
+
+send email task. Analysis shows that failures in this setting are dominated by missing re-quired fields (e.g., summary ), indicating that errors arise from incomplete semantic content rather than structural violations. ATLAS-RTC enforces structural correctness but does not in-fer missing information, leading to stricter failure detection. Across all tools, ATLAS-RTC recovers 68 ad-ditional successful tool calls on the first attempt, reducing failures from 143/180 to 75/180. 
+
+4.5 Analysis 
+
+Failure Modes. Failures in baseline decoding are dominated by non-structural preamble to-kens (e.g., “Sure”, “Here”), which lead to in-valid outputs despite correct task understanding. ATLAS-RTC reduces these errors by constrain-ing early token generation. Remaining failures under ATLAS-RTC pri-marily arise from two sources: 
+
+• Early preamble tokens : short non-JSON outputs that bypass or precede constraint enforcement 8Task Baseline (ms) Controlled (ms) ∆Structured (hard) 5498 663 -87.9% Database Query 2749 1636 -40.5% Send Email 1495 3430 +129.4% Table 1: Latency comparison across tasks. 
+
+• Schema incompleteness : missing re-quired fields despite syntactically valid structure These observations highlight that current drift detection signals capture structural violations but do not fully address semantic completeness. 
+
+When ATLAS-RTC Helps. ATLAS-RTC provides the largest gains when: 
+
+• prompts are ambiguous or underspecified 
+
+• failures are dominated by formatting or de-coding artifacts 
+
+• structural validity is a primary requirement (e.g., tool call execution) 
+
+When It Does Not. ATLAS-RTC provides limited or negative benefit when: 
+
+• failures are driven by missing semantic con-tent rather than structure 
+
+• tasks require flexible or unconstrained value generation 
+
+• strict enforcement exposes incomplete out-puts that baseline occasionally satisfies due to stochastic variation 
+
+Efficiency Tradeoffs. ATLAS-RTC intro-duces additional computation due to per-token control and occasional rollback operations. How-ever, in structured generation tasks, it often re-duces overall latency by preventing long invalid outputs and eliminating the need for retries. In more complex schemas, latency may increase due to repeated corrective interventions. 
+
+4.6 Summary 
+
+ATLAS-RTC improves first-attempt reliability in both structured output generation and agent tool use, with gains of +20.0pp and +37.8pp re-spectively. Improvements are most significant in settings where failures arise from decoding arti-facts rather than task understanding. While the system introduces overhead and does not address semantic completeness, it reduces reliance on re-tries and prevents failure at the output bound-ary, supporting its role as a runtime control layer for LLM systems. 
+
+# 5 Limitations and Future Work 
+
+5.1 Limitations 
+
+Structural Validity vs. Semantic Cor-rectness. ATLAS-RTC is designed to enforce structural output contracts (e.g., JSON validity, required fields), but it does not guarantee seman-tic correctness of generated content. Outputs may satisfy the schema while remaining incom-plete, inconsistent, or uninformative (e.g., empty or default values). This limitation reflects the scope of the controller, which operates on struc-tural signals rather than task-level meaning. 
+
+Limited Drift Detection Signals. The ef-fectiveness of ATLAS-RTC depends on its abil-ity to detect trajectory drift during decoding. In the current implementation, drift detection re-lies on heuristic features (e.g., entropy, invalid token mass) and a lightweight learned classifier. While these signals are effective for identifying structural violations, they do not capture seman-tic drift or higher-level task failure. As a result, some failures—particularly missing or incorrect 9values—are not detected early enough for correc-tive intervention. 
+
+Latency and Computational Overhead. 
+
+Token-level control introduces additional com-putational cost due to per-step observation, in-tervention, and potential rollback operations. While ATLAS-RTC can reduce overall latency in settings where it prevents long invalid gener-ations, it may increase latency in more complex schemas or under frequent corrective interven-tions. Empirically, overhead varies across tasks, with some cases exhibiting substantial increases due to repeated corrections. 
+
+Task Sensitivity and Non-Uniform Gains. 
+
+ATLAS-RTC does not uniformly improve perfor-mance across all tasks. While it significantly im-proves reliability in cases of systematic structural failure (e.g., tool calls with consistent JSON er-rors), it may degrade performance when failures are driven by missing semantic content rather than structural violations. For example, stricter enforcement can expose missing required fields that baseline decoding occasionally satisfies due to stochastic variation. 
+
+Contract Coverage and Token Con-straints. The contract system relies on stage-dependent token allowlists and structural rules. In practice, defining complete and accurate to-ken constraints for all value types (e.g., free-form strings, numbers) is challenging. Incomplete al-lowlists can lead to false positives in drift detec-tion or overly restrictive masking, particularly for schemas with flexible value domains. 
+
+5.2 Future Work 
+
+Semantic Drift Detection. A key direction for future work is extending drift detection beyond structural signals to capture semantic alignment. This includes incorporating repre-sentations from intermediate model states or embedding-based similarity measures to detect deviations from intended meaning, enabling in-tervention on semantic as well as structural er-rors. 
+
+Adaptive and Learned Control Policies. 
+
+The current ladder policy is defined by fixed thresholds and manually specified intervention rules. Future work will explore learning control policies from data, allowing the system to adapt intervention strategies based on observed trajec-tories, task characteristics, and failure patterns. 
+
+Long-Horizon and Multi-Step Control. 
+
+ATLAS-RTC currently operates at the level of single-output generation. Extending the frame-work to multi-step agent workflows would enable control over longer-horizon behaviors, including sequences of tool calls and iterative reasoning processes. 
+
+Improved Contract Expressiveness. En-hancing the contract formalism to better capture complex schemas, flexible value domains, and se-mantic constraints remains an important direc-tion. This includes improving token constraint coverage and integrating higher-level validation signals into the control loop. 
+
+System Integration and Deployment. 
+
+ATLAS-RTC is designed as a modular runtime layer and can be integrated into existing in-ference systems. Future work will focus on optimizing performance in production environ-ments, including efficient batching, GPU-aware control mechanisms, and integration with large-scale serving platforms. 
+
+# 6 Conclusion 
+
+We presented ATLAS-RTC, a token-level run-time control system for autoregressive genera-tion that operates directly at the logit distribu-tion during decoding. By modeling generation as a controlled stochastic process, ATLAS-RTC in-troduces a closed-loop framework that observes trajectory-level signals, predicts structural drift, and applies graduated interventions to maintain adherence to output contracts. Across structured generation and agent tool use tasks, ATLAS-RTC significantly improves 10 first-attempt reliability without relying on re-tries, particularly under ambiguous prompt-ing conditions where uncontrolled decoding fre-quently fails. These results highlight a limita-tion of existing approaches: prompt engineering, post-hoc validation, and static constrained de-coding do not intervene at the point where gen-eration decisions are made. More broadly, this work suggests a shift in how LLM systems are designed. Rather than treating generation as an uncontrollable process followed by validation or repair, ATLAS-RTC demonstrates that generation itself can be gov-erned through runtime control. This perspec-tive enables systems that are not only more reli-able, but also more efficient by reducing failure-induced retries and downstream errors. ATLAS-RTC is not a complete solution to cor-rectness in language models. It addresses struc-tural validity, leaving semantic correctness and task-level reasoning as open challenges. How-ever, it establishes a foundation for runtime control as a distinct layer in LLM system de-sign, complementing advances in model training, prompting, and agent orchestration. We view this work as an initial step toward controllable generation systems that integrate observation, prediction, and intervention within the decoding process. Extending this framework to richer semantic signals, learned control poli-cies, and long-horizon agent behavior represents a promising direction for future research. 
+
+# References 
+
+[1] T. Scholak, N. Schucher, and D. Bah-danau, “PICARD: Parsing Incrementally for Constrained Auto-Regressive Decoding from Language Models,” Proceedings of the 2021 Conference on Empirical Methods in Natural Language Processing (EMNLP) ,2021. [2] S. Geng, J. Josifoski, M. Peyrard, and R. West, “Grammar-Constrained Decoding for Structured NLP Tasks without Fine-tuning,” arXiv preprint arXiv:2305.13971 ,2023. [3] L. Beurer-Kellner, M. Fischer, and M. Vechev, “Guiding LLMs The Right Way: Fast, Non-Invasive Constrained Genera-tion,” International Conference on Machine Learning (ICML) , 2024. [4] K. Park and T. Zhou, “Grammar-Aligned Decoding,” arXiv preprint arXiv:2405.21047 , 2024. [5] Y. Liu, J. Lin, H. Jiang, et al., “XGram-mar: Efficient Structured Generation via Grammar-Constrained Decoding,” arXiv preprint arXiv:2411.15100 , 2024. [6] S. Geng, et al., “JSONSchemaBench: Eval-uating Structured Output Generation in Large Language Models,” arXiv preprint arXiv:2501.10868 , 2025. [7] X. Zhang, Y. Wang, and L. Li, “CRANE: Balancing Structural Constraints and Rea-soning Flexibility in LLM Generation,” In-ternational Conference on Machine Learn-ing (ICML) , 2025. [8] A. Reddy, T. Walker, J. Ide, A. Bedi “Draft-Conditioned Constrained Decoding for Structured Generation in LLM’s,” arXiv preprint arXiv:2603.03305 , 2026. [9] M. Kim, J. Lee, and S. Han, “RvLLM: Runtime Verification for Large Language Models,” arXiv preprint arXiv:2505.18585 ,2025. [10] J. Doe and A. Smith, “AgentSpec: Declarative Runtime Enforcement for LLM Agents,” International Conference on Soft-ware Engineering (ICSE) , 2026. [11] R. Chen and K. Wang, “Pro2Guard: Proac-tive Runtime Enforcement for Language Models,” arXiv preprint arXiv:2508.00500 ,2025. [12] T. Nguyen et al., “Towards Verifiably Safe Tool Use for LLM Agents,” arXiv preprint arXiv:2601.08012 , 2026. 11 [13] C. Cruz, “Adaptive Focus Memory for Language Models,” arXiv preprint arXiv:2511.12712 , 2025. [14] C. Cruz, “VIGIL: A Reflective Runtime for Self-Healing Agents,” arXiv preprint arXiv:2512.07094 , 2025. [15] C. Cruz, “ATLAS: A Transparent Proxy Layer for Agentic Runtime Governance,” 
+
+GitHub Repository, cruz209/ATLAS-runtime , 2026. 12
