@@ -1,0 +1,1456 @@
+Title: OneComp: One-Line Revolution for Generative AI Model Compression
+
+URL Source: https://arxiv.org/pdf/2603.28845v1
+
+Published Time: Wed, 01 Apr 2026 00:05:07 GMT
+
+Number of Pages: 31
+
+Markdown Content:
+March 31, 2026 
+
+# OneComp: One-Line Revolution for Generative AI Model Compression 
+
+Yuma Ichikawa 1,2 , Keiji Kimura 1, Akihiro Yoshida 1,3 , Yudai Fujimoto 1,3 , Hiroki Tokura 1,Yamato Arai 1,5 , Yoshiyuki Ishii 1, Yusei Kawakami 1, Genki Shikada 1, Achille Jacquemond 1,Yoshihiko Fujisawa 1,3 , Katsuki Fujisawa 3, Takumi Honda 1, Akira Sakai 1,4 
+
+§ https://github.com/FujitsuResearch/OneCompression 
+
+Deploying foundation models is increasingly constrained by memory footprint, latency, and hardware costs. Post-training compression can mitigate these bottlenecks by reducing the precision of model parameters without significantly degrading performance; however, its practical implementation remains challenging as practitioners navigate a fragmented landscape of quantization algorithms, precision budgets, data-driven calibration strategies, and hardware-dependent execution regimes. We present OneComp, an open-source compression framework that transforms this expert workflow into a reproducible, resource-adaptive pipeline. Given a model identifier and available hardware, OneComp automatically inspects the model, plans mixed-precision assignments, and executes progressive quantization stages, ranging from layer-wise compression to block-wise refinement and global refinement. A key architectural choice is treating the first quantized checkpoint as a deployable pivot, ensuring that each subsequent stage improves the same model and that quality increases as more compute is invested. By converting state-of-the-art compression research into an extensible, open-source, hardware-aware pipeline, OneComp bridges the gap between algorithmic innovation and production-grade model deployment. 
+
+# 1 Introduction 
+
+Foundation models have become the backbone of modern generative AI, demonstrating strong performance in reasoning, coding, and other tasks [Touvron et al., 2023a,b, OpenAI, 2023, DeepSeek-AI, 2024, Gemini Team et al., 2024]; however, this rapid growth poses significant challenges for practical deployment due to substantial memory footprints and computing requirements. Models with tens to hundreds of billions of parameters greatly exceed the memory capacity of commodity hardware, making it prohibitive for most organizations to serve them at full precision. Consequently, model quantization has become a key strategy to bridge the gap between massive model sizes and limited computational resources. Unlike Quantization-Aware Training (QAT) which requires extensive retraining, Post-Training Quantization (PTQ) addresses these challenges by reducing the precision of weights and activations after training, thereby directly reducing memory footprint and accelerating inference [Gong et al., 2024, Gholami et al., 2022, Nagel et al., 2021]. The research community has responded with a rich yet fragmented ecosystem of compression methods. Hessian-aware rounding [Frantar et al., 2023], activation-aware scaling [Lin et al., 2024a], rotation-based outlier suppression [Tseng et al., 2024, Ashkboos et al., 2024, Liu et al., 2024a], block-wise joint optimization [Li et al., 2021, Ding et al., 2023, Shao et al., 2024], and structured binary-factor formats [Xu et al., 2024, Boža and Macko, 2026, Ichikawa et al., 2025a] address different aspects of the problem, with varying assumptions, hyperparameters, and failure modes. Moreover, the optimal combination of algorithms, compression ratios, and configurations varies across models, tasks, and hardware [Hubara et al., 2021, Zhao et al., 2025], with no single recipe applicable universally. Consequently, the latest advances in compression research often take considerable time to reach practitioners, creating a significant gap between what is theoretically achievable and what is practically deployed. What is needed is not      
+
+> 1Fujitsu Limited, 2RIKEN Center for AIP, 3Institute of Science Tokyo, 4Tokai University, 5The University of Tokyo
+> Correspondence : Yuma Ichikawa at ichikawa.yuma@fujitsu.com
+> arXiv:2603.28845v1 [cs.LG] 30 Mar 2026
+
+OneComp: One-Line Revolution for Generative AI Model Compression Foundation 
+
+Model 
+
+> Investigation
+> + AutoBit
+> Act.Aware-ILP
+> §5.1
+> Pre-
+> processing
+> Smooth · Rotation
+> §5.2
+> Block-wise
+> PTQ
+> Comp. · Block-Q
+> §5.4
+> Global PTQ
+> + Fine-tune
+> KL distill · QLoRA
+> §5.5-6
+
+Quantized 
+
+Model 
+
+> Layer-wise PTQ
+> QEP · LPCD
+> §5.3
+
+Resource-Adaptive Quantization 
+
+> GPTQ · JointQ
+> 3 bit
+> MDBF · DBF
+> 1 2 bit
+
+Global PTQ                                         
+
+> Entire model
+> 433333
+> 432333
+> 342243
+> 342334
+> 332233
+> 432234
+> 332234
+> Q
+> K
+> V
+> O
+> Gate
+> Up
+> Down
+> B0 B1 B2 B3 B4 B5
+
+Block-wise PTQ                                         
+
+> One block at a time
+> 433333
+> 432333
+> 342243
+> 342334
+> 332233
+> 432234
+> 332234
+> Q
+> K
+> V
+> O
+> Gate
+> Up
+> Down
+> B0 B1 B2 B3 B4 B5
+
+Layer-wise PTQ                                           
+
+> One layer at a time
+> 433333
+> 432333
+> 342243
+> 342334
+> 332233
+> 432234
+> 332234
+> Q
+> K
+> V
+> O
+> Gate
+> Up
+> Down
+> B0 B1 B2 B3 B4 B5
+> 4-bit 3-bit 2-bit
+
+Figure 1. Overview of the OneComp pipeline. Top : end-to-end workflow from a pretrained foundation model to a deployment-ready quantized model. Bottom : the three quantization granularity levels on a Transformer with mixed-precision bit allocation. Cell colors indicate per-layer bit-widths assigned by AutoBit: Darker colors indicate lower precision. Layer-wise PTQ operates on one linear layer; block-wise PTQ on one Transformer block; global PTQ on the full model. 
+
+another algorithm but a principled end-to-end workflow that manages complexity related to algorithm selection, bit-width planning, and multi-stage sequencing on behalf of the user. In many areas of machine learning, the shift from manual configuration to automated pipelines has facilitated broad adoption [Conti, 2020, He et al., 2021]. It is time for model quantization to follow a similar paradigm shift. 
+
+OneComp is the open-source compression package that facilitates this transition. Given a model identifier and available hardware, OneComp automatically constructs a complete quantization workflow. The pipeline proceeds through the following stages, illustrated in Figure 1. First, an investigation phase 
+
+profiles the quantization sensitivity of each layer and solves a constrained optimization problem to plan heterogeneous bit-widths across the model (Section 4.1). Next, optional preprocessing transforms redistribute outlier energy to enhance quantization friendliness (Section 4.2). The core quantization cascade then executes in a resource-adaptive manner. When limited GPU memory is available, OneComp 
+
+applies layer-wise PTQ (Section 4.3), processing one linear layer at a time; this mode is enhanced by closed-form error-propagation corrections [Arai and Ichikawa, 2025] and submodule-aware coordinate descent [Ichikawa et al., 2025b], allowing it to achieve quality comparable to more expensive methods. When more resources are available, the pipeline seamlessly integrates block-wise PTQ (Section 4.4), including block-wise distillation and model-level KL-divergence optimization, with each stage improving upon the last. A final optional fine-tuning stage via QLoRA [Dettmers et al., 2023] enables the global PTQ to recover any remaining gap (Section 4.5 and 4.6). The user always receives the best quantized model achievable within the given hardware budget, with no manual configuration required. The design is based on three principles. First, a path-to-plan API dynamically derives the workflow from the model architecture and GPU budget, freeing users from manual design. Second, a resource-adaptive engine provides monotonically improving quality, ranging from layer-wise PTQ through 
+
+2OneComp: One-Line Revolution for Generative AI Model Compression 
+
+block-wise refinement to global PTQ and fine-tuning. Third, an extensible refiner architecture 
+
+ensures that new algorithms can be integrated without the need to redesign the pipeline. Based on these principles, OneComp covers the full bit-width spectrum. At 3–4 bits, a joint scale-and-integer optimizer substantially outperforms standard GPTQ while producing deployment-compatible checkpoints. At 1–2 bits, structured binary-factor formats maintain meaningful accuracy where uniform quantization fails. Furthermore, an automatic mixed-precision planner allocates heterogeneous bit-widths within a memory budget. Experimental evaluation across the LLaMA [Touvron et al., 2023a, Grattafiori et al., 2024] and Qwen [Qwen Team, 2025] families demonstrates consistent improvements over existing tools and monotonic quality gains as more resources are invested. 
+
+# 2 Background 
+
+This section introduces the background needed to understand quantization in foundation models. We begin by motivating quantization in this context, emphasizing the memory-capacity and bandwidth bottlenecks that affect large-scale inference (Section 2.1). We then describe the historical context of quantization (Section 2.2). Next, we review the standard formulation of uniform quantization and identify the quantization targets in Transformer architectures (Section 2.3 and 2.4). After that, we introduce post-training quantization (PTQ) and distinguish it from quantization-aware training (QAT) (Section 2.5). We conclude by describing three practical PTQ regimes: layer-wise, block-wise, and global, which are central to designing OneComp (Section 2.6). Although current interest in LLM quantization is largely driven by deployment needs, the underlying concepts trace back to the signal-processing literature, which we briefly revisit at the end of this section. 
+
+2.1 Why Quantization Matters for Foundation Models 
+
+Quantization reduces the number of bits used to represent numerical values, thereby storing each value more compactly. Replacing a 16-bit representation with 4 bits reduces storage by a factor of four; using 2 bits yields an eightfold reduction. For small models, this can seem to be a convenient compression technique. However, for foundation models, numerical precision is a first-order systems concern: it directly determines whether the model fits in memory, the amount of data transferred during inference, and deployment feasibility. The most immediate pressure comes from model weights. Modern Transformer-based foundation models typically contain billions to tens of billions of parameters, with the majority residing in large linear projection matrices. For a model with P parameters, storing weights in 16-bit precision requires 2P bytes of memory. A 70-billion-parameter model requires approximately 140 GB to store its weights in 16-bit precision, compared to about 35 GB at 4 bits and roughly 18 GB at 2 bits. These estimates overlook the minor overhead associated with storing scales and zero-points while capturing the main savings. In practice, such reductions often determine whether a model can be deployed on a single accelerator or must be distributed across multiple devices. Memory capacity, however, is only part of the picture. Inference in Transformer models is often limited more by memory bandwidth than by raw arithmetic throughput [Yuan et al., 2024]. At each inference step, the accelerator fetches large weight matrices from high-bandwidth memory for matrix multiplications. Reducing weight precision decreases the volume of data transferred for the same computation, which can improve throughput, reduce latency, and lower energy consumption [Gong et al., 2024, Dettmers and Zettlemoyer, 2023]. Quantization is valuable not only for compressing the model in memory but also for reducing data movement costs across the system. In addition to static weights, foundation-model inference involves large dynamic tensors. The most important of these are the intermediate activations and the key–value (KV) cache used in autoregressive decoding. Activations are the intermediate tensors produced as input tokens propagate through the network. The KV cache stores the key and value tensors from previous tokens, allowing the model to avoid recomputing attention over the previously generated tokens at each decoding step. As context length or batch size increases, the memory required for these tensors can become substantial, potentially approaching the memory consumed by the weights themselves [Ashkboos et al., 2024]. For this reason, modern quantization methods increasingly target not only weights but also activations and KV caches; Section 2.4 revisits these components in detail. 
+
+OneComp focuses on weight-only PTQ, providing a compelling entry point for compressing foundation models. Since most parameters are stored in the weights, quantizing them results in a significant and immediate reduction in memory footprint. Moreover, weights can be quantized offline after training without altering the original optimization pipeline and can be executed using specialized low-precision kernels during inference. The subsequent subsections discuss activation and KV-cache quantization for completeness; however, the core method in OneComp emphasizes weight quantization. 
+
+3OneComp: One-Line Revolution for Generative AI Model Compression 
+
+2.2 Historical Context 
+
+Although the deployment setting above is specific to modern foundation models, the concept of quantization predates deep learning. Early work in classical signal processing explored how to map continuous-valued signals to a finite set of reconstruction levels while minimizing distortion under a fixed bit budget. In particular, the seminal analyses of Max [1960] and Lloyd [1982], widely known as Lloyd–Max quantization, showed that optimal quantization levels should adapt to the underlying signal distribution, assigning finer resolution to regions with higher probability mass. These results established the mathematical foundation for later developments in rate–distortion theory and continue to inform modern quantization methods. Quantization entered neural-network research as model size, memory traffic, and deployment costs became increasingly important in deep learning. Early studies demonstrated that many neural networks remain effective with reduced numerical precision. For example, Gupta et al. [2015] showed that low-precision arithmetic can support both training and inference across various workloads, while Courbariaux et al. [2015] and Courbariaux et al. [2016] extended on this concept using binary weights and activations. Subsequent work, including Zhou et al. [2016] and Hubara et al. [2018], expanded on these ideas to low-bit training regimes. Meanwhile, research on model compression established quantization as a practical systems technique rather than just a numerical abstraction. Han et al. [2016] showed that pruning, trained quantization, and entropy coding can compress neural networks by 35 –49 × with negligible loss in accuracy, highlighting the substantial redundancy in overparameterized models. A major turning point came with Jacob et al. [2018], which popularized the deployment-oriented paradigm of integer-only inference, where weights and activations are quantized to enable efficient low-precision arithmetic while largely retaining floating-point accuracy. This research helped establish quantization as a tool not only for compression but also for reducing latency, memory bandwidth demand, and energy consumption on real hardware. Today, quantization is one of the most widely used techniques for compressing and accelerating neural networks, particularly in deployment scenarios where data movement can be as costly as computation itself [Nagel et al., 2021, Gholami et al., 2022, Gong et al., 2024]. The methods examined in this paper belong to this modern line of work: they inherit the basic formalism of classical quantization but are designed to accommodate the scale and system constraints of contemporary Transformer-based foundation models. 
+
+2.3 Fundamentals of Uniform Quantization 
+
+Uniform quantization approximates real numbers using a finite grid of evenly spaced levels. Two central questions arise: how a real value maps onto this grid and how broadly the corresponding quantization parameters are shared. We review both below. 
+
+2.3.1 Quantization Mapping 
+
+Quantization replaces a continuous value with one of a finite number of representable levels. The most common scheme is uniform quantization, in which adjacent levels are evenly spaced. For a scalar value 
+
+w ∈ R and a target bit-width b, a uniform quantizer is parameterized by a scale s > 0 and a zero-point 
+
+z ∈ Z. Let qmin and qmax denote the available integer range; for unsigned b-bit quantization, qmin = 0 and 
+
+qmax = 2 b − 1. The quantization and dequantization operations are 
+
+q = clamp 
+
+j ws
+
+m
+
++ z, q min , q max 
+
+
+
+, bw = s · (q − z), (1) where ⌊·⌉ denotes rounding to the nearest integer and clamp (x, a, c ) = max (a, min (x, c )) . The scale intuitively determines the spacing between adjacent quantization levels, while the zero-point aligns the real axis with the integer grid. The integer q is the low-precision value stored in memory, and the dequantized value bw is the real-valued approximation used in computation. The difference w − bw represents the quantization error. When w is within the representable range, meaning that no clipping occurs, the rounding error is bounded by |w − bw| ≤ s/2. If w falls outside the range [s(qmin − z), s (qmax − z)] , the clamp operation introduces additional clipping errors that can exceed s/2. Figure 2 compares 4-bit and 2-bit quantization of the same weight distribution, illustrating how lower bit-widths create a coarser grid and consequently larger approximation errors. 
+
+2.3.2 Choosing Scale and Zero-Point 
+
+The scale and zero-point are usually calibrated from the observed range of values. Given a set of real numbers with a minimum wmin and a maximum wmax , standard asymmetric min-max calibration [Jacob et al., 2018, Czakó et al., 2025, Gholami et al., 2022] sets 
+
+s = wmax − wmin 
+
+qmax − qmin 
+
+, z = clamp 
+
+
+
+round 
+
+
+
+qmin − wmin 
+
+s
+
+
+
+, q min , q max 
+
+
+
+. (2) 
+
+4OneComp: One-Line Revolution for Generative AI Model Compression weight distribution     
+
+> -0.8 -0.4 0.1 0.5 0.8
+
+w = 0.34  
+
+> w= 0.4
+> error = 0.03
+
+4-bit (16 levels, s = 0.11 )  
+
+> weight distribution
+> -0.8 -0.3 0.8
+
+w = 0.34  
+
+> w= 0.3
+> error = 0.07
+
+2-bit (4 levels, s = 0.53 )
+
+Figure 2. Comparison of 4-bit and 2-bit uniform quantization on the same weight distribution. Each panel overlays the quantization grid on a histogram of weights. 4-bit uniform quantization provides 16 fine-grained levels; 2-bit uniform quantization provides only 4, yielding coarser approximation and larger errors. N
+
+M
+
+Per-tensor 
+
+> 1 scale for entire matrix
+> N
+
+M
+
+Per-channel 
+
+> 1 scale per row
+> N
+
+M
+
+Per-group 
+
+> 1 scale per group of 4
+
+Figure 3. Three levels of quantization granularity for a weight matrix. Each color represents a group of elements sharing the same scale and zero-point. Per-tensor uses one set of parameters for the entire matrix; per-channel uses one per row; per-group divides each row into smaller groups. 
+
+This choice roughly maps the observed real range to the available integer range. It is simple, widely used, and particularly natural when the signal is not centered at zero. When the distribution is approximately symmetric around zero, symmetric quantization is often preferred, particularly for weights. In this case, the zero-point is fixed at z = 0 , and the integer range is considered signed, typically q ∈ {− (2 b−1 − 1) , . . . , 2b−1 − 1}. The scale is then selected as 
+
+s = max( |wmin |, |wmax |)2b−1 − 1 , bw = s · q. (3) Compared to asymmetric quantization, symmetric quantization simplifies dequantization into a single multiplication and eliminates the need to store a nonzero zero-point for each quantization group. This reduces metadata overhead and can simplify inference kernels [Gholami et al., 2022]. In practice, asymmetric quantization is common for activations, while symmetric quantization is particularly prevalent for weights. 
+
+2.3.3 Quantization Granularity 
+
+Beyond bit-width, an important design choice is quantization granularity, that is, how many values share the same scale and zero-point. Finer granularity typically improves accuracy by better adapting to local variations in the data, but it also increases the number of auxiliary quantization parameters that must be stored. Figure 3 illustrates three common granularities for weight matrices. The simplest option is per-tensor quantization [Gholami et al., 2022], which uses a single scale and zero-point for the entire weight matrix. This is computationally convenient but can be inaccurate when different rows or columns have markedly different distributions. Per-channel quantization assigns separate parameters to each row or column, thereby capturing variation at the channel level. Per-group quantization, which is predominant in modern LLM quantization [Frantar et al., 2023], offers a compromise between the two: each row is divided into groups of G consecutive elements, and all elements within a group share the 
+
+5OneComp: One-Line Revolution for Generative AI Model Compression 
+
+same quantization parameters. For a weight matrix W ∈ RN ×M , this can be written as 
+
+cWij = sg(i,j )
+
+ qij − zg(i,j )
+
+ , qij ∈ { 0, 1, . . . , 2b − 1}, (4) where g(i, j ) assigns each element to a quantization group. A common choice in practice is G = 128 . Reducing the group size allows the quantizer to better adapt to local weight statistics, typically improving reconstruction quality. The trade-off is that smaller groups require more stored scales and zero-points. The total memory footprint of a per-group quantized matrix is approximately 
+
+Mgroup ≈ N M · b
+
+8 + N M G (ms + mz ), (5) where ms and mz denote the number of bytes used to store the scale and zero-point for each group, respectively. This trade-off between adaptivity and metadata is one of the basic design choices in practical quantization systems. 
+
+2.4 Quantization Targets in Transformer Models 
+
+The previous subsection described how quantization works at the level of individual values and matrices. We now turn to where quantization is applied in a Transformer. A Transformer-based foundation model consists of an embedding layer, a stack of L repeated Transformer blocks, and an output head. In modern LLMs, most parameters are concentrated in the large linear projection matrices within the Transformer blocks, which is why quantization methods typically begin there. We use the LLaMA architecture [Touvron et al., 2023a,b] as a representative example. 
+
+2.4.1 Anatomy of a Transformer Block 
+
+A LLaMA-style Transformer is a decoder-only model composed of an embedding layer followed by a stack of L pre-normalized Transformer blocks. Each block contains two main sub-layers: causal self-attention and a gated feed-forward network. Following standard practice, we omit biases and dropout for clarity, since the main targets of quantization are the large linear projection matrices. For simplicity, let X ∈ RT ×d denote the input to a Transformer block, where T is the sequence length and d is the hidden dimension. The block first applies RMS normalization before the attention sub-layer: 
+
+Xattn = RMSNorm attn (X). (6) The normalized input is then projected into queries, keys, and values: 
+
+Q = RoPE( Xattn Wq ), K = RoPE( Xattn Wk), V = Xattn Wv , (7) where Wq , W k, W v ∈ Rd×d and RoPE (·) denote rotary positional embeddings. After splitting Q, K, and 
+
+V into H attention heads, we obtain Q(h), K (h), V (h) ∈ RT ×dk with dk = d/H. The output of head h is 
+
+A(h) = softmax Q(h)K(h)⊤
+
+√dk
+
++ Mcausal 
+
+!
+
+V (h) ∈ RT ×dk , (8) where Mcausal ∈ RT ×T is the causal mask with entries of 0 for visible positions and −∞ for masked future positions. The head outputs are then concatenated and projected back into the hidden dimension: 
+
+Xattn _out = X + Concat  A(1) , . . . , A (H)Wo, W o ∈ Rd×d. (9) The block then applies a second RMS normalization before the feed-forward sub-layer: 
+
+Xffn = RMSNorm ffn (Xattn _out ). (10) In LLaMA, the feed-forward sub-layer employs a SwiGLU-style gated architecture with three weight matrices, Wgate , W up ∈ Rd×dff and Wdown ∈ Rdff ×d:
+
+Xout = Xattn _out + (SiLU( Xffn Wgate ) ⊙ (Xffn Wup )) Wdown , (11) where SiLU( x) = x · σ(x) and ⊙ denotes element-wise multiplication. The main point for quantization is that each Transformer block contains several large dense projection matrices. In the LLaMA formulation above, there are seven such matrices per block: Wq , Wk, Wv , and 
+
+Wo in the attention sub-layer, and Wgate , Wup , and Wdown in the feed-forward sub-layer. For a model with L blocks, these contribute 7L large projection matrices, in addition to the token embedding matrix, the final normalization layer, and the output head. In practice, these large linear weights dominate both parameter count and memory footprint, making them the primary targets for weight quantization. Small normalization parameters and other auxiliary tensors are typically kept in higher precision. For simplicity, the equations above use the standard multi-head attention form. Some LLaMA-family variants instead use grouped-query attention (GQA), in which the key and value projections have fewer 
+
+6OneComp: One-Line Revolution for Generative AI Model Compression 
+
+heads than the query projection. This changes the shapes of Wk and Wv , but it does not change the main quantization targets: the large attention and feed-forward projection matrices. 
+
+2.4.2 Weight Quantization 
+
+Among the possible quantization targets in a Transformer, weights are usually the natural starting point. In weight-only quantization, each linear projection matrix is stored in low precision while activations remain in floating-point format. During inference, specialized kernels either dequantize these weights on the fly or operate directly on low-precision representations, depending on the hardware and software stack. Because the overwhelming majority of Transformer parameters reside in large linear layers, quantizing weights alone often provides the largest immediate reduction in model memory footprint. Consider a single linear layer with input activations X ∈ RT ×N and a weight matrix W ∈ RN ×M ,producing 
+
+Y = XW ∈ RT ×M . (12) Given a quantization set Q determined by the target bit-width, granularity, and calibration scheme, the goal is to find a quantized approximation cW ∈ Q . At the layer level, two formulations are especially common. 
+
+Direct Weight Quantization. The most straightforward objective is to keep the quantized weights numerically close to the full-precision weights: 
+
+cW = argmin  
+
+> fW∈Q
+
+∥fW − W ∥2 
+
+> F
+
+. (13) For a fixed quantization grid, this problem separates across individual entries, so each weight is mapped independently to the nearest representable value. This yields the standard round-to-nearest (RTN) quantizer, which is simple, computationally efficient, and often serves as a strong baseline. Its limitation is that it treats all perturbations equally: an error in a direction that barely changes the layer output is penalized just as heavily as an error in a direction to which the layer is highly sensitive. 
+
+Activation-Aware Quantization. A more faithful objective is to preserve the layer output under repre-sentative inputs. Instead of minimizing only weight distortion, activation-aware methods minimize the layer-wise output reconstruction error: 
+
+cW = argmin  
+
+> fW∈Q
+
+∥X fW − XW ∥2 
+
+> F
+
+= argmin  
+
+> fW∈Q
+
+∥X(fW − W )∥2 
+
+> F
+
+. (14) Expanding this quadratic form reveals the role of the activation Gram matrix X⊤X ∈ RN ×N : it weights perturbations according to how strongly they affect the layer output. In the corresponding least-squares problem, X⊤X captures the relevant second-order structure and is proportional, up to a constant factor, to the local Hessian. Unlike direct weight quantization, this objective acknowledges that some directions in weight space are far more sensitive than others. This distinction is especially important in large language models, where two quantized weight matrices can be similarly close to W in Frobenius norm yet induce very different output distortions because the layer is not equally sensitive in all directions. Activation-aware methods use calibration activations not only to determine quantization scales, but also to identify which weight perturbations matter most for preserving model behavior. GPTQ [Frantar et al., 2023], for example, exploits this second-order structure to perform column-wise quantization with residual error compensation, substantially improving accuracy over naive RTN at low bit-widths. In practice, direct weight quantization is attractive because it is simple, fast, and requires no activation statistics beyond those needed to define the quantization grid. Activation-aware quantization is more computationally demanding because it relies on calibration data and requires storing or approximating activation-dependent statistics. It nonetheless tends to deliver better accuracy, especially at 3–4 bits and below. As a result, many modern PTQ pipelines follow a natural progression: RTN provides a lightweight baseline, while activation-aware methods refine the quantized weights by explicitly accounting for output sensitivity. 
+
+2.4.3 Activation Quantization 
+
+Beyond weights, one can also quantize the intermediate tensors that flow through a Transformer block. From Eqs. (7) – (11) , these include the normalized inputs, the query, key, and value tensors, the attention outputs, and the intermediate gated activations in the feed-forward network. Quantizing such tensors reduces activation memory and, when the hardware and kernels support it, enables low-precision matrix multiplication during inference. Unlike weights, however, activations are input-dependent and must be quantized dynamically as they are produced. 
+
+7OneComp: One-Line Revolution for Generative AI Model Compression 
+
+Activation quantization is generally more challenging than weight quantization for two main reasons. First, activation distributions can vary substantially across layers, channels, and input sequences, so a single static scale calibrated offline may be suboptimal at inference time. Second, Transformer activations often contain a small number of outlier channels whose magnitudes are much larger than those of typical activations [Dettmers et al., 2022, Czakó et al., 2025]. Under uniform quantization, such outliers expand the quantization range and increase the step size s, forcing the majority of non-outlier values to be represented by relatively few discrete levels. The resulting loss of effective resolution can severely degrade model quality. A representative solution is SmoothQuant [Xiao et al., 2023], which applies per-channel rescaling to shift part of the quantization difficulty from activations to weights; see Section 4.2 for details. More broadly, activation quantization often requires careful calibration, dynamic scaling, or architectural transformations to control extreme dynamic ranges. When both activations and weights are quantized, the matrix multiplication Y = XW can be executed with low-precision operands, typically using higher-precision accumulation followed by rescaling. On hardware with dedicated low-precision units, this can substantially improve inference efficiency [Jacob et al., 2018]. 
+
+2.4.4 KV Cache Quantization 
+
+Autoregressive generation introduces another major memory term: the KV cache. To avoid recomputing attention over the entire prefix at every decoding step, Transformers store the key and value tensors produced at each layer for all previously generated tokens. For layer l and KV head h, the cached tensors are precisely the key and value projections defined in Eq. (7). For a batch size of B, sequence length T , and a model with L Transformer layers and Hkv key–value heads, the total KV cache contains BLT H kv (dk + dv ) elements, where dk and dv are the per-head dimensions of the key and value tensors. In most architectures, dk = dv , which reduces this expression to 
+
+2BLT H kv dk. The key point is that KV-cache memory grows linearly with sequence length T . For long contexts or large batch sizes, the cache can therefore become comparable to, or even larger than, the model weights themselves. Quantizing cached keys and values to lower precision reduces this memory almost proportionally, enabling longer context windows, larger effective batch sizes, and higher serving throughput [Ashkboos et al., 2024]. In this paper, however, we focus on weight-only quantization; activation and KV-cache quantization are outside the scope of the present method. 
+
+2.5 Post-Training Quantization and Quantization-Aware Training 
+
+The previous subsection described what can be quantized. We now turn to the setting studied in this paper: post-training quantization. PTQ quantizes a pretrained model after training has finished, without modifying the original optimization process [Nagel et al., 2021]. At a high level, PTQ seeks a quantized parameter set that makes the quantized model behave as similarly as possible to the original full-precision model on representative inputs. Let fθ denote a full-precision model with parameters θ, and let f ˆθ denote its quantized counterpart with compressed parameters ˆθ ∈ Q . A natural global PTQ objective is 
+
+min 
+
+> ˆθ∈Q
+
+Ex∼P 
+
+d fθ (x), f ˆθ (x) , (15) where d(·, ·) measures the difference between the two model outputs and P denotes the underlying data distribution. This formulation simply states that the quantized model should stay close to the full-precision model on typical inputs. In practice, however, PTQ does not have direct access to P. Instead, it relies on a small calibration set 
+
+C = {x1, . . . , xn} sampled from P, typically consisting of n text sequences of length T . This calibration set is used to estimate the activation statistics needed to guide quantization. For each layer l, the calibration sequences are passed through the model to collect the input activation matrix Xl ∈ RnT ×N , where each row corresponds to a token-level activation vector. From Xl, one can compute layer-specific statistics such as the Gram matrix Hl = X⊤ 
+
+> l
+
+Xl ∈ RN ×N , which is closely related to the second-order information used by activation-aware PTQ methods. As prior work has shown, the quality of the calibration set has a direct effect on final quantization quality [Hubara et al., 2021, Williams and Aletras, 2024]. The appeal of PTQ lies in its practicality. It requires neither access to the original training data nor the full training pipeline, can be applied to essentially any pretrained checkpoint, and typically runs in minutes to hours rather than days. Its main challenge is that it must control quantization error without the benefit of end-to-end gradient-based adaptation. Consequently, the success of PTQ depends heavily on the design of effective local or global reconstruction objectives, robust calibration strategies, and error-compensation 
+
+8OneComp: One-Line Revolution for Generative AI Model Compression 
+
+mechanisms. In this work, we focus on PTQ because it offers the strongest balance among applicability, computational cost, and compatibility with the rapidly growing ecosystem of open-weight models. 
+
+Relation to QAT. A complementary approach is quantization-aware training (QAT) [Jacob et al., 2018, Zhang, 2025], which incorporates simulated quantization directly into the training process. During each forward pass, weights and activations are quantized and then immediately dequantized, so the model learns in the presence of quantization noise. Because the rounding operator ⌊·⌉ has zero gradient almost everywhere, QAT typically uses the straight-through estimator (STE) [Bengio et al., 2013], which treats the gradient of rounding as the identity during backpropagation. This allows the model to adapt its parameters to compensate for quantization effects during training. QAT can achieve excellent accuracy, especially at very low bit-widths, but it is substantially more expensive than PTQ. It requires access to the training pipeline and often incurs significant additional computation, in some cases hundreds of GPU-hours [Liu et al., 2023]. Although recent work has demonstrated promising results for models up to 70B parameters, extending QAT reliably to 100B-scale models remains challenging. For this reason, PTQ remains the more practical and widely applicable setting for compressing modern foundation models. 
+
+2.6 Practical PTQ Regimes: Layer-wise, Block-wise, and Global 
+
+The PTQ objective in Eq. (15) does not by itself determine how much of the model should be optimized jointly. In principle, the strongest formulation would optimize all quantization parameters over the entire model at once. In practice, the feasible scope of optimization is limited by available GPU memory during calibration and optimization. This leads to three common execution regimes, each corresponding to a different trade-off between optimization strength and memory cost. Figure 1 provides an overview. 
+
+Layer-wise PTQ [Frantar et al., 2023, Lin et al., 2024a] quantizes one linear layer at a time and is the most memory-efficient regime. For each layer l, the method first obtains calibration activations Xl by forwarding the calibration set through all preceding layers. It then solves a local reconstruction problem to determine the quantized weight cWl for that layer, stores the result, and proceeds to the next layer. The peak GPU memory is bounded by a single weight matrix together with its associated Hessian-like statistic Hl = X⊤ 
+
+> l
+
+Xl, which makes this regime feasible even on a single consumer GPU. Layer-wise PTQ is also the most widely adopted setting in practice: many publicly available quantized models have been produced by tools such as AutoGPTQ [AutoGPTQ Team, 2023] and AWQ [Lin et al., 2024b]. The main limitation of layer-wise PTQ is that each layer is optimized in isolation. Once upstream layers have been quantized, downstream layers receive perturbed activations rather than the full-precision inputs assumed during local optimization. These discrepancies accumulate with depth, leading to error propagation . This accumulation is one of the main reasons why layer-wise PTQ often lags behind more expensive optimization regimes in final model quality. 
+
+Block-wise PTQ [Li et al., 2021, Ding et al., 2023] jointly quantizes all linear layers inside one Transformer block at a time. A Transformer block is the model’s basic repeating unit, typically consisting of self-attention, a feed-forward network, and normalization layers; modern LLMs often contain roughly 32 to 80 such blocks. Block-wise PTQ usually matches the output of the quantized block to that of its full-precision counterpart, allowing the optimizer to capture intra-block dependencies that layer-wise PTQ ignores, including interactions among the attention projections and the feed-forward layers. Blocks are processed sequentially, and the output of each quantized block becomes the input to the next. 
+
+Global PTQ is the most comprehensive regime. It loads the entire model onto GPUs and optimizes all quantization parameters jointly, often by minimizing an end-to-end divergence—for example, the KL divergence—between the full-precision teacher and the quantized student on the calibration set. Because the optimizer can coordinate adjustments across all layers simultaneously, this regime is potentially the most accurate. Its cost, however, is substantial: it requires enough GPU memory to hold both teacher and student models, together with optimizer states and cached activations. The central idea behind OneComp is that these three regimes need not be viewed as isolated alternatives. Instead, they can be organized into a coherent refinement pipeline. Layer-wise PTQ produces an initial quantized model, block-wise PTQ improves it, and global PTQ refines it further. Each stage builds on the output of the previous one, allowing users to stop at the point that best matches their hardware budget. A central contribution of OneComp is to narrow the quality gap between layer-wise and global PTQ without requiring additional hardware; we return to this point in Section 4.3.1. 
+
+# 3 OneComp Overview 
+
+OneComp is a resource-adaptive quantization framework that transforms a pretrained foundation model into a deployment-ready quantized model with minimal user intervention. It automatically selects the 
+
+9OneComp: One-Line Revolution for Generative AI Model Compression 
+
+strongest quantization pipeline that fits within the available GPU memory, from lightweight layer-wise methods to full-model global optimization. By primarily focusing on weight-only PTQ, it offers a compelling entry point for compression: quantizing weights offline significantly reduces memory footprint without altering the original training pipeline. Its design is guided by three principles: an end-to-end workflow that automates major engineering steps, a pivot-based refinement architecture that supports progressively stronger post-quantization optimization, and a flexible, user-friendly interface for advanced use cases. This section offers a high-level overview of these design choices before detailing the technical aspects in subsequent sections. 
+
+3.1 End-to-End Workflow 
+
+Figure 1 provides a high-level view of the OneComp pipeline. Starting from a pretrained foundation model, OneComp produces a quantized checkpoint through a sequence of automated stages. The pipeline first loads the target model and inspects its architecture, automatically identifying the model family, such as a dense large language model, a mixture-of-experts model, or a vision-language model, while detecting all quantizable linear layers and organizing them into the sequential processing order used by the quantization pipeline. This initial inspection enables the pipeline to operate across architectures without requiring users to manually specify the layer structure. 
+
+3.1.1 Calibration Data Sampling 
+
+All PTQ stages rely on a calibration dataset C = {x1, . . . , x n} to estimate the activation statistics that guide quantization. These samples serve two related purposes. First, they provide the layer inputs Xl,from which OneComp constructs the empirical input Gram matrix Hl = X⊤ 
+
+> l
+
+Xl, which serves as the per-row second-order term used by layer-wise PTQ methods. Second, they supply the reference outputs needed for block-wise and global reconstruction. Since quantization quality strongly depends on how well the calibration data reflect the target activation distribution [Hubara et al., 2021], OneComp treats calibration as part of the default workflow rather than a manual preprocessing burden. When users do not provide a custom calibration set, OneComp automatically constructs one from a corpus. The default concat_chunk strategy concatenates text samples, tokenizes the resulting text, and slices it into fixed-length chunks of T tokens to produce n calibration sequences. Alternative strategies, such as drop_head and drop_rand , reduce positional bias or increase sample diversity. This design keeps the default workflow simple while allowing advanced users to tailor calibration to a specific model or downstream setting. Once the calibration data is prepared, OneComp can also apply optional preprocessing transforms that make the model more amenable to low-bit compression. These include weight balancing through L1/L2 Sinkhorn normalization, incoherence transforms using Hadamard rotation, and channel equalization. Although these methods differ in form, they share the same goal: reducing outlier concentration to ensure subsequent quantization is more stable and less error-prone. Details are provided in Section 4.2. The core of the pipeline is the resource-adaptive quantization engine, which is organized as a sequence of refinement stages with increasing optimization scope. The pipeline always starts with layer-wise PTQ .In this regime, OneComp loads one linear layer at a time onto the GPU, quantizes that layer, and then offloads the result to CPU memory. Peak memory is therefore bounded by a single weight matrix and a Hessian approximation computed from calibration activations, making this stage feasible even on a single consumer GPU. Importantly, this first stage already produces a self-contained quantized model that can be evaluated, saved, and deployed on its own. When additional GPU memory is available, OneComp uses this initial model as the starting point for 
+
+block-wise PTQ . At this stage, the system loads one Transformer block at a time and jointly optimizes all quantization parameters within that block by distilling from the full-precision teacher; minimizing the discrepancy between the quantized and full-precision block outputs. With still larger resources, the pipeline can continue to global PTQ , which loads the full model and jointly optimizes quantization parameters across all layers, typically through KL-divergence-based distillation through minimizing the divergence between the quantized and full-precision model outputs. Finally, OneComp can optionally perform parameter-efficient fine-tuning on top of a quantized backbone using QLoRA-compatible formats [Dettmers et al., 2023] to further align the quantized model to a downstream task. The key trade-off in Figure 1 is between optimization scope and memory cost. Layer-wise PTQ operates on a single linear layer, block-wise PTQ on an entire Transformer block, and global PTQ on the full model. As the optimization unit grows, the method can correct more quantization error by accounting for interactions that smaller-scope methods must ignore, but it also requires substantially more GPU memory. 
+
+OneComp therefore adapts to the available hardware by advancing as far along this refinement chain as resources permit. 
+
+10 OneComp: One-Line Revolution for Generative AI Model Compression  
+
+> 1
+
+# Step 1: Layer - wise PTQ ( always runs , single GPU )  
+
+> 2
+
+quantized_model = layerwise_quantizer . run ( fp_model )  
+
+> 34
+
+# Step 2+: Optional refinement pipeline  
+
+> 5
+
+refinement_pipeline = [ 
+
+> 6
+
+BlockwiseRefiner (...) , # block - level MSE distillation  
+
+> 7
+
+GlobalRefiner (...) , # model - level KL refinement  
+
+> 8
+
+FinetuningRefiner (...) , # QLoRA / adapter training  
+
+> 9
+
+] 
+
+> 10 11
+
+for refiner in refinement_pipeline :  
+
+> 12
+
+quantized_model = refiner . run ( quantized_model )   
+
+> Code 1. Composable refinement pipeline. Each refiner accepts a quantized model and returns an improved one.
+> 1
+
+uv run onecomp < model_path >   
+
+> Code 2. Minimal usage of OneComp . A single high-level invocation quantizes the target model, evaluates the result, and saves the resulting checkpoint.
+
+3.2 Quantized Model as Pivot 
+
+A central architectural decision in OneComp is to treat the first quantized model produced by layer-wise PTQ as the pivot for all subsequent improvements. Rather than viewing layer-wise, block-wise, and global PTQ as unrelated modes, OneComp organizes them into a progressive refinement pipeline. Layer-wise PTQ always runs first because it has the lowest memory requirement and already yields a usable quantized model. Every later stage—including block-wise refinement, global refinement, and optional fine-tuning—is implemented as a post-processing step that takes a quantized model as input and returns an improved one. This pivot-based design, illustrated in Code 1, has three practical advantages. First, it keeps the entry point simple: users who only need a reasonable quantized model can stop after the initial PTQ stage. Second, it facilitates smooth and incremental quality improvements: users can enable stronger refinement stages one at a time and directly measure the gains obtained from each additional computation budget. Third, it makes the framework naturally extensible. Any post-quantization technique that maps one quantized model to a better one can be integrated as a new refiner without changing the rest of the pipeline. In this sense, OneComp serves not only as a quantization method but also as a composable framework in which new post-quantization techniques can be integrated as additional refiners without modifying the existing pipeline.. 
+
+3.3 User Interface 
+
+The architectural choices above are revealed through a deliberately minimal user interface. As shown in Code 2, the user specifies the target model and launches the pipeline with a single high-level invocation. By default, OneComp handles model inspection, calibration construction, quantization, evaluation, and checkpoint export automatically. This enables non-expert users to obtain a strong, deployment-ready baseline without needing to consider layer grouping, memory scheduling, or calibration mechanics. At the same time, the interface is not restrictive. For researchers and advanced practitioners, each major decision point—including preprocessing, calibration, optimization regime, and refinement strategy—can be overridden through optional arguments. The result is a two-level interface: a simple default path for users who want the system to make sensible choices automatically, and an expert mode for users who wish to control the individual components of the pipeline. This separation is intentional. It keeps the common use case lightweight while ensuring that OneComp remains a useful experimental platform for developing and evaluating new quantization methods. 
+
+# 4 Quantization Engines 
+
+This section details the method underlying each stage of the OneComp pipeline, which was introduced at a high-level in Section 3. We first describe two preprocessing stages; automatic mixed-precision planning 
+
+11 OneComp: One-Line Revolution for Generative AI Model Compression 
+
+(Section 4.1) and equivalent transformation (Section 4.2). Next, we describe three quantization regimes that increase the optimization target; layer-wise PTQ (Section 4.3), block-wise PTQ (Section 4.4), and global PTQ (Section 4.5). Section 4.6 addresses optional quantization fine-tuning as a final refinement step. 
+
+4.1 AutoBit: Automatic Mixed-Precision Planning 
+
+Transformer layers differ markedly in their sensitivity to quantization. Early layers and attention output projections are often particularly fragile, while MLP layers in the middle of the network typically accommodate much more aggressive compression. As a result, assigning a uniform bit-width across all layers, as many existing tools do, misallocates precision: it overprovisions robust layers while underprovisioning the most sensitive ones. To address this imbalance, AutoBit explicitly leverages layerwise heterogeneity by solving a constrained optimization problem that selects the bit-width for each layer or module under a global memory budget before quantization is performed. AutoBit first determines the target average bit-width, which serves as the effective global budget based on the user-specified VRAM constraint. If this value falls below a predefined threshold, such as 2 bits, the current release does not support mixed-bit allocation in such low-bit regimes; however, support for this scenario, along with DBF described in Section 4.3.2, is planned for a future release. Otherwise, AutoBit solves an integer linear optimization problem to determine the bit-width allocation for each module. Let 
+
+Cl denote the set of candidate configurations for layer l, where each candidate c ∈ C l specifies a bit-width, numeric format, and group size. Each candidate has a memory cost cost (l, c ) (the packed weight size plus per-group scale and zero-point overhead) and a predicted quantization error err (l, c ). Given a total budget 
+
+C∗, AutoBit solves: 
+
+min 
+
+> {cl∈C l}
+> L
+
+X
+
+> l=1
+
+err( l, c l) s.t. 
+
+> L
+
+X
+
+> l=1
+
+cost( l, c l) ≤ C ∗, (16) The module-level solver formulates Eq. (16) as an integer linear programming problem and can be solved by using the SCIP 1 solver in OR-Tools. This enables finer-grained allocation, allowing different modules within the same layer to receive varying bit-widths. To accurately reflect the impact of quantization on model performance, estimating the error metric 
+
+err (l, c l) is critical. Let ∆W (l,c l) := cW (l,c l) − W (l) denote the weight perturbation obtained by running a fast round-to-nearest (RTN) proxy under configuration cl. It can be parallelly calculated per module and configuration. A naive approach measures err (l, c l) = ∥∆W (l,c l)∥2 
+
+> F
+
+, but it ignores activation distributions. We employ an activation-aware error based on the second-order Taylor expansion of the per-layer loss, expressed using the Kronecker-factored Hessian: 
+
+err( l, c l) ≈ 12 tr 
+
+
+
+B(l)∆W (l,c )A(l)∆W (l,c )⊤
+
+(17) where A(l) and B(l) are the input Gram matrix and output curvature for layer l, respectively. ∆W (l,c )
+
+can be obtained by running the fast round-to-nearest (RTN) proxy. Note that when we set A(l) and B(l)
+
+as the identity matrices, the increase of loss is equivalent to the naive Frobenius norm. In practice, we consider only the diagonal elements of A(l) and B(l) for saving computational budget. 
+
+4.2 Preprocessing via Equivalent Transformations 
+
+Transformer models often exhibit heavy-tailed distributions in both weights and activations, with a small subset of channels containing values that are orders of magnitude larger than the rest [Dettmers et al., 2022, Czakó et al., 2025]. These outliers increase the quantization step size s, effectively reducing the resolution available for typical values and degrading the overall model accuracy. To mitigate this issue, preprocessing methods employ mathematically equivalent transformations to redistribute outlier energy prior to quantization, without altering the underlying function represented by the model. 
+
+4.2.1 Channel-wise Scaling 
+
+SmoothQuant [Xiao et al., 2023] introduces a per-channel scaling vector s ∈ RN applied jointly to activations and weights: 
+
+Y = XW = ( Xdiag( s)) 
+
+| {z }
+
+> eX
+
+· (diag( s)−1W )
+
+| {z }
+
+> fW
+
+, (18) This transformation preserves exact equivalence since diag (s)−1diag (s) = IN . The scaling factors are defined as sj = max( |Xj |)α
+
+/max( |Wj |)1−α, where α ∈ [0 , 1] controls the trade-off in quantization difficulty between activations and weights. By redistributing magnitude across the two, SmoothQuant reduces 
+
+> 1https://www.scipopt.org
+
+12 OneComp: One-Line Revolution for Generative AI Model Compression 
+
+extreme values in either domain. OmniQuant [Shao et al., 2024] generalizes this concept by introducing learnable equivalent transformations, including optimized scaling and shifting parameters that minimize block-wise quantization error. This formulation allows for greater flexibility in adapting to layer-specific statistics. 
+
+4.2.2 Rotation-based Transformations 
+
+While channel-wise scaling effectively mitigates persistent channel outliers, it is less effective against token-specific activation spikes that occur in only a few channels, often referred to as massive outliers [Czakó et al., 2025]. Rotation-based methods address this limitation by applying an orthogonal transformation 
+
+R ∈ RN ×N :
+
+Y = XW = ( XR )
+
+| {z } 
+
+> bX
+
+· (R⊤W )
+
+| {z }
+
+> cW
+
+, (19) where the orthogonality constraint RR ⊤ = IN ensures exact functional equivalence. Intuitively, orthogonal transformations preserve vector norms while redistributing energy across dimensions. This reduces the concentration of large values in individual coordinates and enhances quantization. QuIP [Chee et al., 2023] formalizes this intuition through the concept of incoherence. A matrix 
+
+W ∈ RN ×M is μ-incoherent if 
+
+max  
+
+> i,j
+
+|Wij | ≤ μ∥W ∥F /√N M . (20) Unlike fixed or random rotations, SpinQuant optimizes rotation matrices directly on the orthogonal group. QuIP# [Tseng et al., 2024] enhances this approach by replacing dense random orthogonal matrices with efficient randomized Hadamard transforms and introducing lattice-based codebooks. QuaRot [Ashk-boos et al., 2024] unifies rotation-based preprocessing for hidden states and attention-related activations, including KV caches, to enable end-to-end improvements in quantization. 
+
+OneComp incorporates the SpinQuant [Liu et al., 2024a] framework, which learns task-adaptive orthogonal transformations. 
+
+O( N ) = {R ∈ RN ×N : R⊤R = IN } (21) using CayleySGD [Li et al., 2020], which updates orthogonal matrices while preserving orthogonality. Compared to random or fixed structured rotations, learned rotations adapt more effectively to a model’s statistics and significantly enhance quantization quality. After optimization, mergeable rotations can be folded offline into surrounding linear weights, while a small number of non-mergeable transforms are retained as efficient online Hadamard operations. OneComp provides two categories of rotation-based preprocessing. As a standalone model-wide preprocessing step, OneComp incorporates SpinQuant [Liu et al., 2024a], which learns task-adaptive orthogonal transformations on O( N ) = {R ∈ RN ×N : R⊤R = IN } using CayleySGD [Li et al., 2020]. After optimization, mergeable rotations are folded offline into surrounding linear weights, while non-mergeable transforms are kept as efficient online Hadamard operations. In addition, OneComp supports QuIP-style per-layer random rotations [Chee et al., 2023] within its layer-wise PTQ path (Section 4.3), where the rotation and quantization are performed jointly in the same precision. 
+
+OneComp also supports L1/L2 Sinkhorn weight balancing, which iteratively rescales rows and columns to achieve more uniform magnitudes across both dimensions. This reduces the dynamic range the quantizer must represent and enhances quantization accuracy while keeping the layer output unchanged. 
+
+4.3 Layer-wise PTQ 
+
+Layer-wise PTQ quantizes a model one linear layer at a time. We begin by introducing the notation used throughout this section. Let Wl ∈ RN ×M denote the full-precision weight matrix of layer l, with 
+
+N and M representing the input and output dimensions, respectively. Let Xl ∈ RT ×N be the matrix of T calibration activations collected from the full-precision model at layer l, with the corresponding full-precision output being Yl = XlWl ∈ RT ×M . We denote bXl ∈ RT ×N as the activations produced at the same layer by the incrementally quantized model after quantizing all preceding layers. An activation-aware layer-wise PTQ objective aims to find a quantized weight matrix cWl that minimizes the output reconstruction error based on the calibration dataset: 
+
+cWl = argmin  
+
+> cW∈Q
+
+bXl(cW − Wl) 2 
+
+> F
+
+, (22) where Q ⊂ RN ×M denotes the set of quantized weight matrices allowed by the selected quantization format. The Gram matrix, bHl = bX⊤ 
+
+> l
+
+bXl ∈ RN ×N , is a positive semidefinite matrix that captures the relative importance of different input directions. GPTQ [Frantar et al., 2023] approximately solves Eq. (22) column by column, using second-order information from bHl; at each step, it quantizes one column 
+
+13 OneComp: One-Line Revolution for Generative AI Model Compression GPTQ 
+
+## Wij =sg (qij zg)
+
+Q s z
+
+> MDBF
+
+W=( Sa AQ )( Sb BG )
+
+> ×
+
+Sa AQ Sb GB                         
+
+> Figure 4. Two quantization formats supported by OneComp . Left: GPTQ stores per-group integer weights Q,scales s, and zero-points z, and reconstructs weights via ˆWij =sg(qij −zg). Right: MDBF represents the weight matrix using shared binary sign bases Sa, S btogether with low-rank real-valued envelopes AP ⊤and BG ⊤, yielding
+> ˆW= ( Sa⊙AP ⊤)( Sb⊙BG ⊤)⊤.
+
+and propagates the resulting residual to the remaining unquantized columns. By default, columns are processed in their natural order; an optional activation ordering ( actorder ) permutes columns based on the decreasing magnitude of the Hessian diagonal, ensuring that the most sensitive columns are quantized first when the capacity for residual compensation is greatest. Independently, per-group quantization scales can be set either by simple min-max calibration or by MSE-based grid tuning ( mse ), which searches over candidate scales to minimize the mean squared reconstruction error per-group. AWQ [Lin et al., 2024a] emphasizes significant channels identified from activation statistics and rescales them before rounding. A key advantage of layer-wise PTQ is its efficiency; it processes one layer at a time, resulting in a small memory footprint and enabling the rapid quantization of large-scale models using only a single GPU. Its lightweight nature also makes layer-wise PTQ a practical initialization strategy for more expensive end-to-end PTQ pipelines. The central challenge in layer-wise PTQ, however, is “error propagation”. Since upstream layers have already been quantized, layer l receives perturbed inputs bXl̸ = Xl, causing the errors introduced early in the network to accumulate as they pass through subsequent layers. OneComp is designed to preserve the computational efficiency and single-GPU practicality of layer-wise PTQ while incorporating mechanisms to explicitly mitigate quantization error propagation. As a result, it retains the lightweight advantages of layer-wise PTQ while enhancing robustness against accumulated upstream quantization errors. More broadly, improving layer-wise PTQ involves two complementary aspects. The first is the optimization procedure: how the quantization objective is addressed, particularly in the presence of accumulated upstream errors. The second is the quantization representation: what format the quantized weights take and how expressive that format is at a given bit budget. OneComp addresses both aspects; its optimization techniques mitigate error propagation and cross-layer inconsistencies, while its representation choices range from improved uniform formats to structured binary factorizations for extreme low-bit regimes. 
+
+4.3.1 Optimization 
+
+OneComp incorporates two optimization techniques that go beyond standard layer-wise quantization. QEP corrects the quantization target of each layer to compensate for errors introduced by preceding quantized layers, while LPCD extends the optimization scope from individual layers to coupled submodules within each transformer block. Both techniques are compatible with any base layer-wise quantizer and add only modest computational overhead. 
+
+QEP: Quantization Error Propagation QEP [Arai and Ichikawa, 2025] improves layer-wise PTQ by modifying the quantization target before applying the base quantizer. Its central observation is that, once upstream layers are quantized, the current layer no longer operates on the original activations. Thus, quantizing the current layer to best match the original full-precision weights is generally suboptimal. A better approach is to adjust the target weights to compensate for errors introduced by preceding layers. To this end, instead of minimizing the standard activation-aware objective in Eq. (22) , QEP seeks a quantized weight matrix that reconstructs the full-precision output XlWl from the perturbed input bXl:
+
+cW QEP = argmin 
+
+> cW
+
+bXl cW − XlWl 
+
+> 2
+> F
+
+. (23) 
+
+14 OneComp: One-Line Revolution for Generative AI Model Compression 
+
+Define the activation error as δl = Xl − bXl ∈ RT ×N , and the corresponding error-propagation matrix as Cl = bX⊤ 
+
+> l
+
+δl ∈ RN ×N . As shown by Arai and Ichikawa [2025], the unconstrained minimizer of Eq. (23) is given by W = ( IN + bH−1 
+
+> l
+
+Cl)Wl. Therefore, the QEP objective can be interpreted as the standard layer-wise PTQ problem in Eq. (22), but with a corrected quantization target. In practice, QEP introduces a propagation-strength parameter αl ∈ [0 , 1] to interpolate between the original weight matrix and the fully corrected target. To improve numerical stability, it also applies Tikhonov regularization: 
+
+W ⋆l (αl) =  IN + αl( bHl + λI N )−1Cl
+
+Wl, (24) where λ = η · mean (diag ( bHl)) and η > 0 is a small constant. The regularized inverse is efficiently computed using Cholesky factorization of bHl + λI N .The corrected target W ⋆l can then be passed to any base quantizer, making QEP a straightforward plug-and-play enhancement for layer-wise PTQ. During the calibration forward pass, OneComp maintains two parallel model instances, accumulating bHl and Cl online and avoiding the need to store full activation matrices. In addition to this layer-wise formulation, another extension, LoaQ [Lin and Wan, 2025], has been proposed to enable quantization at the submodule level. OneComp supports both QEP and its submodule-level extension LoaQ, providing a unified framework for error-propagation-aware quantization across various granularities. 
+
+LPCD: Submodule-Aware Coordinate Descent While QEP mitigates error propagation at the individual linear layer level, transformer computation is fundamentally structured around submodules that couple multiple layers into a single functional unit. The query and key projections determine the attention score matrix, while the value and output projections dictate the attention output; the up and down projections collaboratively establish the MLP output. As a result, quantizing these coupled layers independently can introduce cross-layer inconsistencies that degrade the overall performance of the submodule. LPCD [Ichikawa et al., 2025b] addresses this issue by extending PTQ from individual layers to arbitrary submodules while maintaining the efficiency of layer-wise quantization pipelines. Its key insight is that independently quantizing interacting layers can be suboptimal, because the optimal quantized value for one layer generally depends on the quantized values of its coupled modules. To account for this dependency, LPCD jointly optimizes groups of interacting layers through an iterative relax-then-project procedure. At each step, it first computes the optimal continuous-valued solution for one layer while keeping the other layers in the submodule fixed at their current quantized values, and then projects that solution back onto the quantized domain using a standard layer-wise quantizer. Thus, LPCD inherits the strengths and flexibility of existing layer-wise PTQ methods while allowing for coordination at the submodule-level. Formally, consider a submodule with R weight matrices {M1, . . . , M R} with Mr ∈ RNr ×Kr , and let 
+
+cMr ∈ Q denote their quantized counterparts. Let J ( cM1, . . . , cMR) measure the discrepancy between the outputs of the full-precision and quantized submodules. The resulting discrete optimization problem is: 
+
+min  
+
+> cM1∈Q ,..., cMR∈Q
+
+J ( cM1, . . . , cMR). (25) Since the feasible set is discrete and highly non-convex, solving this problem is intractable. LPCD approximates the solution using cyclic block coordinate descent. In outer iteration t, the blocks are updated sequentially for r = 1 , . . . , R . Each block update consists of two stages. In the relaxation step, the quantization constraint on Mr is temporarily lifted, allowing the continuous solution to be computed while all other blocks remain fixed at their most recently updated quantized values: 
+
+M (t) 
+
+> r
+
+= argmin   
+
+> U∈RNr ×Kr
+
+J ( cM (t)1 , . . . , cM (t)
+
+> r−1
+
+, U, cM (t−1)  
+
+> r+1
+
+, . . . , cM (t−1)  
+
+> R
+
+). (26) For the submodules considered in this work, J is quadratic in U , making this relaxation admit a closed-form least-squares solution. In practice, however, the design matrices involved are often too large for direct solutions; therefore, we approximate the optimum by optimizing the original loss using Adam. In the subsequent projection step, the continuous solution M (t) 
+
+> r
+
+is mapped back to the quantized set using a standard layer-wise PTQ quantizer ΠQ:
+
+cM (t) 
+
+> r
+
+← ΠQ(M (t) 
+
+> r
+
+). (27) The projector ΠQ can be instantiated with any existing layer-wise quantizer, such as GPTQ, AWQ, RTN, or DBF, making LPCD immediately compatible with broader layer-wise PTQ methods. An important theoretical result of Ichikawa et al. [2025b] is that QEP arises as a special case of a single LPCD iteration applied to the two-block objective J (cW , bX) = ∥ bX cW −XW ∥2 
+
+> F
+
+, with the activation block held fixed. LPCD 
+
+15 OneComp: One-Line Revolution for Generative AI Model Compression 
+
+generalizes this perspective by allowing multiple coordinate-descent iterations and arbitrary submodule decompositions; we refer the reader to Ichikawa et al. [2025b] for complete theoretical details. 
+
+OneComp instantiates LPCD with three submodule groups in each transformer layer, each correspond-ing to a distinct functional interaction. The QK module {Wq , W k} collaboratively optimizes the query and key projections to minimize the attention-score reconstruction error. The VO module {Wv , W o} jointly optimizes the value and output projections to minimize the attention-output error while considering the impact of the residual stream. The gate-up-down module {Wgate , W up , W down } jointly optimizes the MLP projections to minimize the MLP-output reconstruction error. For each submodule, LPCD iterates over the weight matrices, alternating between relaxation and projection steps. In practice, convergence is typically reached within 2–4 outer iterations, and the additional cost remains modest relative to the runtime of the underlying layer-wise quantization procedure. 
+
+4.3.2 Representation 
+
+Beyond the optimization procedure, a key design choice in layer-wise PTQ is the quantized representation to which the weights are mapped. OneComp supports two families of quantization formats. JointQ refines the conventional per-group uniform format used by GPTQ through joint optimization of scales and integer weights, targeting the 3–4 bit regime. For more aggressive compression at 1–2 bits, OneComp 
+
+provides DBF and its generalization MDBF, which replace the uniform grid with structured binary sign factorizations equipped with learnable magnitude envelopes. 
+
+JointQ: Joint Scale-and-Integer Optimization We propose JointQ adopting the same quantization format as GPTQ [Frantar et al., 2023], namely layer-wise uniform scalar quantization with group-wise scales and zero-points, in either the symmetric or asymmetric setting; it solves the following optimization problem over group scales st, group zero-points zt, and integer weights qij :
+
+min XW − X cW 2
+
+> F
+
+s.t. cWij = sg(i,j )
+
+ qij − zg(i,j )
+
+ ∀i, j, qij ∈ Q, ∀i, j, st ∈ R, zt ∈ Q, ∀t. 
+
+(28) Here g(i, j ) maps a weight element (i, j ) to its group index, for example, a contiguous block of size d within each row. The integer codebook Q ⊂ Z is determined by the bit width b and whether the quantization scheme is symmetric or asymmetric; for instance, for 4-bit symmetric quantization, Q = [ −8, 7] ∩ Z. In the symmetric case, all zero-points are fixed to zero, i.e., zt = 0 for all t.JointQ solve this problem using a local-search-based algorithm. For each row i, the algorithm repeatedly updates the integer weights qij along with the corresponding group scale sg(i,j ) to decrease the objective in Eq. (28) . Concretely, each local move proposes a small change to one integer weight qij within the codebook Q; conditioned on this discrete change, the scale of the affected group is updated in the same step to best fit the current integer assignments. The proposed move is accepted if it improves the objective, and the procedure terminates when no improving local move can be found. A key design choice of JointQ is to jointly optimize the scales and integer weights rather than optimizing them in separate alternating subproblems. JointQ can optionally incorporate a proximity regularizer to discourage excessive deviation from the original weights: 
+
+min XW − X cW 2 
+
+> F
+
++ nλ W − cW 2 
+
+> F
+
+, (29) where n is the number of rows of X and λ > 0 is a hyperparameter. Expanding the objective shows that Eq. (29) is equivalent to Eq. (28) with an augmented input matrix, hence the same local-search procedure can be applied without modification. Finally, since JointQ uses the same quantization format as GPTQ, a GPTQ-quantized model can be directly used as an initial solution. The output of JointQ is a standard GPTQ-format checkpoint compatible with existing inference kernels. 
+
+DBF and MDBF: Extreme Low-Bit Formats OneComp is a unified post-training quantization package that supports extremely low-bit compression across a wide range of bit widths. To this end, it provides efficient quantization pipelines for both conventional uniform formats and more expressive structured formats tailored to the extreme low-bit regime. Figure 4 compares the two quantization formats supported by the package: the per-group uniform GPTQ format for 3–4 bit quantization and the structured binary-factor MDBF format for the more challenging 1–2 bit regime. At such extreme bit widths, uniform quantization grids often lack the expressive power needed to accurately represent the underlying weight distribution. DBF [Boža and Macko, 2026] addresses this limitation by factorizing each weight matrix 
+
+16 OneComp: One-Line Revolution for Generative AI Model Compression 
+
+into two binary sign matrices interleaved with diagonal scaling matrices: 
+
+cWl = Da(l) S(l) 
+
+> a
+
+Dm(l) (S(l) 
+
+> b
+
+)⊤Db(l) , (30) where S(l) 
+
+> a
+
+∈ {± 1}N ×R and S(l) 
+
+> b
+
+∈ {± 1}M ×R are binary sign matrices, and Da(l) , D m(l) , D b(l) are diagonal scaling matrices parameterized by the vectors a(l) ∈ RN , m(l) ∈ RR, and b(l) ∈ RM . This representation can be viewed as a structured rank-R factorization cW = bU (l)( bV (l))⊤, where bU (l) = Da(l) S(l) 
+
+> a
+
+D(m(l))1/2
+
+and bV (l) = Db(l) S(l) 
+
+> b
+
+D(m(l))1/2 . At inference time, DBF replaces a single high-precision GEMMs with two binary GEMMs interleaved with inexpensive diagonal rescalings, resulting in a hardware-efficient execution path. Despite this advantage, DBF has a fundamental structural limitation. After factoring out the binary sign bases, the demodulated envelopes ES(l)
+
+> a
+
+( bU (l)) = S(l) 
+
+> a
+
+⊙ bU (l) = a(l)(( m(l))1/2)⊤ and ES(l)
+
+> b
+
+( bV (l)) = 
+
+S(l) 
+
+> b
+
+⊙ bV (l) = b(l)(( m(l))1/2)⊤ are each constrained to rank one. Consequently, all R columns of a factor share the same magnitude profile, up to a scalar multiplier. Increasing R primarily enhances the diversity of sign patterns while providing limited additional capacity for modeling magnitudes, which can lead to accuracy saturation. MDBF [Ichikawa et al., 2025a] addresses the single-envelope bottleneck by replacing the rank-one magnitude envelope with a rank-l envelope while preserving both the shared binary sign bases and the deployment-friendly binary inference primitive: 
+
+cWl = bU (l)( bV (l))⊤, bU (l) = S(l) 
+
+> a
+
+⊙ (A(l)(Q(l))⊤), bV (l) = S(l) 
+
+> b
+
+⊙ (B(l)(G(l))⊤), (31) where A(l) ∈ RN ×l, Q(l) ∈ RR×l, B(l) ∈ RM ×l, and G(l) ∈ RR×l are real-valued factor matrices. Under this formulation, the demodulated envelopes satisfy rank (ES(l)
+
+> a
+
+( bU (l) 
+
+> l
+
+)) = rank (A(l)(Q(l))⊤) ≤ l
+
+and rank (ES(l)
+
+> b
+
+( bV (l) 
+
+> l
+
+)) = rank (B(l)(G(l))⊤) ≤ l, allowing the model to represent multiple magnitude modes. This result highlights a key distinction between MDBF and DBF: MDBF focuses its limited representational capacity on modeling magnitudes rather than merely increasing the diversity of sign patterns. This allocation is especially advantageous in the extreme low-bit regime, where magnitude expressiveness becomes the critical bottleneck. OneComp adopts a two-stage optimization pipeline for MDBF. It first computes a closed-form initialization using Multi-Envelope SVID, applying truncated SVD to the entrywise absolute values of each factor, followed by alternating ADMM-based refinement to iteratively update the binary sign matrices and the real-valued envelope factors. Support for MDBF is planned for a future release of OneComp .
+
+4.4 Block-wise PTQ 
+
+Within the broader framework of block-wise PTQ, OneComp incorporates two complementary methods that operate at the level of an entire Transformer block. Although both methods optimize block-level reconstruction objectives, they are introduced at different stages of the pipeline and serve distinct roles. The first, block-wise compensation, is an optional procedure inserted during the layer-wise PTQ loop. Its purpose is to update the remaining real number parameters in a partially quantized block, allowing it to absorb the errors introduced by already quantized sublayers. The second, block-wise quantization, is a dedicated refinement stage applied after the layer-wise PTQ pass is complete. Its purpose is to revisit a fully quantized block and jointly refine its parameters using a block-level distillation objective. The crucial distinction lies not in the granularity of the methods, both of which operate over whole Transformer blocks, but in the parameters they update. Specifically, block-wise compensation adjusts the remaining real number parameters before quantization, whereas block-wise quantization refines those that have already been quantized after the layer-wise PTQ procedure is complete. 
+
+4.4.1 Block-wise Compensation 
+
+We first introduce block-wise compensation , an optional procedure interleaved with sequential layer-wise PTQ. Consider a Transformer block b consisting of Rb linear sublayers, which are quantized sequentially. Suppose that the first r − 1 sublayers have already been quantized, while the remaining sublayers r, . . . , R b
+
+are still represented in floating point. Before quantizing sublayer r, OneComp temporarily optimizes the remaining FP16 parameters so that the resulting mixed-precision block more closely matches the original full-precision block. Let Xb denote the matrix of calibration inputs to block b. We write F (fp)  
+
+> b
+
+for the original full-precision operator of block b, and F (mix)  
+
+> b,r
+
+(·; ϕb,r ) for the mixed-precision block obtained after quantizing the first r −1
+
+sublayers, where ϕb,r denotes the FP16 parameters of the remaining sublayers. Block-wise compensation 
+
+17 OneComp: One-Line Revolution for Generative AI Model Compression 
+
+minimizes the discrepancy between the outputs of the mixed-precision and full-precision blocks: 
+
+Lcomp  
+
+> b,r
+
+= 1
+
+n F (mix)  
+
+> b,r
+
+(Xb; ϕb,r ) − F (fp)  
+
+> b
+
+(Xb) 2
+
+> F
+
+. (32) During this optimization, the already quantized sublayers are kept fixed, and only the remaining FP16 parameters ϕb,r are updated. In our implementation, we optimize these parameters with Adam for 5 epochs using a learning rate of 10 −4. After this compensation step, sublayer r is quantized using the chosen layer-wise PTQ method, and the same procedure may be repeated before quantizing each subsequent sublayer. The goal of block-wise compensation is to enhance the sublayers within a block while they remain in FP16. Once earlier sublayers in the same block have been quantized, their approximation errors perturb the hidden representations received by the remaining sublayers. Block-wise compensation allows the remaining FP16 parameters to absorb part of this distortion before they are quantized. It therefore serves as an intra-block adaptation mechanism embedded within the layer-wise PTQ pipeline, rather than as a post-quantization refinement stage applied after quantization is complete. Importantly, this procedure is lightweight: it fits naturally within the standard single-GPU layer-wise PTQ workflow and requires no additional GPU resources. 
+
+4.4.2 Block-wise Quantization 
+
+We next describe block-wise quantization, which is applied only after the layer-wise PTQ pass has produced a fully quantized model. At this point, every linear sublayer in every Transformer block has already been quantized. The goal is no longer to modify floating-point parameters but to jointly refine the quantized parameters of an entire block. By optimizing an entire block at once, this stage captures interactions among attention projections, MLP projections, residual connections, layer normalization, softmax, and activation functions —interactions that are only partially visible to purely layer-wise objectives. 
+
+Phase 1: Greedy Block-wise Distillation. Blocks are processed sequentially from input to output. For each block b, OneComp loads both the full-precision teacher block and the corresponding quantized student block onto the GPU. Let {u(fp)  
+
+> b,j
+
+}nj=1 and {u(q)  
+
+> b,j
+
+}nj=1 denote the hidden states entering block b in the full-precision teacher and quantized student models, respectively. We define 
+
+Y (fp)  
+
+> b,j
+
+= F (fp) 
+
+> b
+
+ u(fp) 
+
+> b,j
+
+, Y (q)  
+
+> b,j
+
+(θb) = F (q) 
+
+> b
+
+ u(q)  
+
+> b,j
+
+; θb
+
+, (33) where F (q)  
+
+> b
+
+is the quantized block operator and θb denotes the quantization variables associated with block b, including integer weights, their accompanying scale, zero-point, and clipping parameters. The basic block-wise objective is then 
+
+min 
+
+> θb
+
+1
+
+n
+
+> n
+
+X
+
+> j=1
+
+Y (fp)  
+
+> b,j
+
+− Y (q)  
+
+> b,j
+
+(θb) 2 
+
+> F
+
+. (34) 
+
+OneComp can also enhance this reconstruction loss with a cosine-similarity term to preserve the directional structure of hidden representations: 
+
+Lb = 1
+
+n
+
+> n
+
+X
+
+> j=1
+
+Y (fp)  
+
+> b,j
+
+− Y (q)  
+
+> b,j
+> 2
+> F
+
++ λcos · 1
+
+n
+
+> n
+
+X
+
+> j=1
+
+
+
+1 − CosSim  Y (fp)  
+
+> b,j
+
+, Y (q) 
+
+> b,j
+
+
+
+, (35) where CosSim (a, b) = a⊤b/(∥a∥∥ b∥) is computed after flattening the hidden states, and λcos ≥ 0 controls the strength of the cosine term. 
+
+Phase 2: Cross-block Quantization. After greedy per-block distillation, OneComp further reduces inter-block error accumulation by jointly refining adjacent block pairs. Specifically, it applies a sliding window of size K = 2 over neighboring blocks (b, b +1) , processed in the order (0 , 1) , (1 , 2) , . . . , (L−2, L −1) ,where L is the total number of Transformer blocks. For each pair, the optimization target is the output of the second block: 
+
+min 
+
+> θb,θb+1
+
+1
+
+n
+
+> n
+
+X
+
+> j=1
+
+Y (fp)  
+
+> b+1 ,j
+
+− Y (q)  
+
+> b+1 ,j
+
+(θb, θb+1 ) 2 
+
+> F
+
+. (36) This cross-block stage explicitly models how quantization errors produced by block b alter the input distribution and reconstruction quality of block b + 1 . If the refined pairwise solution degrades either block relative to the result obtained after Phase 1, OneComp rolls back to the earlier checkpoint. This safeguard ensures that cross-block refinement is adopted only when it yields a genuine improvement. 
+
+18 OneComp: One-Line Revolution for Generative AI Model Compression Optimization through Smooth Straight-Through Estimator. Both Phase 1 and Phase 2 optimize quantized parameters through gradient descent, which requires differentiating through the discrete rounding operation. The main technical challenge in block-wise quantization is that rounding is discrete and therefore has zero derivative almost everywhere. To enable gradient-based optimization of quantized parameters, OneComp uses a Smooth Straight-Through Estimator (Smooth STE). The forward pass applies ordinary rounding, but the backward pass uses the differentiable surrogate 
+
+˜q(x) = ⌊x⌋ + σ k({x} − 0.5) , (37) where {x} = x − ⌊ x⌋ is the fractional part of x, σ is the sigmoid function, and k > 0 is a temperature parameter. For small k, this surrogate is smooth and yields stable gradients; as k increases, it approaches hard rounding. To move gradually from smooth optimization to faithful discrete quantization, OneComp employs 
+
+Progressive STE Temperature Annealing (PSTA), which linearly increases the temperature over training: 
+
+ke = kmin + ( kmax − kmin ) · eE − 1 , (38) where e is the current epoch, E is the total number of epochs, kmin = 2 , and kmax = 20 . Early epochs emphasize smooth gradients and exploration, whereas later epochs emphasize near-discrete rounding and local refinement. We use Adam with cosine learning-rate decay, 10% linear warmup, and gradient clipping at 1.0. Separate learning rates are assigned to different quantization variables: 10 −4 for scales and zero-points, and 5 × 10 −5 for integer weights. Taken together, these two methods provide complementary forms of block-level adaptation. Block-wise compensation operates during layer-wise PTQ by updating the remaining FP16 parameters inside a partially quantized block. Block-wise quantization operates after layer-wise PTQ by directly refining the quantized parameters of a fully quantized block. This separation enables OneComp to exploit block-level structure both before and after quantization is finalized. 
+
+4.5 Global PTQ 
+
+A natural extension of layer-wise and block-wise refinement is to optimize the quantized model at the scale of the entire network. This global PTQ stage is currently under development and planned for a future release of OneComp ; we describe the design here for completeness. When sufficient GPU resources are available, this global PTQ stage can be framed as knowledge distillation from a full-precision teacher to a quantized student. Unlike layer-wise and block-wise PTQ, which optimize local reconstruction objectives, global PTQ exposes the optimizer to the full computational graph, thereby enabling it to correct quantization errors that accumulate across many layers. As a result, it is the most computationally demanding stage in the pipeline but also the most expressive. 
+
+4.5.1 Loss Function 
+
+Let n denote the number of calibration token positions, V the vocabulary, and L the number of Transformer layers. For token position j, let z(fp)  
+
+> j
+
+, z(q)  
+
+> j
+
+∈ R|V| be the teacher and student logits, respectively. For each layer l ∈ { 1, . . . , L }, let h(fp)  
+
+> l
+
+and h(q)  
+
+> l
+
+denote the corresponding teacher and student hidden states over the calibration set, flattened into vectors to compute cosine similarity. The overall objective combines three complementary terms: 
+
+L = LKL + λinter Linter + λent Lent . (39) These terms serve distinct purposes. The KL term aligns the final output distributions, the intermediate-state term preserves internal representations throughout the network, and the entropy term regularizes the student on the small calibration set. 
+
+Token-Level KL Distillation. The primary supervision is provided by KL distillation at a temperature τ :
+
+LKL = 1
+
+n
+
+> n
+
+X
+
+> j=1
+
+X
+
+> v∈V
+
+pv,j 
+
+ log pv,j − log qv,j 
+
+, p v,j = softmax 
+
+z(fp)  
+
+> j
+
+/τ
+
+
+
+> v
+
+, q v,j = softmax 
+
+z(q)  
+
+> j
+
+/τ
+
+
+
+> v
+
+. (40) The default temperature is τ = 1 . This objective encourages the quantized student to align with the teacher’s output distribution rather than merely its most likely prediction, thereby preserving richer distributional information. 
+
+Intermediate Hidden-State Alignment. Matching only the final logits is often insufficient in low-bit settings because substantial distortion can occur in intermediate representations long before it appears at 
+
+19 OneComp: One-Line Revolution for Generative AI Model Compression 
+
+the output layer. To mitigate this issue, we optionally align the hidden states at each layer: 
+
+Linter = 1
+
+L
+
+> L
+
+X
+
+> l=1
+
+1 − h(fp) ⊤ 
+
+> l
+
+h(q) 
+
+> l
+
+∥h(fp)  
+
+> l
+
+∥2 · ∥ h(q)  
+
+> l
+
+∥2
+
+!
+
+. (41) This cosine-distance objective encourages the quantized student to preserve the direction of the teacher’s internal representations across all layers. 
+
+Entropy Regularization. Since global PTQ is optimized on a relatively small calibration set, the student may become overconfident and overfit the observed examples. We therefore incorporate the entropy regularizer 
+
+Lent = 1
+
+n
+
+> n
+
+X
+
+> j=1
+
+X
+
+> v∈V
+
+qv,j log qv,j , (42) Minimizing this term increases the entropy of the student distribution, improving regularization and enhancing robustness beyond the calibration set. 
+
+4.5.2 Optimization Techniques 
+
+Global PTQ is significantly more challenging to optimize than layer-wise or block-wise PTQ. The parameter space encompasses the entire model, gradients navigate through numerous quantized operations, and the calibration set is limited. Consequently, stable optimization benefits from several complementary techniques. 
+
+Sharpness-Aware Minimization. We first employ sharpness-aware minimization (SAM) [Foret et al., 2021], which biases optimization towards flatter minima that are less sensitive to perturbations and, therefore, less prone to overfitting. At each step, the parameters are perturbed in the local ascent direction 
+
+ϵ = ρ · (∇θ L/∥∇ θ L∥ 2), and the actual update is calculated at the perturbed point: 
+
+θ ← θ − η∇θ L(θ + ϵ). (43) In practice, SAM avoids narrow optima that fit the calibration data well but generalize poorly. 
+
+Progressive Layer Unfreezing. Optimizing all layers simultaneously from the start can lead to instability, especially when the student experiences significant quantization noise. We therefore use progressive layer unfreezing, starting with the layers closest to the output and gradually extending optimization to earlier layers. At epoch e, only layers satisfying l ≥ L − (e + 1) · ⌈ L/E⌉ are trainable, where E is the total number of epochs. This schedule improves stability by first adapting the layers that most directly affect the logits and only later allowing optimization to reshape deeper internal computations. Overall, global PTQ offers the most comprehensive form of post-training refinement in the pipeline. While layer-wise and block-wise methods correct local reconstruction errors, global PTQ directly optimizes the end-to-end behavior of the entire quantized model under full-model supervision. Although this stage is significantly more expensive, it provides a principled approach to recovering long-range interactions and cross-layer dependencies that are difficult to capture with local objectives alone. We plan to integrate this global PTQ stage into OneComp in a future release. 
+
+4.6 Quantization-Aware Fine-tuning 
+
+As a final optional stage, OneComp supports quantization-aware fine-tuning via QLoRA [Dettmers et al., 2023]. At this stage, the quantized backbone remains frozen, and adaptation is achieved by training only a small set of low-rank adapter parameters. Specifically, for each linear layer with a quantized weight matrix cW ∈ RN ×M , we introduce two trainable low-rank matrices, B ∈ RN ×r and A ∈ Rr×M , where 
+
+r ≪ min( N, M ). The resulting effective weight matrix is 
+
+Weff = cW + BA. (44) During fine-tuning, only the adapter matrices A and B are updated, while the quantized backbone weight 
+
+cW remains fixed. Consequently, the number of trainable parameters per layer is only (N + M )r, typically a small fraction of the N M parameters in the corresponding full-rank matrix. This stage serves two complementary purposes. It facilitates domain adaptation. When the quantized model is deployed on data that differ from the distribution observed during pretraining, the low-rank adapters can learn task- or domain-specific corrections without altering the compressed backbone. Further-more, it enables recovery from quantization errors. Even with minimal or no domain shift, quantization can introduce residual distortions that post-training quantization may not fully eliminate. The low-rank correction BA can absorb some of this residual error, thereby recovering part of the accuracy lost during quantization. 
+
+20 OneComp: One-Line Revolution for Generative AI Model Compression 
+
+OneComp supports this stage with user-specified training datasets and standard fine-tuning hyper-parameters, allowing users to flexibly trade off adaptation quality, computational cost, and parameter efficiency based on the requirements of the target deployment setting. 
+
+# 5 Experimental Evaluation 
+
+We evaluate the OneComp pipeline through targeted experiments designed to test its core design hypotheses. Our empirical study is organized around five questions: (1) Does AutoBit yield better results than uniform assignment? (Section 5.2) (2) Do QEP and LPCD enhance layer-wise post-training quantization? (Section 5.3) (3) Does JointQ improve the GPTQ parameterization? (Section 5.4) (4) Can structured binary factors maintain model quality in the extreme low-bit regime? (Section 5.5) (5) Does performance improve monotonically with increased computational resources? (Section 5.6) Each subsection addresses a question, presents empirical evidence, and highlights practical implications. 
+
+5.1 Setup 
+
+We conduct an empirical study on a representative set of open-weight decoder-only LLMs, which includes two model families and various architectural scales: Llama3 8B [Grattafiori et al., 2024] and Qwen3-8B and 14B [Qwen Team, 2025]. These models represent a range of modern transformer configurations used in practice, including dense decoder architectures and grouped-query attention variants. As evaluation metrics, we report perplexity on WikiText-2 as the primary measure of language modeling fidelity and zero-shot accuracy on a standard downstream benchmark suite implemented with lm-eval-harness ,which includes ARC-Challenge, ARC-Easy, PIQA, and WinoGrande. Following common post-training quantization practices, we evaluate both the original full-precision model and its quantized counterparts under the same protocol. Lower perplexity indicates better preservation of generative quality, while higher zero-shot accuracy indicates improved task performance. For calibration, we use samples drawn from C4 with a maximum sequence length of 2048 tokens. Unless otherwise stated, the calibration set is shared across methods in each comparison to isolate the effect of the quantization algorithm. Detailed choices of bit-width, grouping strategy, and other method-specific hyperparameters are deferred to the corresponding experimental subsections, where each component is analyzed under its appropriate comparison setting. 
+
+5.2 Mixed-Precision Allocation 
+
+We evaluate AutoBit, which performs module-wise mixed-precision allocation under a fixed average bit-per-weight (bpw) budget. Unlike conventional uniform quantization, which applies the same quantization configuration to all modules, AutoBit selects different quantization settings for different modules according to their estimated sensitivity. We consider mixed-precision allocation over individual Transformer linear modules, including attention projections ( q_proj , k_proj , v_proj , o_proj ) and MLP projections ( gate_proj , up_proj , down_proj ). For each module, AutoBit selects a quantization configuration from a candidate set defined by bit-width and group size. In our experiments, the bit-width candidates are {2, 3, 4, 5, 6, 7, 8} and the group sizes of 
+
+{128 , per-channel }, where per-channel denotes channel-wise grouping. We evaluate two target budgets expressed as average bits per weight (bpw): 4.16 and 4.00 , corresponding to uniform GPTQ with 4-bit group-128 and 4-bit channel-wise quantization, respectively. We compare three allocation strategies under the same target budget: (1) Uniform , which applies a single quantization configuration to all eligible modules; (2) Naive , which performs mixed-precision allocation without activation information; and (3) Activation-aware (diag. only) , which augments the allocation score with diagonal activation statistics. All methods use the same calibration/evaluation pipeline; the only difference is how the module-wise quantization budget is allocated. Table 1 summarizes the main results on Llama 3 and Qwen3. Figure 5 visualizes an example module-wise allocation pattern for Llama 3 under the naive and activation-aware variants. Table 1 reveals two distinct performance regimes. On Llama-3-8B, the benefit of mixed-precision allocation is substantial. At 4.16 average bpw, the activation-aware variant achieves a perplexity of 6.85, close to the full-precision baseline of 6.14, whereas uniform assignment degrades to 9.53 and the naive variant to 10.28. The gap widens further at 4.00 bpw (channel-wise grouping), where uniform quantization collapses entirely, while the activation-aware method maintains a perplexity of 7.04 and accuracy of 0.701, nearly matching the full-precision reference. This indicates that channel-wise uniform 4-bit quantization is catastrophically fragile for Llama-3-8B: a small number of highly sensitive modules dominate the overall error, and activation-aware mixed-precision allocation effectively avoids this failure mode by directing higher precision to those modules. 
+
+21 OneComp: One-Line Revolution for Generative AI Model Compression 
+
+Figure 5. Example module-wise bit allocation on Llama 3 under a 4.16 average bpw budget, which is equivalent to 4-bit quantization with a group size of 128. Top: naive mixed-precision allocation. Bottom: activation-aware allocation using diagonal activation statistics only. The activation-aware variant tends to reserve higher precision for modules with stronger activation outliers or higher activation sensitivity. 
+
+Table 1. AutoBit mixed-precision allocation under fixed average bit-per-weight (bpw) budgets. For each model, the full-precision (FP) reference is shown once and shared across all quantized variants. We compare three allocation methods: Uniform, Naive, and Act.-aware (diagonal activation only). For each bpw budget, perplexity (PPL; lower is better) and average 0-shot accuracy (ACC; higher is better) are reported separately. Model FP Method Average bit per weight (bpw) PPL ACC 4.16 (4b/128) 4.00 (4b/ch) PPL ACC PPL ACC Llama-3-8B 6.14 0.715 Uniform 9.53 0.697 383.26 0.595 Naive 10.28 0.691 10.95 0.682 
+
+Act.-aware 6.85 0.702 7.04 0.701 
+
+Qwen3-8B 9.72 0.707 Uniform 10.92 0.706 10.65 0.679 Naive 10.95 0.705 11.11 0.702 
+
+Act.-aware 10.25 0.700 10.56 0.693 
+
+On Qwen3-8B, the activation-aware variant consistently achieves the lowest perplexity (10.25 at 4.16 bpw; 10.56 at 4.00 bpw), while accuracy differences among the three strategies remain within one percentage point. This suggests that Qwen3-8B exhibits less inter-module sensitivity heterogeneity than Llama-3-8B, making the uniform baseline already a reasonable allocation and limiting the headroom for mixed-precision gains. 
+
+22 OneComp: One-Line Revolution for Generative AI Model Compression                                        
+
+> Table 2. Layer-wise PTQ on Llama-3-8B under a single-GPU budget. The full-precision (FP) reference is shown once. Base: GPTQ without correction. QEP: layer-level error-propagation correction. Submodule: QEP extended with residual-stream correction. PPL: WikiText-2 perplexity ( ↓). ACC: average 0-shot accuracy ( ↑). Model FP Method Quantization setting PPL ACC 4b/128 4b/ch 3b/128 3b/ch PPL ACC PPL ACC PPL ACC PPL ACC Llama-3-8B 6.14 0.715 Base 12.66 0.697 665.94 0.533 45.22 0.521 1721.06 0.386 QEP 6.66 0.710 7.67 0.688 8.95 0.634 17.93 0.496
+> Submodule 6.59 0.709 7.33 0.703 8.54 0.640 22.40 0.482
+
+Compared to the naive mixed-precision strategy, the activation-aware variant further improves allocation by considering activation statistics. Modules with stronger activation outliers or higher sensitivity tend to receive more bits, leading to a more effective use of the limited precision budget. For example, Act.-aware assigns a higher bit-width to the down module in Layer 1, which exhibits large activation outliers. Besides, the naive approach does not assign a high bit-width to the module. (See Figure 5) Overall, AutoBit’s mixed-precision allocation is the recommended strategy regardless of the model architecture. This indicates that a uniform bit-width leaves substantial performance on the table, even when the total memory cost is fixed. 
+
+5.3 Layer-wise PTQ with Error-Propagation Correction 
+
+The layer-wise regime constitutes the most relevant operating point of OneComp , as it remains feasible within a strict single-GPU memory budget. We therefore focus this experiment on a key deployment question: can explicit correction substantially improve layer-wise post-training quantization (PTQ) without relaxing the underlying hardware constraints? To address this question, we compare three progressively robust correction strategies based on the same GPTQ base quantizer. The first, Base, corresponds to standard layer-wise GPTQ without any cross-layer correction. The second, QEP, modifies the quantization target of each linear layer using the error-propagation matrix accumulated from all previously quantized layers, as described in Section 4.3.1. The third, Submodule, corresponds to LPCD and extends QEP by additionally accounting for the error propagated through the residual stream of each transformer block. In a standard transformer block, the outputs of the attention sub-layer and the MLP sub-layer are each added to the residual stream through skip connections. The submodule treats these residual-connected units as coherent submodules and introduces an auxiliary cross-term that captures the discrepancy between full-precision and quantized residual activations. This residual cross-term provides a second-order correction to the weight target, complementing the standard layer-level QEP adjustment. For each layer whose output directly feeds into a residual connection, such as the output or down projection, the corrected target includes an additional term proportional to the inverse Hessian applied to the residual-stream error. In this way, the formulation preserves the single-GPU, layer-sequential workflow of QEP while accounting for the coupling between quantization error and the residual stream, which standard layer-wise objectives ignore. Table 2 reports perplexity and average zero-shot accuracy for Llama-3-8B under 4-bit and 3-bit quantization, using a group size of 128 with per-channel grouping. We present the full-precision reference once, then compare the three correction strategies under each quantization setting. First, Base GPTQ without correction severely degrades performance, particularly under per-channel quantization, where perplexity rises dramatically and downstream accuracy drops to near-random levels. This indicates that naive layer-wise PTQ is insufficient for aggressive quantization in this architecture. Second, QEP consistently restores model quality across all settings. It keeps perplexity close to the full-precision baseline and substantially recovers downstream accuracy, showing that error-propagation correction effectively compensates for quantization errors overlooked by standard layer-wise objectives. Third, the Submodule offers additional gains over QEP in moderately aggressive settings. In the 4-bit settings and the 3-bit group-size-128 setting, it achieves lower perplexity and comparable or better accuracy, suggesting that modeling residual-stream coupling provides benefits beyond layer-level correction. 
+
+5.4 JointQ versus Standard GPTQ 
+
+Both GPTQ and JointQ represent quantized weights in the same standard packed-weight format, utilizing symmetric quantization with bit-widths of {3, 4} and group sizes of {128 , per-channel }. For both methods, we use the default configuration, with activation ordering and MSE-based grid tuning disabled. For JointQ, the regularization strength is set to λ = 0 .2. Table 3 reports perplexity and average zero-shot 
+
+23 OneComp: One-Line Revolution for Generative AI Model Compression 
+
+accuracy for GPTQ and JointQ on Llama-3-8B, Qwen3-8B, and Qwen3-14B under each quantization setting. Boldface indicates the better result between the two methods for each metric and setting.                                                                              
+
+> Table 3. Comparison between JointQ and standard GPTQ under the same packed quantized-weight format, with activation ordering and MSE-based tuning disabled. For each model, the full-precision (FP) reference is shown once. Here, 128 denotes group-wise quantization with group size 128 , and ch denotes per-channel quantization. We report perplexity (PPL ↓) and average zero-shot accuracy (ACC ↑). Boldface indicates the better result between GPTQ and JointQ for each setting. Model FP Method Quantization setting PPL ACC 4b/128 4b/ch 3b/128 3b/ch PPL ACC PPL ACC PPL ACC PPL ACC Llama-3-8B 6.14 0.715 GPTQ 12.66 0.697 665.94 0.533 45.22 0.521 1721.06 0.386 JointQ 6.67 0.705 8.46 0.676 9.26 0.650 21.15 0.583
+> Qwen3-8B 9.72 0.707 GPTQ 10.29 0.697 10.97 0.672 11.71 0.654 20.21 0.496 JointQ 10.29 0.695 11.33 0.660 12.38 0.668 42.10 0.506
+> Qwen3-14B 8.64 0.739 GPTQ 8.85 0.736 9.15 0.720 10.10 0.698 13.72 0.581 JointQ 8.88 0.739 9.96 0.723 9.99 0.701 23.55 0.651
+
+On Llama-3-8B, JointQ consistently outperforms GPTQ in both perplexity and accuracy across all quantization settings. The gains are especially pronounced under per-channel quantization, where standard GPTQ shows significant degradation. In the Qwen3 models, the comparison is more nuanced: JointQ generally yields stronger downstream accuracy, particularly under more aggressive settings like 3b/ch, while GPTQ often achieves lower perplexity. This discrepancy between perplexity and accuracy suggests that the two methods preserve different aspects of model behavior. Nonetheless, the consistent accuracy improvements obtained by JointQ indicate that jointly optimizing scales and integer weights better maintains task-relevant structure than the standard alternating procedure. 
+
+5.5 Extreme Low-Bit Quantization 
+
+As foundation models continue to scale, the need for extreme compression is becoming more urgent. Practical scenarios such as on-device inference, edge deployment, and memory-constrained serving require bit-widths significantly below the conventional 3–4 bit range. This experiment examines whether structured binary-factor representations can preserve useful model quality at 1.00 and 1.50 bits per weight (BPW), a regime where standard uniform quantization typically fails. We compare DBF [Boža and Macko, 2026] and MDBF [Ichikawa et al., 2025a] across five models ranging from 0.6B to 8B parameters. Since smaller models have less redundancy in their weight distributions, they pose a greater challenge for extreme low-bit compression; therefore, we include sub-billion-scale models to test the methods under the most demanding conditions. For MDBF, we set the envelope rank to l = 3 for LLaMA-2-7B and l = 4 for all other models. Both methods are evaluated using the complete three-stage 
+
+OneComp pipeline: (i) layer-wise PTQ with MSVID and ADMM optimization (1,000 outer iterations and 3 inner iterations), (ii) block-wise PTQ with continuous-parameter refinement (learning rate 10 −3 for 4 epochs), and (iii) global PTQ with KL distillation from the full-precision teacher (learning rate 5 × 10 −5
+
+for 3 epochs). For calibration, we utilize 512 samples from WikiText-2, with a maximum sequence length of 2,048 tokens at all three stages. Table 4 reports the final results after the complete pipeline, including WikiText-2 perplexity (PPL; lower is better) and average zero-shot accuracy (ACC; higher is better) over ARC-Challenge, ARC-Easy, PIQA, and WinoGrande. Table 4 shows that MDBF consistently achieves lower perplexity than DBF across all five models and both bit budgets. In every setting, MDBF achieves lower perplexity, indicating that its low-rank magnitude envelope is more expressive than the rank-one diagonal scaling used in DBF. This advantage increases at 1.00 BPW and for larger models, suggesting that MDBF better exploits the greater redundancy present in larger weight matrices. By contrast, at 1.50 BPW, the two methods perform more similarly for smaller models, where the recoverable structure is more limited. This advantage in perplexity is also reflected in downstream performance. MDBF generally achieves higher average zero-shot accuracy, with the most significant gains observed in larger models at 1.00 BPW. Although a substantial gap from full precision remains at the most aggressive setting, this gap narrows considerably at 1.50 BPW, particularly for larger models. Overall, these results indicate that structured binary-factor quantization can preserve a 
+
+24 OneComp: One-Line Revolution for Generative AI Model Compression                                                      
+
+> Table 4. Extreme low-bit quantization results after the full three-stage pipeline. For each bit budget we report WikiText-2 perplexity (PPL ↓) and average zero-shot accuracy (ACC ↑). Boldface indicates the better result between DBF and MDBF. Model 1.00 BPW 1.50 BPW DBF MDBF DBF MDBF PPL ACC PPL ACC PPL ACC PPL ACC Qwen3-0.6B 43.07 0.412 34.45 0.426 30.80 0.435 26.56 0.446
+> Llama-3.2-1B 21.48 0.465 18.29 0.473 16.58 0.491 15.00 0.492
+> TinyLlama-1.1B 13.57 0.449 12.29 0.449 10.38 0.491 9.84 0.490 Llama-2-7B 9.95 0.480 9.36 0.489 7.34 0.548 7.17 0.564
+> Llama-3-8B 14.76 0.505 13.25 0.518 10.61 0.560 10.03 0.572 Layer-wise
+> DBF
+> + Block-wise
+> PTQ
+> + Global
+> PTQ
+> 10 2
+> 10 3
+> 10 4
+> 10 5
+> Perplexity (  )
+> Layer-wise
+> DBF
+> + Block-wise
+> PTQ
+> + Global
+> PTQ
+> 0.37
+> 0.38
+> 0.39
+> 0.40
+> 0.41
+> 0.42
+> 0.43
+> Avg Accuracy (  ) 2.0 bit
+> 1.5 bit
+> 1.0 bit
+> Figure 6. Progressive quality improvement on Llama-3.2-1B under DBF quantization at 2.0, 1.5, and 1.0 bits per weight. Each pipeline stage, layer-wise, block-wise, and global PTQ, provides monotonic accuracy improvement regardless of bit-width.
+
+meaningful fraction of model capability at extremely low bit-widths and that MDBF provides a clear improvement over DBF in this respect. Support for MDBF is planned for the next release of OneComp .
+
+5.6 Progressive Quality Improvement Across Execution Regimes 
+
+A core premise of OneComp is that model quality improves monotonically as more compute is invested, with each execution regime refining the result of the previous one. We evaluate this hypothesis in the extreme low-bit setting by applying DBF quantization at 1.0, 1.5, and 2.0 bits per weight, progressively enabling three stages: layer-wise PTQ, which performs independent per-layer ADMM decomposition; block-wise PTQ, which applies per-block MSE distillation from an FP16 teacher with cross-block refinement; and global PTQ, which conducts end-to-end KL distillation over the full model. In the block-wise stage, DBF scaling vectors and binary matrices are optimized using SmoothSign STE with progressive temperature annealing, while the global stage utilizes Adam with Lookahead and entropy regularization. Figure 6 reports the average zero-shot accuracy of Llama-3.2-1B on the four benchmark tasks described in Section 5.1. Each bar group corresponds to one stage of the pipeline, the colors indicate the target bit-width, and the dashed line marks the FP16 baseline. Two clear patterns emerge. First, each additional stage yields a monotonic improvement in accuracy across all three bit-widths: block-wise PTQ consistently improves upon the layer-wise baseline, and global PTQ provides further gains. These improvements are larger at higher bit-widths, where the scaling parameters allow for greater flexibility in refinement. In contrast, at 1 bit, the gains are smaller because performance is more strongly constrained by the discrete representation. Second, global PTQ remains beneficial even in the most aggressive settings. At all bit-widths, it further reduces the gap between the layer-wise result and the FP16 baseline, indicating that the end-to-end KL objective captures cross-layer dependencies not addressed by block-level MSE alone. 
+
+25 OneComp: One-Line Revolution for Generative AI Model Compression 
+
+# 6 Related Work 
+
+Post-training quantization for large language models is one of the most active research areas in efficient deep learning. This section surveys the landscape organized by the stages of the quantization pipeline, providing context for OneComp ’s design choices. 
+
+Surveys and Benchmarks. Several comprehensive surveys cover the rapidly evolving quantization land-scape. Gong et al. [2024] provides a systematic overview of low-bit LLM quantization, covering the fundamentals, systems, and algorithms. Gholami et al. [2022] offers a broader perspective on quantization techniques in deep learning. Zhao et al. [2025] presents a unified benchmark that decouples quantization methods into pre-quantization transformations and error mitigation, enabling fair comparisons among methods. These surveys highlight the critical importance of algorithm selection and workflow design, which motivates OneComp ’s automated pipeline. 
+
+Investigation and Mixed-Precision Bit Allocation. The observation that different layers exhibit varying quantization sensitivities has motivated mixed-precision quantization. APTQ [Guan et al., 2024] formu-lates bit allocation as an attention-aware optimization, using the Hessian trace as a sensitivity metric. SqueezeLLM [Kim et al., 2024] employs a dense-and-sparse decomposition that performs heterogeneous allocation by isolating outlier weights into a sparse representation while aggressively quantizing the dense component. Dettmers and Zettlemoyer [2023] studies scaling laws for 4-bit inference and demonstrates that mixed-precision consistently outperforms uniform allocation. OneComp ’s AutoBit planner addresses an integer linear programming problem using SCIP. 
+
+Preprocessing and Outlier Mitigation. Outlier channels in transformer weights and activations pose a fundamental challenge for low-bit quantization. SmoothQuant [Xiao et al., 2023] migrates quantization difficulty from activations to weights using per-channel scaling, enabling accurate W8A8 quantization. QuIP [Chee et al., 2023] applies random orthogonal transforms to uniformly distribute outlier energy, while QuIP# [Tseng et al., 2024] replaces random rotations with Hadamard transforms and incorporates lattice codebooks. QuaRot [Ashkboos et al., 2024] extends rotation into an end-to-end framework that includes hidden states, attention matrices, and KV caches. SpinQuant [Liu et al., 2024a] demonstrates that learned Cayley-parameterized rotations significantly outperform random rotations. OmniQuant [Shao et al., 2024] jointly learns per-channel clipping bounds and equivalence transforms within a differentiable framework. 
+
+Layer-wise PTQ. Layer-wise PTQ is the most commonly used approach, because it processes one linear layer at a time on a single GPU. GPTQ [Frantar et al., 2023] pioneered Hessian-aware column-by-column rounding using the Optimal Brain Surgeon framework. AWQ [Lin et al., 2024a] proposed activation-aware channel scaling that avoids explicit Hessian computation. ZeroQuant [Yao et al., 2022] combines weight and activation quantization with efficient inference kernels. QEP [Arai and Ichikawa, 2025] addresses the error propagation issue by modifying the quantization target to compensate for upstream errors through a closed-form correction. LPCD [Ichikawa et al., 2025b] generalizes this to arbitrary submodules using a relax-then-project coordinate descent framework. JointQ further improves GPTQ-format models by jointly optimizing scales and integers. 
+
+Block-wise PTQ. Block-wise methods optimize all quantization parameters within a Transformer block. BRECQ [Li et al., 2021] pioneered block-wise reconstruction, demonstrating significant error reduction compared to layer-wise approaches and advancing post-training quantization (PTQ) to INT2 for the first time. CBQ [Ding et al., 2023] extends this concept to the cross-block optimization of adjacent block pairs. OmniQuant [Shao et al., 2024] supports learnable block-wise parameters. 
+
+Global PTQ and Quantization-aware Training. Global methods consider all layers simultaneously, providing high quality at a considerable resource cost. LLM-QAT [Liu et al., 2023] applies data-free quantization-aware training using synthetic data generated by the model itself. PV-Tuning [Malinovskii et al., 2024] goes beyond straight-through estimation for extreme compression by optimizing in the continuous relaxation space. AQLM [Egiazarian et al., 2024] employs additive multi-codebook quantization with joint optimization across blocks, achieving Pareto-optimal accuracy-versus-size trade-offs at 2 to 3 bits. 
+
+Extreme Low-bit Quantization. Pushing below 2 bits per weight requires moving beyond uniform formats. OneBit [Xu et al., 2024] demonstrates that 1-bit factors can be stabilized through row and column scaling. DBF [Boža and Macko, 2026] combines two binary matrix multiplications with interleaved diagonal scalings for hardware-efficient binary inference. LittleBit [Lee et al., 2025] enhances extreme-bit accuracy via multi-scale scaling and residual compensation. MDBF [Ichikawa et al., 2025a] identifies the single-envelope bottleneck in DBF and replaces the rank-one magnitude envelope with a rank-l multi-envelope. VPTQ [Liu 
+
+26 OneComp: One-Line Revolution for Generative AI Model Compression 
+
+et al., 2024b] employs vector quantization using lattice codebooks. BitNet [Wang et al., 2023] explores 1-bit transformers trained from scratch. 
+
+Fine-Tuning for Quantized Models. QLoRA [Dettmers et al., 2023] freezes the quantized backbone and trains low-rank adapters, enabling fine-tuning on consumer GPUs. OneComp supports QLoRA as a final optional stage for both domain adaptation and quantization error recovery. 
+
+# 7 Conclusions 
+
+OneComp provides a fully automated, resource-adaptive PTQ toolkit for foundation models. Given a model identifier, it automatically constructs a compression plan, performs calibration and mixed-precision allocation, and executes the appropriate optimization pipeline within the available hardware budget. 
+
+OneComp transforms quantization from a fragmented collection of techniques into a cohesive, production-ready workflow that scales seamlessly from single-GPU layer-wise PTQ to more powerful block-wise and global refinement methods, while also supporting parameter-efficient fine-tuning. At the algorithmic level, OneComp supports a broad and practical range of precision settings. JointQ significantly outperforms standard GPTQ at 3- and 4-bit precision by jointly optimizing integer assignments and quantization scales. At the extreme low-bit frontier, DBF and MDBF [Ichikawa et al., 2025a] preserve meaningful accuracy at 1–2 bits, while AutoBit automates heterogeneous bit allocation under explicit resource constraints. On the optimization side, QEP [Arai and Ichikawa, 2025] bridges much of the gap between lightweight layer-wise PTQ methods and more expensive block-wise and global PTQ methods by explicitly modeling and compensating for error propagation from upstream quantized layers in closed form. LPCD [Ichikawa et al., 2025b] provides a unified framework for optimizing functionally coupled submodules. Across the LLaMA and Qwen families, our experiments demonstrate that OneComp 
+
+consistently outperforms existing toolchains, delivers monotonic quality gains as GPU resources increase, and significantly benefits from larger calibration sets. Looking ahead, our ambitions extend beyond quantization. We aim to develop OneComp into a comprehensive compression platform for foundation models that incorporates techniques such as activation quantization, KV-cache compression, knowledge distillation, structured pruning, and other compression methods within a unified, resource-adaptive interface. Our immediate roadmap includes activation quantization and KV-cache compression, both of which are essential for efficient long-context inference and integrated as primary targets within OneComp . We also plan to release the MDBF multi-envelope format and the diversity-aware calibration sampler in future releases. Our long-term objective extends beyond improving compression performance; we aim to reshape the economics of foundation models. 
+
+OneComp is guided by a vision for a future where progress relies less on brute-force GPU scaling and more on efficiency as a primary driver of innovation. In this view, next-generation model systems should not only be trained and served with greater hardware resources but also be designed, compressed, and deployed much more efficiently. Our goal is for OneComp to become the standard open platform for facilitating and accelerating this transition. 
+
+Open-Source Vision. We release OneComp as open-source software to help establish a shared foundation for the future of model compression. By making OneComp publicly available, we aim to accelerate innovation in research and engineering, support emerging architectures and hardware backends, and enable the broader community to extend the platform with new compression methods and capabilities. We envision OneComp evolving into a widely adopted open platform that defines the next generation of efficient AI systems. 
+
+# References 
+
+Hugo Touvron, Thibaut Lavril, Gautier Izacard, et al. LLaMA: Open and efficient foundation language models. arXiv preprint arXiv:2302.13971 , 2023a. Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Almahairi, Yasmine Babaei, Nikolay Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhosale, et al. Llama 2: Open foundation and fine-tuned chat models. arXiv preprint arXiv:2307.09288 , 2023b. OpenAI. GPT-4 technical report. arXiv preprint arXiv:2303.08774 , 2023. DeepSeek-AI. DeepSeek-V3 technical report. arXiv preprint arXiv:2412.19437 , 2024. Gemini Team, Petko Georgiev, Ving Ian Lei, Ryan Burnell, Libin Bai, Anmol Gulati, Garrett Tanzer, Damien Vincent, Zhufeng Pan, Shibo Wang, et al. Gemini 1.5: Unlocking multimodal understanding across millions of tokens of context. arXiv preprint arXiv:2403.05530 , 2024. Ruihao Gong, Yifu Ding, Zining Wang, Chengtao Lv, Xingyu Zheng, Jinyang Du, Haotong Qin, Jinyang Guo, Michele Magno, and Xianglong Liu. A survey of low-bit large language models: Basics, systems, and algorithms. arXiv preprint arXiv:2409.16694 , 2024. 
+
+27 OneComp: One-Line Revolution for Generative AI Model Compression 
+
+Amir Gholami, Sehoon Kim, Zhen Dong, Zhewei Yao, Michael W Mahoney, and Kurt Keutzer. A survey of quantization methods for efficient neural network inference. International Journal of Computer Vision , 2022. Markus Nagel, Marios Fournarakis, Rana Ali Amjad, Yelysei Bondarenko, Mart van Baalen, and Tijmen Blankevoort. A white paper on neural network quantization. arXiv preprint arXiv:2106.08295 , 2021. Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. GPTQ: Accurate post-training quantization for generative pre-trained transformers. In ICLR , 2023. Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. AWQ: Activation-aware weight quantization for llm compression and acceleration. MLSys , 2024a. Albert Tseng, Jerry Chee, Qingyao Sun, Volodymyr Kuleshov, and Christopher De Sa. QuIP#: Even better LLM quantization with hadamard incoherence and lattice codebooks. In ICML , 2024. Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L Croci, Bo Li, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. QuaRot: Outlier-free 4-bit inference in rotated LLMs. In NeurIPS , 2024. Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Srinivasan, Bita Darvish Nair, Hadi Esmaeilzadeh, and Kurt Keutzer. SpinQuant: LLM quantization with learned rotations. arXiv preprint arXiv:2405.16406 , 2024a. Yuhang Li, Ruihao Gong, Xu Tan, Yang Yang, Peng Hu, Qi Zhang, Fengwei Yu, Wei Wang, and Shi Gu. BRECQ: Pushing the limit of post-training quantization by block reconstruction. In ICLR , 2021. Xiang Ding et al. CBQ: Cross-block quantization for large language models. arXiv preprint arXiv:2312.07950 , 2023. Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li, Kaipeng Zhang, Peng Gao, Yu Qiao, and Ping Luo. OmniQuant: Omnidirectionally calibrated quantization for large language models. In ICLR , 2024. Yuzhuang Xu, Xu Han, Zonghan Yang, Shuo Wang, Qingfu Zhu, Zhiyuan Liu, Weidong Liu, and Wanxiang Che. OneBit: Towards extremely low-bit large language models. In NeurIPS , 2024. Vladimír Boža and Vladimír Macko. Addition is almost all you need: Compressing large language models with double binary factorization. Transactions on Machine Learning Research , 2026. ISSN 2835-8856. URL https://openreview.net/forum?id=k5kUKoewdQ .Yuma Ichikawa, Yoshihiko Fujisawa, Yudai Fujimoto, Akira Sakai, and Katsuki Fujisawa. More than bits: Multi-envelope double binary factorization for extreme quantization. arXiv preprint arXiv:2512.24545 ,2025a. Itay Hubara, Yury Nahshan, Yair Hanani, Ron Banner, and Daniel Soudry. Accurate post training quantization with small calibration sets. In ICML , 2021. Jiaqi Zhao, Ming Wang, Miao Zhang, Yuzhang Shang, Xuebo Liu, Yaowei Wang, Min Zhang, and Liqiang Nie. Benchmarking post-training quantization in LLMs: Comprehensive taxonomy, unified evaluation, and comparative analysis. arXiv preprint arXiv:2502.13178 , 2025. Francesco Conti. Technical report: Nemo dnn quantization for deployment model. arXiv preprint arXiv:2004.05930 , 2020. Xin He, Kaiyong Zhao, and Xiaowen Chu. Automl: A survey of the state-of-the-art. Knowledge-based systems , 212:106622, 2021. Yamato Arai and Yuma Ichikawa. Quantization error propagation: Revisiting layer-wise post-training quantization. arXiv preprint arXiv:2504.09629 , 2025. Yuma Ichikawa, Yudai Fujimoto, and Akira Sakai. LPCD: Unified framework from layer-wise to submodule quantization. arXiv preprint arXiv:2512.01546 , 2025b. Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. QLoRA: Efficient finetuning of quantized language models. In NeurIPS , 2023. Aaron Grattafiori, Abhimanyu Dubey, et al. The Llama 3 herd of models. arXiv preprint arXiv:2407.21783 ,2024. Qwen Team. Qwen3 technical report. arXiv preprint arXiv:2505.09388 , 2025. Zhihang Yuan et al. LLM inference unveiled: Survey and roofline model insights. arXiv preprint arXiv:2402.16363 , 2024. Tim Dettmers and Luke Zettlemoyer. The case for 4-bit precision: k-bit inference scaling laws. In ICML ,2023. Joel Max. Quantizing for minimum distortion. IRE Transactions on Information Theory , 6(1):7–12, 1960. doi: 10.1109/TIT.1960.1057548. Stuart Lloyd. Least squares quantization in PCM. IEEE Transactions on Information Theory , 28(2): 129–137, 1982. 
+
+28 OneComp: One-Line Revolution for Generative AI Model Compression 
+
+Suyog Gupta, Ankur Agrawal, Kailash Gopalakrishnan, and Pritish Narayanan. Deep learning with limited numerical precision. In Proceedings of the 32nd International Conference on Machine Learning ,volume 37 of Proceedings of Machine Learning Research , pages 1737–1746. PMLR, 2015. Matthieu Courbariaux, Yoshua Bengio, and Jean-Pierre David. Binaryconnect: Training deep neural networks with binary weights during propagations. In Advances in Neural Information Processing Systems 28 (NeurIPS 2015) , pages 3123–3131, 2015. URL https://papers.neurips.cc/paper/2015/ hash/3e15cc11f979ed25912dff5b0669f2cd-Abstract.html .Matthieu Courbariaux, Itay Hubara, Daniel Soudry, Ran El-Yaniv, and Yoshua Bengio. Binarized neural networks. In NeurIPS , 2016. Shuchang Zhou, Yuxin Wu, Zekun Ni, Xinyu Zhou, He Wen, and Yuheng Zou. Dorefa-net: Training low bitwidth convolutional neural networks with low bitwidth gradients. CoRR , abs/1606.06160, 2016. URL 
+
+https://arxiv.org/abs/1606.06160 .Itay Hubara, Matthieu Courbariaux, Daniel Soudry, Ran El-Yaniv, and Yoshua Bengio. Quantized neural networks: Training neural networks with low precision weights and activations. JMLR , 18(187):1–30, 2018. Song Han, Huizi Mao, and William J. Dally. Deep compression: Compressing deep neural networks with pruning, trained quantization and Huffman coding. In ICLR , 2016. Benoit Jacob, Skirmantas Kligys, Bo Chen, Menglong Zhu, Matthew Tang, Andrew Howard, Hartwig Adam, and Dmitry Kalenichenko. Quantization and training of neural networks for efficient integer-arithmetic-only inference. In CVPR , 2018. Patrik Czakó, Gábor Kertész, and Sándor Szénási. Addressing activation outliers in LLMs: A systematic review of post-training quantization techniques. IEEE Access , 13:81917–81932, 2025. Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. LLM.int8(): 8-bit matrix multiplication for transformers at scale. In NeurIPS , 2022. Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. SmoothQuant: Accurate and efficient post-training quantization for large language models. In ICML , 2023. Amir Williams and Nikolaos Aletras. On the impact of calibration data in post-training quantization and pruning. arXiv preprint arXiv:2311.09755 , 2024. Jiaqi Zhang. Survey of quantization-aware training (QAT) applications in deep learning quantization. 
+
+AICSS , 2025. Yoshua Bengio, Nicholas Léonard, and Aaron Courville. Estimating or propagating gradients through stochastic neurons for conditional computation. arXiv preprint arXiv:1308.3432 , 2013. Zechun Liu, Barlas Oguz, Changsheng Zhao, Ernie Chang, Pierre Stock, Yashar Mehdad, Yangyang Shi, Raghuraman Krishnamoorthi, and Vikas Chandra. LLM-QAT: Data-free quantization aware training for large language models. arXiv preprint arXiv:2305.17888 , 2023. AutoGPTQ Team. AutoGPTQ: An easy-to-use llm quantization package. https://github.com/AutoGPTQ/ AutoGPTQ , 2023. Ji Lin, Jiaming Tang, Haotian Tang, and Song Han. AWQ: Activation-aware weight quantization. 
+
+https://github.com/mit-han-lab/llm-awq , 2024b. Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher De Sa. QuIP: 2-bit quantization of large language models with guarantees. In NeurIPS , 2023. Jun Li, Li Fuxin, and Sinisa Todorovic. Efficient riemannian optimization on the stiefel manifold via the cayley transform. arXiv preprint arXiv:2002.01113 , 2020. Li Lin and Xiaojun Wan. Loaq: Layer-wise output approximation quantization. arXiv preprint arXiv:2509.06297 , 2025. Pierre Foret, Ariel Kleiner, Hossein Mobahi, and Behnam Neyshabur. Sharpness-aware minimization for efficiently improving generalization. In ICLR , 2021. Ziyi Guan, Hantao Huang, Yupeng Su, Hong Huang, Ngai Wong, and Hao Yu. APTQ: Attention-aware post-training mixed-precision quantization for large language models. In DAC , 2024. Sehoon Kim, Coleman Hooper, Amir Gholami, Zhen Dong, Xiuyu Li, Sheng Shen, Michael W Mahoney, and Kurt Keutzer. SqueezeLLM: Dense-and-sparse quantization. In ICML , 2024. Zhewei Yao, Reza Yazdani Aminabadi, Minjia Zhang, Xiaoxia Wu, Conglong Li, and Yuxiong He. ZeroQuant: Efficient and affordable post-training quantization for large-scale transformers. In NeurIPS ,2022. Vladimir Malinovskii et al. PV-Tuning: Beyond straight-through estimation for extreme LLM compression. In NeurIPS , 2024. Vage Egiazarian, Andrei Panferov, Denis Kuznedelev, Elias Frantar, Artem Babenko, and Dan Alistarh. Extreme compression of large language models via additive quantization. In ICML , 2024. 
+
+29 OneComp: One-Line Revolution for Generative AI Model Compression 
+
+Banseok Lee, Dongkyu Kim, Youngcheon You, and Youngmin Kim. LittleBit: Ultra low-bit quantization via latent factorization. arXiv preprint arXiv:2506.13771 , 2025. Yifei Liu et al. VPTQ: Extreme low-bit vector post-training quantization for large language models. In 
+
+EMNLP , 2024b. Hongyu Wang, Shuming Ma, Li Dong, Shaohan Huang, Huishuai Wang, Lingxiao Ma, Fan Yang, Ruiping Wang, Yi Wu, and Furu Wei. BitNet: Scaling 1-bit transformers for large language models. arXiv preprint arXiv:2310.11453 , 2023. 
+
+30 OneComp: One-Line Revolution for Generative AI Model Compression 
+
+# A Notation 
+
+For convenience, Table 5 collects the main symbols that appear throughout this paper. Symbols introduced with a local scope in a single equation are not repeated here; the reader is directed to the defining equation in each case. Boldface lowercase letters (e.g. θ) denote vectors, uppercase letters (e.g. W ) denote matrices, and calligraphic letters (e.g. Q) denote sets. A hat accent ( b·) consistently marks a quantized or perturbed counterpart of the corresponding full-precision quantity. 
+
+Table 5. Summary of principal notation. Symbol Description Model and data 
+
+L Number of transformer blocks 
+
+d, d k , d ff Hidden, per-head, and feed-forward dimensions 
+
+H, H kv Number of attention / key-value heads 
+
+N, M, T Weight input/output dimensions, sequence length 
+
+P, n Total parameters, number of calibration samples 
+
+Wl, cWl Full-precision / quantized weight matrix of layer lXl, bXl Full-precision / perturbed input activations at layer lYl = XlWl Full-precision output at layer lWq , W k , W v , W o Attention projection matrices 
+
+Wgate , W up , W down MLP projection matrices 
+
+fθ , f ˆθ Full-precision / quantized model 
+
+P, C, V Data distribution, calibration dataset, vocabulary Quantization 
+
+b Target bit-width 
+
+s, z Quantization scale and zero-point 
+
+q, bw Quantized integer value, dequantized weight 
+
+qmin , q max Minimum / maximum of the integer range 
+
+G, g (i, j ) Group size and group assignment function 
+
+Q, Q Feasible weight-matrix set, integer codebook 
+
+cost( l, c ), err( l, c ) Memory cost / predicted error for config c (AutoBit) Optimization 
+
+Hl = X⊤ 
+
+> l
+
+Xl Input Gram matrix (Hessian approximation) 
+
+bHl = bX⊤ 
+
+> l
+
+bXl Gram matrix from perturbed activations 
+
+δl, Cl = bX⊤ 
+
+> l
+
+δl Activation error, error-propagation matrix (QEP) 
+
+αl QEP propagation-strength parameter 
+
+J Submodule reconstruction objective (LPCD) 
+
+ΠQ Projection onto Q (any layer-wise quantizer) 
+
+λ, τ, k, ρ Regularization, KL temp., STE temp., SAM radius 
+
+LKL , Linter , Lent KL / hidden-state alignment / entropy losses 
+
+z(fp)  
+
+> j
+
+, z(q)  
+
+> j
+
+Teacher / student logits at token position j
+
+DBF / MDBF 
+
+Sa, S b ∈ {± 1} Binary sign matrices 
+
+Da, D m, D b Diagonal scaling matrices 
+
+A, Q, B, G Low-rank envelope factors (MDBF) 
+
+R Factorization rank Preprocessing 
+
+s Per-channel scaling vector (SmoothQuant) 
+
+R ∈ O( N ) Orthogonal rotation matrix Operators 
+
+⌊·⌉ , clamp Rounding to nearest integer, clamping 
+
+⊙, ∥ · ∥ F Element-wise product, Frobenius norm 
+
+diag( ·), tr( ·) Diagonal matrix, trace 
+
+σ(·), CosSim( ·, ·) Sigmoid function, cosine similarity 
+
+31
