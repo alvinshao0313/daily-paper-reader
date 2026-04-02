@@ -1,0 +1,284 @@
+Title: MemBoost: A Memory-Boosted Framework for Cost-Aware LLM Inference
+
+URL Source: https://arxiv.org/pdf/2603.26557v1
+
+Published Time: Mon, 30 Mar 2026 01:13:20 GMT
+
+Number of Pages: 9
+
+Markdown Content:
+# MemBoost: A Memory-Boosted Framework for Cost-Aware LLM Inference 
+
+Joris Köster 1, Zixuan Liu 2, Siavash Khajavi 3, Zizhan Zheng 2, 
+
+> 1
+
+Department of Computer Science, Aalto University, Finland, 
+
+> 2
+
+Department of Computer Science, Tulane University, LA, USA, 
+
+> 3
+
+Department of Industrial Engineering and Management, Aalto University, Finland, 
+
+{joris.koster,siavash.khajavi}@aalto.fi , {zliu41,zzheng3}@tulane.edu 
+
+Abstract 
+
+Large Language Models (LLMs) deliver strong performance but incur high inference cost in real-world services, especially under workloads with repeated or near-duplicate queries across users and sessions. In this work, we propose 
+
+MemBoost , a memory-boosted LLM serving framework that enables a lightweight model to reuse previously generated answers and retrieve relevant supporting information for cheap infer-ence, while selectively escalating difficult or un-certain queries to a stronger model. Unlike stan-dard retrieval-augmented generation, which pri-marily grounds a single response, MemBoost is designed for interactive settings by supporting answer reuse, continual memory growth, and cost-aware routing. Experiments across mul-tiple models under simulated workloads show that MemBoost substantially reduces expensive large-model invocations and overall inference cost, while maintaining high answer quality comparable to the strong model baseline. 
+
+1 Introduction 
+
+Large Language Models (LLMs) (Hurst et al., 2024; Team et al., 2023) have demonstrated strong capabilities in natural language understanding, in-struction following (Chung et al., 2024; Ouyang et al., 2022), coding (Gao et al., 2023; Ni et al., 2024), and decision-making (Anil et al., 2023; Wei et al., 2022). However, deploying frontier-scale models in real-world services remains expensive, as inference often requires multiple high-end GPUs, especially for long-form reasoning and explanation-heavy responses (Kwon et al., 2023; Park et al., 2025). These costs are amplified in production settings where many user queries are repeated or near duplicates, causing redundant computation. A widely adopted direction to mitigate these costs is to shift part of the workload to smaller models with retrieval-augmented generation (RAG) (Lewis et al., 2020; Guu et al., 2020; Borgeaud et al., 2022). RAG allows a model to externalize knowledge into a searchable index and condition generation on retrieved evidence, reducing the need to store ev-erything in parameters (Izacard et al., 2023; Fan et al., 2025). For example, Atlas (Izacard et al., 2023) demonstrates that the RAG model with far fewer parameters can be competitive with, and in some regimes outperform, much larger models on knowledge-intensive tasks. However, most existing RAG work primarily targets knowledge grounding, i.e., improving the answer to a single query by retrieving external doc-uments (Lewis et al., 2020; Guu et al., 2020). In contrast, interactive LLM services exhibit addi-tional properties that are not addressed by standard RAG alone. First, many queries that are seman-tically equivalent are repeatedly requested across users and sessions. Recomputing these same an-swers wastes GPU time. This motivates semantic caching, which retrieves a previously generated response when a new query is semantically sim-ilar (Gill et al., 2025; Yu et al., 2025; Liu et al., 2025). However, making this reliable requires care-ful control. Second, deployed LLMs continuously generate new high-quality answers. When these answers are valuable, they should be written back into the retrieval memory so that a semantic cache can serve future similar queries cheaply. However, this write-back mechanism raises practical ques-tions, such as what/when to store it. Finally, al-though small models augmented with retrieval can be competitive on knowledge-intensive tasks, their capabilities remain limited on more challenging re-quests. A practical system should therefore enable the small model to escalate to a stronger model when retrieval is insufficient, aligning with recent work on routing across multiple LLMs (Ong et al., 2024; Zhang et al., 2025; Moslem and Kelleher, 2026) to balance quality and cost. These observations suggest a missing system-level paradigm: a unified approach that enables a 1
+
+> arXiv:2603.26557v1 [cs.CL] 27 Mar 2026
+
+small model to cheaply reuse supporting knowl-edge or prior answers from semantic memory, se-lectively defer to a stronger but costly model when retrieval is insufficient, and continuously write back useful new information into the retrieval memory, while explicitly balancing answer quality and infer-ence cost. In this paper, we introduce MemBoost ,a memory-boosted architecture with three compo-nents: (1) an Associative Memory Engine (AME) that performs fast semantic retrieval and supports write-back of newly generated answers; (2) a high-capability Large-LLM Oracle that provides an accu-rate fallback when memory is insufficient; and (3) a lightweight Meta Controller, which is a small LLM that composes the final response by either reusing from memory or routing the query to the oracle, and support write back mechanism for future reuse, thereby balancing quality and cost. Together, Mem-Boost turns inference into a “retrieve-or-escalate” decision problem, substantially reducing expensive large-model calls while preserving answer qual-ity. Experiments on the MMLU-Pro dataset (Wang et al., 2024) under a simulated workload with re-peated and near-duplicate queries show that Mem-Boost substantially reduces calls to the costly large LLM while largely preserving the answer quality of the oracle model. 
+
+2 MemBoost: Memory-Boosted LLM Serving Framework 
+
+2.1 Problem Setup 
+
+Unlike standard single-turn question answering (QA) tasks studied in prior work, we consider a setting with continuous interaction between mul-tiple users and an LLM service, where incoming queries may be exact duplicates or semantic near-duplicates over time. At each time step t, the system receives a user query xt and produces an answer yt. We use a ground-truth quality signal 
+
+r(xt, y t) to measure whether the response is help-ful, correct, and aligned with the user’s intent. Our objective is to maximize the average response qual-ity over a horizon T , max 1
+
+> T
+
+PTt=1 r(xt, y t), while minimizing the overall inference cost, as formal-ized in Section 2.3. 
+
+2.2 Overview of MemBoost 
+
+As discussed above, in production settings, repeat-edly invoking a frontier model to answer semanti-cally redundant queries wastes substantial compute. To mitigate this inefficiency while balancing qual-MemBoost 
+
+> Incoming
+> Question
+> Associative
+> Memory Engine
+> (AME)
+> Meta Controller
+> (MC)
+> Output
+> Answer
+> Large LLM
+> (Oracle)
+> Writes Back
+
+Figure 1: Overview of MemBoost. For each incoming query, the AME retrieves a small set of relevant memory entries. The MC then either composes an answer from the retrieved results or escalates to the Oracle. When the Oracle is used, the MC decides whether to write the new answer back into the AME for future reuse. 
+
+ity and cost, we propose MemBoost, a memory-boosted LLM serving system composed of three components: Associative Memory Engine, Large-LLM Oracle and Meta Controller, as illustrated in Figure 1. 
+
+Associative Memory Engine (AME). AME maintains an external memory that stores auxiliary knowledge as well as previously answered queries and their associated responses, and supports fast semantic retrieval (details in Appendix B). Con-cretely, given a new query xt at time t, AME re-trieves a small set of K candidate memory entries 
+
+Mt = {(x(i), y (i), m (i))}Ki=1 , where m(i) denotes metadata (e.g., query category). The AME stores the question-answer pair for retrieval together with the qid (a unique identifier provided by the dataset), the category and the timestamp. In addition, AME supports write-back by storing newly generated high-quality entries (xt, y t, m t) when instructed by the Meta Controller. 
+
+Large-LLM Oracle. The oracle is a high-capability model that produces high-quality an-swers but incurs high inference cost. We use it as a fallback: the system queries the oracle when retrieval from AME is missing, ambigu-ous, or deemed unreliable by the Meta Controller. We denote the oracle’s response to query xt as 
+
+y⋆t = Oracle( xt).
+
+2Meta-Controller (MC). MC is a lightweight LLM that orchestrates the interaction among the user, AME, and the oracle. At each step, MC decides whether to answer using information re-trieved from AME or to escalate to the oracle. When escalation occurs, MC also determines whether the newly generated query answer pair should be stored in AME for future reuse. Con-cretely, given a query xt, MC first requests re-trieval from AME and obtains Mt. Conditioned on 
+
+xt and Mt, MC either returns an answer directly, 
+
+yt = MC( xt, Mt), or calls the oracle to obtain 
+
+y⋆t = Oracle( xt) and returns yt = y⋆t . In the latter case, MC may optionally write (xt, y ⋆t , m t) back into AME, where mt denotes metadata inferred by MC. This “retrieve → decide → escalate (if needed) → write-back (if needed)” loop reduces expensive oracle calls under repeated queries while preserving high answer quality when retrieval is insufficient. 
+
+2.3 System Cost 
+
+To model system efficiency, let cO(xt) denote the cost of an oracle call at time t (e.g., GPU time, en-ergy, or monetary cost), cM (xt) the cost of running the lightweight MC, and cR(xt) denote the cost of retrieval (e.g., CPU time). In typical deployments, 
+
+cO(xt) is much larger than cM (xt) + cR(xt), since frontier-model inference dominates GPU compute, whereas retrieval is primarily CPU-bound and in-expensive relative to large-model generation. Let 
+
+It ∈ { 0, 1} indicate whether the retrieval informa-tion from AME is used at time t (It = 1 if memory is used, and It = 1 if the system escalates to the oracle). The total cost over T steps is 
+
+CT =
+
+> T
+
+X
+
+> t=1
+
+ cM (xt)+ cR(xt)+
+
+> T
+
+X
+
+> t=1
+
+(1 −It) cO(xt).
+
+By contrast, an oracle-only baseline would cost ap-proximately Coracle  
+
+> T
+
+= PTt=1 cO(xt). So our frame-work achieves cost savings whenever CT < C oracle  
+
+> T
+
+.Equivalently, this condition can be written as 
+
+> T
+
+X
+
+> t=1
+
+It cO(xt) >
+
+> T
+
+X
+
+> t=1
+
+ cM (xt) + cR(xt).
+
+Putting quality and cost together, our goal is to achieve oracle-level quality with significantly fewer oracle invocations: 
+
+1
+
+T
+
+> T
+
+X
+
+> t=1
+
+r(xt, y t) ≈ 1
+
+T
+
+> T
+
+X
+
+> t=1
+
+r xt, y ⋆t
+
+, C T < C oracle 
+
+> T
+
+3 Experiments 
+
+In this section, we evaluate MemBoost in terms of both (i) reducing inference cost and (ii) retaining high response quality. 
+
+3.1 Experiment Setup 
+
+We evaluate the proposed MemBoost framework on the MMLU-Pro dataset (Wang et al., 2024), a widely used and challenging benchmark that cov-ers diverse disciplines and is designed to more rigorously assess LLM capabilities. To emulate real-world LLM-serving workloads where many requests are repeated or near-duplicated, we gen-erate a query stream by sampling MMLU-Pro questions according to a Zipf distribution (Zipf, 1949). This produces a heavy-tailed access pat-tern in which a small number of questions oc-cur frequently while most questions appear rarely, capturing the repetition behavior commonly ob-served in practice. We vary the Zipf parameter (α) to obtain different repetition rates and study how workload skew affects MemBoost. For the lightweight Meta Controller (MC), we evaluate several small-scale LLMs, including Qwen-3.5-2B (Qwen Team, 2026), Ministral-3-3B-Instruct-2512 (Liu et al., 2026), and Qwen3-4B-Instruct-2507-FP8 (Yang et al., 2025). For the Large-LLM Oracle, we use Qwen3-14B-FP8-dynamic (Yang et al., 2025; Micikevicius et al., 2022). To support fast retrieval in the Associative Memory Engine (AME), we embed stored query-answer pairs using all-MiniLM-L6-v2 (Wang et al., 2020; Reimers and Gurevych, 2019) and perform approximate nearest-neighbor search with a FAISS cosine-similarity index (Douze et al., 2024). Additional implementa-tion details can be found in the Appendix B. 
+
+3.2 Results                         
+
+> Model Accuracy (%) Zipf 0.8 Zipf 1.1 Zipf 1.4
+> Baselines
+> Qwen3.5-2B 50.0 43.5 37.1 Ministral-3-3B-Instruct-2512 53.8 46.4 38.2 Qwen3-4B-Instruct-2507-FP8 74.5 75.6 80.5 Qwen3-14B-FP8-dynamic (Oracle) 76.4 79.9 85.0
+> MemBoost (ours)
+> MemBoost (Qwen3.5-2B) 76.7 81.8 87.4
+> MemBoost (Ministral-3-3B-Instruct-2512) 76.2 79.7 85.0 MemBoost (Qwen3-4B-Instruct-2507-FP8) 76.1 79.8 85.0
+
+Table 1: Accuracy (%) of different methods on MMLU-Pro under Zipf-sampled query streams with varying repetition rates (Zipf α). 
+
+3Table 1 reports accuracy (%) against the MMLU-Pro ground-truth labels for different methods under Zipf-sampled query streams with varying repeti-tion rates (Zipf exponent α). Across all settings, MemBoost consistently improves over the corre-sponding small-model baselines and achieves per-formance comparable to the oracle. Notably, Mem-Boost with Qwen3.5-2B even outperforms the ora-cle in all three workloads. We attribute this to Mem-Boost’s ability to reuse previously generated high-quality answers through semantic memory: once a question (or a near-duplicate) has been answered correctly and written back, subsequent occurrences can be served directly from memory, avoiding addi-tional generation errors. Finally, MemBoost ex-hibits a clear improvement as the workload be-comes more skewed (larger α), since higher rep-etition rates lead to more memory hits, thereby increasing the fraction of queries answered using stored correct responses. 40        
+
+> 60
+> 80
+> 100
+> % memory use
+> Zipf 0.8
+> 40
+> 60
+> 80
+> 100
+> % memory use
+> Zipf 1.1
+> 01000 2000 3000 4000 5000
+> Zipf step
+> 40
+> 60
+> 80
+> 100
+> % memory use
+> Zipf 1.4
+> MC + Qwen3.5-2B MC + Qwen3-4B MC + Ministral-3-3B
+
+Figure 2: Average memory-use rate It (200-step win-dow) over a 5,000-step Zipf-sampled query stream. Higher It indicates more queries served from AME and fewer oracle calls, implying lower total inference cost. 
+
+To quantify the serving cost of MemBoost, we report the average memory-use rate over a 200-step window, i.e., It = 1200 
+
+Pts=t−199 Is, where 
+
+Is = 1 indicates that the system answers using information retrieved from AME (and Is = 0 in-dicates escalation to the oracle). Under our cost model, where the oracle cost cO is assumed to dominate the Meta Controller and retrieval over-head cM + cR, a larger It corresponds to fewer oracle calls and thus lower total cost. Figure 2 plots It over the 5,000-step workload for differ-ent MC choices and Zipf distributions. In all set-tings, It increases over time as AME is progres-0 1000 2000 3000 4000 5000 
+
+> Zipf step
+> 0
+> 1
+> 2
+> 3
+> 4
+> Response time (s)
+> Qwen3-14B (solver baseline)
+> MC + Qwen3.5-2B
+> MC + Qwen3-4B
+> MC + Ministral-3-3B
+
+Figure 3: Response latency over time under Zipf-sampled workloads (average over the previous 100 steps). MemBoost reduces latency relative to the oracle-only baseline as an increasing fraction of queries are served from AME. 
+
+sively populated via the write-back mechanism, indicating that an increasing fraction of queries are served from memory rather than escalated to the or-acle. Under our cost model, this implies that Mem-Boost achieves lower total cost than an oracle-only baseline. Moreover, memory usage is consistently higher under more skewed workloads (larger Zipf 
+
+α), where repeated queries occur more frequently, further reducing the number of expensive oracle calls. In addition to accuracy and system cost, we also report the latency of MemBoost. Figure 3 shows the average response time over the previous 100 steps during the 5,000-step Zipf-sampled workload. As MemBoost increasingly answers queries using AME over time, the average latency steadily de-creases and remains well below the oracle-only baseline. Overall, these results indicate that MemBoost is particularly effective for repeat-heavy workloads, preserving the strong answer quality of the larger oracle model while significantly reducing system cost and response latency. 
+
+4 Conclusion 
+
+In this paper, we introduced MemBoost , a memory-boosted architecture for efficient LLM serving un-der interactive, repeat-heavy workloads. By com-bining an Associative Memory Engine, a high-capability Large-LLM Oracle, and a lightweight Meta-Controller for routing and response composi-tion, MemBoost reduces redundant large-model inference while preserving answer quality. We hope MemBoost provides a practical foundation for building next-generation LLM services that jointly optimize quality, cost, and responsiveness. 4Limitations 
+
+While MemBoost shows promising accuracy and reduced inference cost on MMLU-Pro, the frame-work has not yet been evaluated in more diverse and demanding settings, such as open-ended long-form question answering or coding tasks, where outputs are longer, and error modes may differ. In addition, although Zipf sampling is used to simu-late repeat-heavy workloads, the current simulation largely reflects repeated questions drawn from a fixed benchmark. In real deployments, queries are often not exact duplicates but only semantically similar, which can increase the risk of retrieval er-rors. A more realistic evaluation would therefore include workloads with paraphrased or semanti-cally overlapping queries to stress-test robustness, particularly with respect to potential false hits in AME retrieval. 
+
+References 
+
+Rohan Anil, Andrew M Dai, Orhan Firat, Melvin John-son, Dmitry Lepikhin, Alexandre Passos, Siamak Shakeri, Emanuel Taropa, Paige Bailey, Zhifeng Chen, and 1 others. 2023. Palm 2 technical report. 
+
+arXiv preprint arXiv:2305.10403 .Akari Asai, Zeqiu Wu, Yizhong Wang, Avirup Sil, and Hannaneh Hajishirzi. 2023. Self-rag: Learning to retrieve, generate, and critique through self-reflection. In The Twelfth International Conference on Learning Representations .Fu Bang. 2023. GPTCache: An open-source semantic cache for LLM applications enabling faster answers and cost savings. In Proceedings of the 3rd Workshop for Natural Language Processing Open Source Soft-ware (NLP-OSS 2023) , pages 212–218, Singapore. Association for Computational Linguistics. Sebastian Borgeaud, Arthur Mensch, Jordan Hoff-mann, Trevor Cai, Eliza Rutherford, Katie Milli-can, George Bm Van Den Driessche, Jean-Baptiste Lespiau, Bogdan Damoc, Aidan Clark, and 1 others. 2022. Improving language models by retrieving from trillions of tokens. In International conference on machine learning , pages 2206–2240. PMLR. Lingjiao Chen, Matei Zaharia, and James Zou. 2023. Frugalgpt: How to use large language models while reducing cost and improving performance. arXiv preprint arXiv:2305.05176 .Hyung Won Chung, Le Hou, Shayne Longpre, Barret Zoph, Yi Tay, William Fedus, Yunxuan Li, Xuezhi Wang, Mostafa Dehghani, Siddhartha Brahma, and 1 others. 2024. Scaling instruction-finetuned lan-guage models. Journal of Machine Learning Re-search , 25(70):1–53. Matthijs Douze, Alexandr Guzhva, Chengqi Deng, Jeff Johnson, Gergely Szilvasy, Pierre-Emmanuel Mazaré, Maria Lomeli, Lucas Hosseini, and Hervé Jégou. 2024. The faiss library. arXiv preprint arXiv:2401.08281 .Xueying Du, Geng Zheng, Kaixin Wang, Yi Zou, Yu-jia Wang, Wentai Deng, Jiayi Feng, Mingwei Liu, Bihuan Chen, Xin Peng, and 1 others. 2024. Vul-rag: Enhancing llm-based vulnerability detection via knowledge-level rag. ACM Transactions on Software Engineering and Methodology .Tianyu Fan, Jingyuan Wang, Xubin Ren, and Chao Huang. 2025. Minirag: Towards extremely sim-ple retrieval-augmented generation. arXiv preprint arXiv:2501.06713 .William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39. Luyu Gao, Aman Madaan, Shuyan Zhou, Uri Alon, Pengfei Liu, Yiming Yang, Jamie Callan, and Gra-ham Neubig. 2023. Pal: Program-aided language models. In International Conference on Machine Learning , pages 10764–10799. PMLR. Waris Gill, Mohamed Elidrisi, Pallavi Kalapatapu, Am-mar Ahmed, Ali Anwar, and Muhammad Ali Gulzar. 2025. Meancache: User-centric semantic caching for llm web services. In 2025 IEEE International Paral-lel and Distributed Processing Symposium (IPDPS) ,pages 1298–1310. IEEE. Kelvin Guu, Kenton Lee, Zora Tung, Panupong Pasu-pat, and Mingwei Chang. 2020. Retrieval augmented language model pre-training. In International confer-ence on machine learning , pages 3929–3938. PMLR. Aaron Hurst, Adam Lerer, Adam P Goucher, Adam Perelman, Aditya Ramesh, Aidan Clark, AJ Ostrow, Akila Welihinda, Alan Hayes, Alec Radford, and 1 others. 2024. Gpt-4o system card. arXiv preprint arXiv:2410.21276 .Gautier Izacard, Patrick Lewis, Maria Lomeli, Lucas Hosseini, Fabio Petroni, Timo Schick, Jane Dwivedi-Yu, Armand Joulin, Sebastian Riedel, and Edouard Grave. 2023. Atlas: Few-shot learning with retrieval augmented language models. Journal of Machine Learning Research , 24(251):1–43. Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gon-zalez, Hao Zhang, and Ion Stoica. 2023. Efficient memory management for large language model serv-ing with pagedattention. In Proceedings of the 29th symposium on operating systems principles , pages 611–626. Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Hein-rich Küttler, Mike Lewis, Wen-tau Yih, Tim Rock-täschel, and 1 others. 2020. Retrieval-augmented gen-eration for knowledge-intensive nlp tasks. Advances 
+
+5in neural information processing systems , 33:9459– 9474. Jiaxing Li, Chi Xu, Feng Wang, Isaac M von Riede-mann, Cong Zhang, and Jiangchuan Liu. 2024. Scalm: Towards semantic caching for automated chat services with large language models. In 2024 IEEE/ACM 32nd International Symposium on Qual-ity of Service (IWQoS) , pages 1–10. IEEE. Alexander H. Liu, Kartik Khandelwal, Sandeep Sub-ramanian, Victor Jouault, Abhinav Rastogi, Adrien Sadé, Alan Jeffares, Albert Jiang, Alexandre Cahill, Alexandre Gavaudan, and 1 others. 2026. Ministral 3. arXiv preprint arXiv:2601.08584 .Jingyu Liu, Jiaen Lin, and Yong Liu. 2024. How much can rag help the reasoning of llm? arXiv preprint arXiv:2410.02338 .Xutong Liu, Baran Atalar, Xiangxiang Dai, Jinhang Zuo, Siwei Wang, John Lui, Wei Chen, and Carlee Joe-Wong. 2025. Semantic caching for low-cost llm serving: From offline learning to online adaptation. 
+
+arXiv preprint arXiv:2508.07675 .Aigerim Mansurova, Aiganym Mansurova, and Aliya Nugumanova. 2024. Qa-rag: Exploring llm reliance on external knowledge. Big Data and Cognitive Com-puting , 8(9):115. Paulius Micikevicius, Dusan Stosic, Neil Burgess, Mar-ius Cornea, Pradeep Dubey, Richard Grisenthwaite, Sangwon Ha, Alexander Heinecke, Patrick Judd, John Kamalu, Naveen Mellempudi, Stuart Oberman, Mohammad Shoeybi, Michael Siu, and Hao Wu. 2022. Fp8 formats for deep learning. Preprint ,arXiv:2209.05433. Yasmin Moslem and John D Kelleher. 2026. Dynamic model routing and cascading for efficient llm infer-ence: A survey. arXiv preprint arXiv:2603.04445 .Ansong Ni, Pengcheng Yin, Yilun Zhao, Martin Riddell, Troy Feng, Rui Shen, Stephen Yin, Ye Liu, Semih Yavuz, Caiming Xiong, and 1 others. 2024. L2ceval: Evaluating language-to-code generation capabilities of large language models. Transactions of the Associ-ation for Computational Linguistics , 12:1311–1329. Isaac Ong, Amjad Almahairi, Vincent Wu, Wei-Lin Chiang, Tianhao Wu, Joseph E Gonzalez, M Waleed Kadous, and Ion Stoica. 2024. Routellm: Learning to route llms with preference data. arXiv preprint arXiv:2406.18665 .Long Ouyang, Jeffrey Wu, Xu Jiang, Diogo Almeida, Carroll Wainwright, Pamela Mishkin, Chong Zhang, Sandhini Agarwal, Katarina Slama, Alex Ray, and 1 others. 2022. Training language models to follow in-structions with human feedback. Advances in neural information processing systems , 35:27730–27744. Sihyeong Park, Sungryeol Jeon, Chaelyn Lee, Seokhun Jeon, Byung-Soo Kim, and Jemin Lee. 2025. A sur-vey on inference engines for large language models: Perspectives on optimization and efficiency. arXiv preprint arXiv:2505.01658 .Qwen Team. 2026. Qwen3.5-2b. Hugging Face model card for the Qwen3.5-2B post-trained checkpoint. Sajal Regmi and Chetan Phakami Pun. 2024. Gpt semantic cache: Reducing llm costs and latency via semantic embedding caching. arXiv preprint arXiv:2411.05276 .Nils Reimers and Iryna Gurevych. 2019. Sentence-bert: Sentence embeddings using siamese bert-networks. In Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP) , pages 3982–3992. Gemini Team, Rohan Anil, Sebastian Borgeaud, Jean-Baptiste Alayrac, Jiahui Yu, Radu Soricut, Johan Schalkwyk, Andrew M Dai, Anja Hauth, Katie Mil-lican, and 1 others. 2023. Gemini: a family of highly capable multimodal models. arXiv preprint arXiv:2312.11805 .Chen Wang, Xunzhuo Liu, Yue Zhu, Alaa Youssef, Priya Nagpurkar, and Huamin Chen. 2025a. Category-aware semantic caching for heterogeneous llm workloads. arXiv preprint arXiv:2510.26835 .Wenhui Wang, Furu Wei, Li Dong, Hangbo Bao, Nan Yang, and Ming Zhou. 2020. Minilm: Deep self-attention distillation for task-agnostic compression of pre-trained transformers. In Advances in Neural Information Processing Systems , volume 33, pages 5776–5788. Xinyuan Wang, Yanchi Liu, Wei Cheng, Xujiang Zhao, Zhengzhang Chen, Wenchao Yu, Yanjie Fu, and Haifeng Chen. 2025b. Mixllm: Dynamic routing in mixed large language models. In Proceedings of the 2025 Conference of the Nations of the Americas Chapter of the Association for Computational Lin-guistics: Human Language Technologies (Volume 1: Long Papers) , pages 10912–10922. Yubo Wang, Xueguang Ma, Ge Zhang, Yuansheng Ni, Abhranil Chandra, Shiguang Guo, Weiming Ren, Aaran Arulraj, Xuan He, Ziyan Jiang, Tianle Li, Max Ku, Kai Wang, Alex Zhuang, Rongqi Fan, Xiang Yue, and Wenhu Chen. 2024. Mmlu-pro: A more robust and challenging multi-task language understanding benchmark. arXiv preprint arXiv:2406.01574 .Jason Wei, Xuezhi Wang, Dale Schuurmans, Maarten Bosma, Fei Xia, Ed Chi, Quoc V Le, Denny Zhou, and 1 others. 2022. Chain-of-thought prompting elic-its reasoning in large language models. Advances in neural information processing systems , 35:24824– 24837. An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, and 1 others. 2025. Qwen3 technical report. arXiv preprint arXiv:2505.09388 .
+
+6Chengye Yu, Tianyu Wang, Zili Shao, and Song Jiang. 2025. Smartcache: Context-aware semantic cache for efficient multi-turn llm inference. In The Thirty-ninth Annual Conference on Neural Information Pro-cessing Systems .Haozhen Zhang, Tao Feng, and Jiaxuan You. 2025. Router-r1: Teaching llms multi-round routing and ag-gregation via reinforcement learning. In The Thirty-ninth Annual Conference on Neural Information Pro-cessing Systems .George Kingsley Zipf. 1949. Human Behavior and the Principle of Least Effort: An Introduction to Human Ecology . Addison-Wesley Press. 
+
+7A Related Work 
+
+A.1 Retrieval-Augmented Language Modeling 
+
+Retrieval-augmented generation (RAG) is a com-mon way to improve language models by letting them look up relevant information from an exter-nal collection of documents, and then using that retrieved text to help produce an answer (Lewis et al., 2020; Liu et al., 2024; Du et al., 2024; Mansurova et al., 2024). Early work explored dif-ferent ways to combine retrieval with generation, including training the retriever together with the language model (Guu et al., 2020), using retrieval to support open-domain question answering and other knowledge-intensive tasks (Lewis et al., 2020; Izacard et al., 2023), and scaling retrieval to very large datastores to improve language modeling and downstream performance (Borgeaud et al., 2022). A key advantage of these approaches is that knowl-edge can be updated by changing the document index, without having to retrain the model, and re-trieval can improve factual coverage without simply making the model larger (Guu et al., 2020; Lewis et al., 2020; Izacard et al., 2023). More recent work studies how to make retrieval easier to use in prac-tice. For example, some methods encourage the model to retrieve only when needed and to check whether the retrieved evidence actually supports the response (Asai et al., 2023). Overall, however, the main goal of RAG remains the same: improv-ing the quality of a single response by grounding it in external evidence. As a result, standard RAG typically does not focus on reusing previously gen-erated answers across users or sessions, nor does it explicitly support escalating to a stronger model when retrieval is insufficient. 
+
+A.2 Semantic Caching 
+
+Semantic caching extends classical caching to LLM services by reusing previous answers not only for exact duplicate queries, but also for queries that are semantically similar. In practice, a system stores past query-response pairs, represents queries with embeddings, and returns a cached response when a new query is close enough to an existing one, avoiding a full model call (Bang, 2023; Regmi and Pun, 2024; Li et al., 2024; Wang et al., 2025a). Recent work has shown that this can significantly reduce latency and cost in real deployments, since many user requests concentrate on a small set of recurring intents (Bang, 2023; Li et al., 2024). At the same time, semantic caching introduces new re-liability challenges. Because a false hit can directly harm correctness (e.g., returning an answer for a different but similar-looking question), while a false miss loses potential savings (Gill et al., 2025). This has motivated work on improving similarity matching and cache policies, including user-centric designs (Gill et al., 2025), context-aware caching for multi-turn interactions (Yu et al., 2025), and more principled formulations of cache management and eviction under unknown workloads (Liu et al., 2025). Overall, prior semantic caching research typically focuses on when to reuse cached outputs and how to manage the cache, but it often treats the fallback generation model and the caching layer as loosely coupled components (Bang, 2023; Li et al., 2024). 
+
+A.3 Routing in LLMs 
+
+A complementary line of work studies rout-ing across multiple LLMs to reduce inference cost (Chen et al., 2023; Ong et al., 2024; Zhang et al., 2025; Wang et al., 2025b; Fedus et al., 2022). The core idea is to maintain a pool of models with different cost-quality trade-offs and decide, for each query, which model to use. Many systems follow a cascade pattern: attempt a query with a cheaper model first and escalate to a stronger model only when needed, guided by a confidence or qual-ity estimate (Chen et al., 2023). More recent ap-proaches learn routing policies directly from pref-erence data so that routing decisions better match human judgments of quality while reducing expen-sive model calls (Ong et al., 2024). Beyond single-step routing, recent work also explores more adap-tive and sequential routing strategies. For example, some methods treat routing as a multi-round deci-sion process and train routers that interleave reason-ing with routing actions (Zhang et al., 2025). Other work considers routing in heterogeneous model pools where different models have complementary strengths, requiring robust routing strategies un-der distribution shift (Wang et al., 2025b). While routing methods are effective at reducing calls to the strongest model, they typically assume that each query is still handled by some model gen-eration pass and do not explicitly leverage cross-request answer reuse as a primary mechanism for efficiency (Chen et al., 2023; Ong et al., 2024). Separately, there is also extensive work on routing within a single model, such as mixture-of-experts architectures, which improves efficiency by acti-vating sparse components but addresses a different 8Component Hyperparameter Value Traffic simulation Workload distribution Zipfian Zipf exponent ( α) {0.8, 1.1, 1.4}                      
+
+> Number of requests ( N)5,000 Random seed 1
+> Associative Memory Engine Embedding model all-MiniLM-L6-v2
+> Similarity metric Cosine (FAISS inner product) Similarity threshold ( τ)0.95 Retrieval top-k3
+> LLM generation (MC) Temperature 0.0 Max generation tokens 4096 Frequency / presence penalty 0.0 Chat template kwargs "enable_thinking"=false
+> LLM generation (Oracle) Temperature 0.0 Max generation tokens 4096 Frequency / presence penalty 0.0
+> Environment Python version 3.10 NVIDIA driver 573.57 CUDA version 12.8
+
+Table 2: System and hyperparameter configuration for the continuous serving simulation. 
+
+level of the system stack (Fedus et al., 2022). 
+
+B Additional Implementation Details 
+
+To ensure reproducibility of our experiment runs, we attach the exact hyperparameters as found in Table 2 which we used across all experiments. All models were served using the vLLM library to op-timize for throughput and latency (Kwon et al., 2023). To ensure fair inference time comparisons, the Meta-Controller including the small LLM and the Associative Memory Engine and the Large LLM Oracle (solver) were each deployed on a ded-icated NVIDIA A100 80GB GPU. Both the Meta-Controller and the Large LLM Oracle are configured with Temperature = 0.0 to maintain deterministic responses. In addition the Oracle and the Router model had a 4,096 max to-kens setting to allow for 5-shot Chain-of-Thought reasoning. We use the Business category of the MMLU-Pro dataset and ground truth label answers as our benchmark for comparing the accuracy of the meta-controller (MC) with the Large LLM (Oracle). As the Business category contains 768 examples it is large enough to fit 5000 requests of the chosen Zipf distributions. 9
