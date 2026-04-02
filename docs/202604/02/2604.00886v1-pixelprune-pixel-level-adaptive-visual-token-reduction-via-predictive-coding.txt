@@ -1,0 +1,485 @@
+Title: PixelPrune: Pixel-Level Adaptive Visual Token Reduction via Predictive Coding
+
+URL Source: https://arxiv.org/pdf/2604.00886v1
+
+Published Time: Thu, 02 Apr 2026 01:03:34 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# PixelPrune: Pixel-Level Adaptive Visual Token Reduction via Predictive Coding 
+
+Nan Wang, Zhiwei Jin, Chen Chen, Haonan Lu 
+
+OPPO AI Center 
+
+{wangnan,jinzhiwei,chenchen4,luhaonan}@oppo.com 
+
+## Abstract 
+
+Document understanding and GUI interaction are among the highest-value ap-plications of Vision-Language Models (VLMs), yet they impose exceptionally heavy computational burden: fine-grained text and small UI elements demand high-resolution inputs that produce tens of thousands of visual tokens. We ob-serve that this cost is largely wasteful—across document and GUI benchmarks, only 22–71% of image patches are pixel-unique, the rest being exact duplicates of another patch in the same image. We propose PixelPrune , which exploits this pixel-level redundancy through predictive-coding-based compression, prun-ing redundant patches before the Vision Transformer (ViT) encoder. Because it operates in pixel space prior to any neural computation, PixelPrune acceler-ates both the ViT encoder and the downstream LLM, covering the full inference pipeline. The method is training-free, requires no learnable parameters, and sup-ports pixel-lossless compression ( τ =0 ) as well as controlled lossy compression (τ > 0). Experiments across three model scales and document and GUI benchmarks show that PixelPrune maintains competitive task accuracy while delivering up to 4.2 × inference speedup and 1.9 × training acceleration. Code is available at 
+
+https://github.com/OPPO-Mente-Lab/PixelPrune .
+
+## 1 Introduction 
+
+Vision-Language Models (VLMs) [Liu et al., 2023, Li et al., 2025a, Chen et al., 2024a,b, Bai et al., 2025a] achieve impressive performance across multimodal tasks by integrating visual encoders with large language models. However, their computational cost scales directly with the number of visual tokens processed during both training and inference. This cost is especially pronounced in document and GUI scenarios, which demand high-resolution inputs for fine-grained text rendering and small UI elements. This burden is further amplified by the growing adoption of NaViT-style vision encoders [Dehghani et al., 2023]—exemplified by the Qwen-VL series [Wang et al., 2024, Bai et al., 2025b,a, Qwen Team, 2026]—which process images at native resolution and can produce tens of thousands of patches per image. For example, a typical document page in DocVQA averages 1775 ×2082 pixels after preprocessing (Appendix A), producing over 14,000 ViT patches ( p=16 ) and roughly 3,600 LLM tokens after 2×2 merging; multi-page documents and multi-step GUI sessions multiply this further. Existing VLM token reduction methods primarily operate at the semantic or feature level—relying on attention-based pruning [Chen et al., 2024c, Yang et al., 2025], adaptive pruning-and-merging [Shang et al., 2024], or diversity-based selection [Alvar et al., 2025]. Most are designed for general-domain images [Shao et al., 2025]. In structured document and GUI domains, however, a more fundamental source of redundancy exists: the raw pixel content itself. Documents are dominated by white margins and uniform page backgrounds; GUI screenshots contain large solid-color panels, toolbars, and status bars—all of which produce many pixel-identical patches. As shown in Figure 1, large portions of patches correspond to such uniform regions. Our analysis across document and GUI benchmarks     
+
+> Preprint.
+> arXiv:2604.00886v1 [cs.CV] 1 Apr 2026 (a) Original (b) PixelPrune (70% reduction) (c) Original (d) PixelPrune (93% reduction)
+> Retained (representative patches) Dropped (predicted from neighbors)
+
+Figure 1: PixelPrune patch selection on a document image ( left ) and GUI screenshot ( right ). Kept patches are shown in original color; dropped patches are grayed out. Token reduction: 70% (docu-ment) and 93% (GUI). reveals that only 22–71% of patches are pixel-unique within each image, depending on the domain (Appendix A). This indicates that pixel-level content alone is a powerful signal for token reduction, eliminating redundancy at its source without learned representations. Moreover, most existing VLM acceleration methods focus exclusively on reducing the visual tokens processed by the LLM—through projector-based compression [Li et al., 2023, 2024], attention-based pruning [Chen et al., 2024c, He et al., 2024], or post-ViT merging [Shang et al., 2024, Alvar et al., 2025]—while leaving the ViT encoder’s cost untouched. Many are also validated primarily on fixed-resolution architectures (e.g., LLaVA [Liu et al., 2023]), where token counts are moderate. This is a significant blind spot: in NaViT-based VLMs, the ViT input sequence scales directly with image resolution, and its self-attention cost grows quadratically with the number of patches. As Figure 2 shows, the vision encoder accounts for the majority of prefill latency—up to 86% at 4096 2 resolution for Qwen3-VL-2B—and this fraction grows with resolution. Few methods attempt to reduce the ViT’s own input. A more direct approach is to prune visual tokens before they enter the ViT, thereby accelerating the entire pipeline from the start. We propose PixelPrune , which addresses this gap by applying predictive coding [Weinberger et al., 2000, Boutell, 1997]—the same principle underlying lossless formats such as PNG and JPEG-LS—at the patch level before vision encoding. Each patch is predicted from its causal spatial neighbors; if the prediction matches (within a threshold τ ), the patch is omitted as redundant. The method requires no learnable parameters and supports both pixel-lossless ( τ =0 ) and controlled lossy ( τ > 0) compression; it can be applied training-free for document understanding, or integrated into training pipelines to simultaneously accelerate training and improve efficiency (§4.3–4.4). Because it operates before the ViT, PixelPrune accelerates the entire pipeline—ViT encoder, patch merger, and LLM decoder—and is fully compatible with FlashAttention [Dao et al., 2022]. Our contributions are threefold: (1) we quantify the pervasive pixel-level patch redundancy in document and GUI images (Appendix A) and propose PixelPrune, a parameter-free method that exploits this redundancy for pre-ViT token reduction with theoretical recoverability guarantees (§3.3); (2) because PixelPrune operates before the ViT, it accelerates the entire inference pipeline— ViT encoder, patch merger, and LLM decoder—achieving up to 4.2 × end-to-end speedup; and (3) PixelPrune integrates seamlessly into training pipelines, delivering up to 1.9 × training acceleration while maintaining competitive accuracy across document and GUI benchmarks (§4.3–4.4). 
+
+## 2 Related Work 
+
+Token Reduction in Vision Transformers. Vision Transformers (ViT) [Dosovitskiy et al., 2021] treat images as patch sequences, but their quadratic attention complexity poses challenges for high-resolution inputs. MAE [He et al., 2022] shows that masking 75% of patches still permits accurate reconstruction, motivating a line of token reduction methods. Token pruning approaches such as DynamicViT [Rao et al., 2021] and EViT [Liang et al., 2022] remove uninformative tokens via learned importance scores or attention-based reorganization, while ToMe [Bolya et al., 2023] progressively 2512² 1024² 2048² 4096²          
+
+> Image Resolution
+> 10ms
+> 100ms
+> 1s
+> 10s
+> Inference Time (ms)
+> 38%
+> 77ms
+> 52%
+> 124ms
+> 72%
+> 631ms
+> 86%
+> 6.4s
+> (a) Qwen3-VL-2B
+> 512² 1024² 2048² 4096²
+> Image Resolution
+> 10ms
+> 100ms
+> 1s
+> 10s
+> 30%
+> 64ms
+> 38%
+> 163ms 54%
+> 828ms
+> 72%
+> 7.6s
+> (b) Qwen3-VL-4B
+> 512² 1024² 2048² 4096²
+> Image Resolution
+> 10ms
+> 100ms
+> 1s
+> 10s
+> 27%
+> 89ms
+> 34%
+> 247ms 53%
+> 1.3s
+> 75%
+> 11.9s
+> (c) Qwen3-VL-8B
+> Vision Encoder LLM Prefill
+
+Figure 2: Prefill latency breakdown across Qwen3-VL scales (2B, 4B, 8B) at five resolutions (256 2–4096 2, log scale). Each bar splits into Vision Encoder (red, including ViT and Patch Merger) and 
+
+LLM Prefill (blue). At 4096 2, the vision encoder accounts for 86%, 72%, and 75% of total prefill time for the 2B, 4B, and 8B models respectively. merges similar tokens through feature averaging. These methods operate on intermediate features, requiring forward-pass computation before pruning decisions can be made. Most related to our work, RLT [Choudhury et al., 2024] applies run-length encoding to video transformers along the temporal 
+
+dimension. While analogous to our Raster-mode prediction, RLT is limited to 1D temporal sequences; PixelPrune operates in the 2D spatial domain and introduces a predictive coding framework that exploits richer spatial redundancy, enabling exact patch compression before ViT feature extraction. 
+
+Efficient Vision-Language Models. VLMs [Liu et al., 2023, Bai et al., 2023, Wang et al., 2024] face efficiency challenges from high visual token counts. Existing methods reduce tokens at dif-ferent pipeline stages: (1) Projector-based : Q-Former [Li et al., 2023] and TokenPacker [Li et al., 2024] compress features before the LLM; (2) Post-ViT : LLaVA-PruMerge [Shang et al., 2024] and DivPrune [Alvar et al., 2025] prune or merge tokens after the vision encoder but before the LLM; (3) Inside-LLM : FastV [Chen et al., 2024c], ZipVL [He et al., 2024], and PyramidDrop [Xing et al., 2024] prune tokens based on decoder attention scores, which typically require materializing attention weights—at odds with FlashAttention [Dao et al., 2022]; (4) Multi-stage : MustDrop [Liu et al., 2024a] and LUVC [Zheng et al., 2025] reduce tokens across multiple stages. IPCV [Chen et al., 2025] takes a step further by compressing intermediate ViT features, partially reducing ViT cost but still requiring a forward pass through the early layers. All of the above operate at or after the feature level, leaving the full ViT encoder’s cost—which dominates prefill latency for small-to-medium VLMs (Figure 2)—largely unaddressed. PixelPrune instead exploits pixel redundancy before vision encoding. 
+
+Document and GUI Understanding. These domains feature high-resolution inputs and significant visual redundancy. While many models address the high-resolution challenge through architectural designs such as cropping, tiling, or dual encoders, few exploit the inherent pixel-level redundancy of these images for token reduction. Document models such as mPLUG-DocOwl [Hu et al., 2024a,b], TextMonkey [Liu et al., 2024b], and GOT-OCR [Wei et al., 2024] process high-resolution images for text recognition, often relying on cropping or tiling strategies that further inflate token counts. IndexPrune [Son et al., 2025] prunes tokens before the ViT but trains a neural predictor supervised by OCR annotations; PixelPrune requires no learned parameters or external annotations. For GUI agents, CogAgent [Hong et al., 2024] employs dual encoders, UI-TARS [Qin et al., 2025] scales up GUI interaction, Jedi [Xie et al., 2025] decomposes UI elements for grounding, and ShowUI [Lin et al., 2024] reduces tokens by identifying redundant regions during self-attention. ShowUI is closest in spirit to PixelPrune: both exploit spatial redundancy in GUI images, but ShowUI applies token skipping inside the ViT self-attention, still requiring a forward pass through the vision encoder; PixelPrune operates on raw pixels before the ViT, yielding savings across the entire pipeline. 
+
+## 3 Method 
+
+3.1 Preliminaries 
+
+We summarize the VLM visual pipeline using Qwen3-VL [Bai et al., 2025a] as a representative example, and highlight the architectural property that makes pre-ViT patch removal well-defined. 3Architecture overview. An input image is divided into N = ( H/p ) × (W/p ) non-overlapping patches of size p×p (p=16 ). Each patch Pi is projected to a Dv -dimensional embedding ei and paired with its 2D grid coordinate pi = ( ri, c i), which is injected via interpolated absolute posi-tional embeddings and 2D RoPE. The sequence {(ei, pi)}Ni=1 is processed by a Lv -layer ViT with 
+
+O(N 2Dv ) attention cost per layer, then spatially compressed by Patch Mergers ( M ×M grouping, 
+
+M =2 ; including DeepStack mergers at selected intermediate ViT layers) to Nm = N/M 2 tokens, which are concatenated with T text tokens to form the LLM input. In the LLM, spatial layout is encoded via MRoPE [Bai et al., 2025a], which assigns each visual token a 3D coordinate (temporal, height, width). Crucially, spatial information throughout the pipeline is determined by positional encodings rather than sequence order , so feeding a subset of patches while preserving their original coordinates is an architecturally supported operation. 
+
+3.2 PixelPrune: Patch Compression via Predictive Coding 
+
+Given N patch–position pairs {(Pi, pi)}Ni=1 , the goal is to identify a compact subset S ⊆ { 1, . . . , N }
+
+of patches to retain such that downstream task performance is preserved. As motivated in §1, document and GUI images exhibit extensive pixel-level redundancy, where large regions of uniform background produce many pixel-identical neighboring patches that carry no additional information. To systematically identify such patches, we draw on predictive coding from lossless image compres-sion: classical formats such as PNG [Boutell, 1997] and JPEG-LS [Weinberger et al., 2000] predict each pixel from its spatial neighbors and encode the prediction residual, which is typically small and thus highly compressible. We adapt this idea from individual pixels to M p ×M p patch blocks: when the residual is exactly zero (i.e., a patch block is identical to its prediction), the block is fully redundant and can be dropped entirely. We operate on M p × M p pixel blocks ( 32 ×32 for Qwen3-VL with ViT patch size p=16 and merge factor M =2 ), each corresponding to one LLM token after patch merging—the smallest independently removable unit. Blocks are scanned in a fixed order; each is predicted from its causal neighbors (those already visited) and omitted if the prediction matches. This formulation naturally provides an 
+
+exact recoverability guarantee (§3.3): a decoder applying the same prediction rule can reconstruct all omitted patches. Formally, for each patch Pr,c , PixelPrune omits it when the prediction is close enough: Omit (Pr,c ) = I dist (Pr,c , ˆPr,c ) ≤ τ  (1) where τ ≥ 0 controls matching strictness. The top-left patch (0 , 0) has no causal neighbor and is always retained as the initial anchor. 
+
+3.2.1 Prediction Strategy 
+
+The predictor ˆPr,c determines which spatial redundancy patterns can be captured. We consider three strategies that form a 1D-to-2D progression within the same predictive coding framework, differing only in scan order and prediction rule: 
+
+(i) Raster flattens the 2D grid into a 1D sequence in row-major order and predicts each patch from its immediate predecessor: ˆPi = Pi−1. It captures horizontal continuity within rows but misses cross-row redundancy, as the last patch of row r and the first of row r+1 are generally far apart spatially. 
+
+(ii) Serpentine also flattens the 2D grid into a 1D sequence but alternates scan direction between rows (left-to-right on even rows, right-to-left on odd rows), using the same single-neighbor predictor. The alternating direction makes the transition between consecutive rows spatially local, partially capturing vertical continuity. 
+
+(iii) Pred-2D scans in raster order but predicts each patch from three causal neighbors using a simple selection rule (analogous to the median-edge predictor in LOCO-I [Weinberger et al., 2000]). Let 
+
+A=Pr,c −1, B=Pr−1,c , and C=Pr−1,c −1 denote the left, upper, and upper-left neighbors (Figure 3): 
+
+ˆPr,c =
+
+
+
+A if C = B̸ = A (upper and upper-left agree ⇒ predict from left) 
+
+B if C = A̸ = B (left and upper-left agree ⇒ predict from upper) 
+
+A otherwise (default: predict from left) (2) 4C B                
+
+> AX
+> =
+> pred = A
+> C=B, C A
+> Upper & upper-left agree A
+> Skip (predicted)
+> CB
+> AX
+> =
+> pred = B
+> C=A, C B
+> Left & upper-left agree B
+> Skip (predicted)
+> CB
+> AX
+> pred = A
+> CA, C B
+> No agreement default A
+> Skip (predicted)
+> CB
+> AX
+> =
+> pred = A
+> Prediction fails
+> AXanchor
+> Keep (anchor)
+
+Figure 3: Illustration of PixelPrune’s Pred-2D prediction. For each target patch X, three causal neighbors— A (left), B (upper), C (upper-left)—determine the predicted patch ˆX. The rule selects the neighbor most likely to match X: when the upper and upper-left patches agree, the target is more likely to follow the left neighbor, and vice versa. If X matches its prediction, it is omitted; otherwise, it is retained. Intuitively, the rule picks the neighbor most likely to match the target by checking agreement among the three neighbors, simultaneously exploiting horizontal and vertical redundancy. All three strategies operate in O(N ) time and guarantee exact recoverability (§3.3), but differ in compression ratio due to the redundancy patterns each can capture. We compare them in §4.6 (Table 6) and adopt Pred-2D as the default, as it consistently achieves the lowest retain ratio while maintaining comparable accuracy. 
+
+3.2.2 Matching Criterion 
+
+The distance function dist and threshold τ jointly define when a prediction is “close enough” to justify omission. Our default is τ =0 , i.e., strict pixel equality: a patch is omitted only if it is identical to its prediction, directly mirroring lossless compression with zero information loss. This already achieves 30–80% token reduction on document and GUI images (§4.2–4.3). We extend to near-exact matching (τ > 0) in §3.3.1, where we analyze the choice of distance metric and threshold. 
+
+3.2.3 Position-Preserving Pipeline Integration 
+
+After predictive selection, only the |S| retained patch–position pairs {(Pk, pk)}k∈S enter the sub-sequent pipeline. Each retained token keeps its original 2D grid coordinate —rather than being re-indexed—so that positional encodings (2D RoPE in the ViT, MRoPE in the LLM) correctly reflect spatial layout throughout the model. Because fewer patches flow through every stage—ViT, Patch Merger, and LLM—the reduction yields end-to-end acceleration across the entire pipeline. 
+
+Computational overhead. The predictive coding pass requires O(N ) time with constant-time operations per patch—negligible relative to the ViT’s O(N 2) attention. At τ =0 (our default), pixel equality is transitive, so the entire operation can be vectorized on GPU with negligible latency. At 
+
+τ > 0, maintaining reconstruction state requires sequential processing (§3.3.1). 
+
+3.3 Theoretical Guarantees Proposition 1 (Exact Reconstruction) . For τ = 0 , the original patch sequence P = {P1, . . . , P N }
+
+is exactly recoverable from the compressed representation C = {(Pk, pk)}k∈S via a deterministic decoder that applies the same prediction rule in the same scan order. Proof sketch. By induction on scan order: the anchor (0 , 0) is always retained. For each subsequent position, omission occurs only when Pi = ˆPi; the decoder recomputes the identical prediction from already-recovered neighbors, yielding exact reconstruction. These guarantees hold at the pixel level; the ViT receives a shorter sequence, so its internal repre-sentations differ from the full-input case. We empirically confirm in §4.6.3 that pixel-level pruning before the ViT achieves comparable accuracy to token reduction applied at various ViT depths. 53.3.1 Extension to Near-Exact Matching 
+
+Setting τ > 0 extends PixelPrune beyond exact duplicates, allowing patches that differ by compression artifacts, sensor noise, or natural image gradients to be omitted as well. The prediction rule (§3.2.1) remains unchanged; only the acceptance criterion is relaxed from exact equality to bounded distance. A retained patch keeps its original value; an omitted patch is replaced by its predicted value at decode time. At τ =0 this distinction is moot, since omitted patches are identical to their predictions. At τ > 0,however, near-similarity is not transitive—a chain of pairwise-similar patches can drift arbitrarily. To prevent this, the encoder must use the predicted value (not the original) for each omitted patch when it serves as a neighbor for subsequent predictions, keeping encoder and decoder in identical state. This ensures the per-patch error is bounded: 
+
+Proposition 2 (Bounded Reconstruction Error) . For τ > 0, when the encoder uses predicted values for omitted neighbors, every omitted patch i / ∈ S satisfies dist( Pi, ˆPi) ≤ τ , where ˆPi is the prediction (which equals the decoder’s output for that patch). No error accumulates across patches. Proof sketch. Since encoder and decoder maintain identical state (both use predicted values for omitted patches), they compute identical predictions. An omitted patch satisfies dist( Pi, ˆPi) ≤ τ by construction; since the decoder outputs exactly ˆPi for that patch, the error is at most τ . We ablate the choice of distance metric (MAE vs. Max) and threshold in §4.6.2. 
+
+## 4 Experiments 
+
+We organize experiments along two axes: domain (document vs. GUI) and training regime (training-free → knowledge distillation → training from scratch). Section 4.2 establishes that PixelPrune works training-free on documents across three model scales. Section 4.3 extends to GUI, where training-free pruning leaves a gap on grounding tasks; knowledge distillation recovers most benchmarks but not all. Section 4.4 investigates this in a controlled from-scratch setting to isolate the effect of token reduction during training. Section 4.5 quantifies the resulting efficiency gains. Section 4.6 ablates key design choices across both domains. 
+
+4.1 Experimental Setup Models. We evaluate PixelPrune on the Qwen3-VL [Bai et al., 2025a] model family, using the 2B, 4B, and 8B Dense variants. Document experiments use all three scales; GUI experiments and ablations use 2B unless otherwise noted. 
+
+Benchmarks. We evaluate on two benchmark categories. Document understanding (7 benchmarks): DocVQA [Mathew et al., 2021], AI2D [Kembhavi et al., 2016], ChartQA [Masry et al., 2022], InfoVQA [Mathew et al., 2022], OCRBench [Liu et al., 2024c], MMLongBench-Doc [Ma et al., 2024], and olmOCRBench [Poznanski et al., 2025]. GUI understanding : ScreenSpot V2 [Wu et al., 2025] (Web, Mobile, Desktop) and ScreenSpot Pro [Li et al., 2025b] (Scientific, Office, OS, Creative, Development, CAD). 
+
+Baselines. We compare against four baselines. (1) Full retains all visual tokens, serving as the upper-bound reference. The remaining three operate under the same per-image token budget as PixelPrune. (2) Random randomly selects patches to match the budget. (3) ConnComp builds on ShowUI’s [Lin et al., 2024] connected-component strategy by constructing a 2D adjacency graph over pixel-identical patches and randomly retaining a subset per component to match the token budget. (4) Resize downsamples the input image to match the budget. Although orthogonal to patch selection and combinable with PixelPrune, we include it as an input-side compression baseline. 
+
+Implementation Details. All experiments use exact matching ( τ =0 ) at the 32 ×32 block granularity described in §3.2. We use the default Qwen3-VL resolution settings ( min_pixels =256 ×256 ,
+
+max_pixels =4096 ×4096 ). Inference experiments use 8 NVIDIA H20 GPUs with batch size 1 and greedy decoding ( max_new_tokens =16,384 for olmOCRBench, 512 otherwise). Accuracy is evaluated using VLMEvalKit [Duan et al., 2024]. 
+
+GUI Training. All GUI training experiments share the same data source: the coordinate-containing subset filtered from Jedi [Xie et al., 2025], with absolute coordinates converted to relative format for Qwen3-VL compatibility. Training uses NVIDIA H20 GPUs with DeepSpeed ZeRO-2 [Rajbhandari 6Table 1: Training-free results on Document Understanding Benchmarks (%). Numbers in parentheses show PixelPrune’s dataset-level retain ratio; all baselines use the same per-image token budget.                                                                                                                                        
+
+> Model Method OCRBench DocVQA InfoVQA ChartQA AI2D MML-Doc olmOCR Avg
+> (66.1%) (70.1%) (76.7%) (73.1%) (69.2%) (50.3%) (56.9%) Qwen3-VL-2B Full 86.9 92.7 72.3 78.8 76.6 28.1 48.9 69.2 Resize 86.1 92.3 72.0 76.9 76.5 26.3 47.8 68.3
+> Random 76.0 66.8 62.9 57.3 72.2 17.0 34.7 55.3 ConnComp 77.2 80.5 66.1 62.8 73.9 18.4 37.2 59.4
+> PixelPrune 87.3 92.0 71.5 77.0 75.8 26.5 48.0 68.3
+> Qwen3-VL-4B Full 88.1 94.8 79.5 82.9 82.8 36.7 54.0 74.1 Resize 87.6 94.7 79.9 82.2 81.6 30.9 53.1 72.8 Random 76.9 70.2 70.4 64.6 78.5 20.0 37.9 59.8 ConnComp 78.2 84.4 73.5 70.0 79.2 23.8 41.5 64.4
+> PixelPrune 88.0 94.7 79.2 82.4 81.7 36.3 53.8 73.7
+> Qwen3-VL-8B Full 90.6 95.7 83.1 83.4 82.7 38.0 54.7 75.5 Resize 90.2 95.5 83.2 82.7 82.9 37.1 53.9 75.1 Random 79.9 72.8 75.5 66.0 79.4 23.5 40.0 62.4 ConnComp 82.2 86.3 77.5 67.8 80.7 26.9 43.2 66.4
+> PixelPrune 90.4 95.5 82.8 82.9 82.8 38.2 54.3 75.3
+
+et al., 2020], FlashAttention-2 [Dao et al., 2022], gradient checkpointing, and data packing. Individual experiments differ in training scale (steps, GPU count) and loss function, as specified in each subsection. Detailed training configurations are provided in Appendix B. 
+
+Retain Ratio. We report dataset-level retention ratios, P 
+
+> i
+
+|S i|/ P 
+
+> i
+
+Ni, where Si and Ni denote the retained and total visual tokens for the i-th image, which better reflects actual compute savings than sample-level averages—the latter are biased toward low-resolution images that contribute few tokens. 
+
+4.2 Training-Free Evaluation on Document Understanding 
+
+Table 1 presents results on 7 document understanding benchmarks across three model scales. First ,PixelPrune consistently matches or outperforms all baselines under the same per-image token budget. While Resize achieves reasonable accuracy via resolution scaling, PixelPrune matches or exceeds it at every scale (e.g., 73.7 vs. 72.8 Avg at 4B), confirming that PixelPrune preserves fine-grained details lost by resolution scaling. Random and ConnComp suffer substantial degradation (e.g., 59.8 and 64.4 vs. 73.7 Avg at 4B), showing that accurate redundancy identification is critical for effective token reduction. Second , retention ratios vary substantially across benchmarks—MMLongBench-Doc and olmOCRBench retain 50–57% of tokens, while InfoVQA and ChartQA retain 73–77%—reflecting domain-specific levels of pixel redundancy. Third , the accuracy gap remains small across all scales: at 8B, PixelPrune achieves 75.3 Avg versus 75.5 for Full—a 0.2-point gap with significant token reduction. These results generalize to Qwen3.5 [Qwen Team, 2026] with ≤0.8% Avg gap across three scales (Appendix C). 
+
+4.3 Post-Training Adaptation on GUI Understanding 
+
+We evaluate on the 9 GUI benchmarks with the same four baselines on Qwen3-VL-2B. We com-pare two settings: Training-Free applies PixelPrune directly without fine-tuning; +KD recovers the accuracy gap of training-free pruning on position-sensitive grounding tasks via knowledge distillation [Hinton et al., 2015], where the same model’s full-token output serves as the teacher: 
+
+L = LCE + LKL (ppred ∥pfull ).Table 2 presents results. GUI images exhibit higher redundancy than documents, with notably lower retention ratios (Web 39.7%, Mobile 49.1%, Desktop 61.9%). ScreenSpot Pro reveals domain-specific variation: Scientific interfaces are most compressible (26.3% retention), while Development, CAD, and OS retain 61–66%. Resize suffers a significant drop on Pro (50.2 →43.4 Avg), particularly on Scientific (53.2 →37.4), where resolution scaling blurs fine-grained text critical for grounding. In contrast, PixelPrune (+KD) comes within 2.6 points of Full on Pro (47.6 vs. 50.2) while matching Full on V2 (90.6 vs. 90.6), demonstrating the advantage of adaptive selection for position-sensitive tasks. KD recovery varies across Pro sub-tasks: Office and Scientific recover well, while CAD drops from 40.2 to 30.3, likely due to sparse CAD-style data in the training set. 7Table 2: Post-training results on GUI Understanding Benchmark (Qwen3-VL-2B). We report ground-ing accuracy (%). Numbers in parentheses show the dataset-level retain ratio. We additionally report PixelPrune (+KD) with knowledge distillation.                                                                                       
+
+> ScreenSpot V2 ScreenSpot Pro Method Web Mobile Desktop Avg Dev. Creative CAD Sci. Office OS Avg
+> (39.7%) (49.1%) (61.9%) (64.3%) (59.0%) (65.6%) (26.3%) (56.4%) (61.9%) Full 88.1 92.0 91.6 90.6 45.8 41.6 40.2 53.2 70.4 50.0 50.2 Resize 87.4 91.6 88.0 89.0 44.1 38.4 37.2 37.4 62.2 41.3 43.4 Random 48.5 62.7 68.0 59.7 29.4 24.6 26.4 12.6 37.8 29.6 26.8 ConnComp 69.8 82.0 75.1 75.7 35.8 27.9 28.7 22.1 47.8 31.1 32.2 PixelPrune 72.1 86.2 85.9 81.4 37.8 28.5 35.3 21.3 55.7 40.3 36.5
+> PixelPrune (+KD) 87.6 92.4 91.6 90.6 50.5 41.9 30.3 52.8 68.7 41.3 47.6
+
+Table 3: Training from scratch results on GUI Understanding (Qwen3-VL-2B). “PixelPrune → Full” = trained with PixelPrune, evaluated with full tokens.                                                  
+
+> ScreenSpot V2 ScreenSpot Pro Train Infer Web Mobile Desktop Avg Dev. Creative CAD Sci. Office OS Avg
+> Full Full 79.9 81.6 83.8 81.8 31.8 26.7 15.3 35.0 49.6 30.6 31.5 PixelPrune PixelPrune 79.9 85.6 88.9 84.8 30.8 27.3 15.7 34.6 52.6 27.6 31.4 PixelPrune Full 80.6 86.0 88.6 85.1 30.4 27.9 16.1 35.0 50.4 29.6 31.6
+
+4.4 Training from Scratch on GUI Understanding 
+
+To isolate the effect of token reduction during training—independent of the pre-trained model’s capability and training data in Section 4.3—we train a 2B-scale model from scratch on the same Jedi data, replacing the language model of Qwen3-VL-2B-Instruct with Qwen3-1.7B-Instruct and standard cross-entropy loss (no KD). We compare three configurations: Full →Full (standard training and inference), PixelPrune →PixelPrune (compressed tokens for both), and PixelPrune →Full 
+
+(compressed training, full inference). Training efficiency is reported in Section 4.5.2. Table 3 reveals two findings. First, PixelPrune →PixelPrune achieves competitive accuracy, showing that token reduction during training does not significantly degrade performance (detailed conver-gence curves in Appendix D). Second, PixelPrune →Full achieves comparable or slightly better performance than Full →Full (SSv2 Avg: 85.1 vs. 81.8), demonstrating cross-mode generalization. We hypothesize that training with compressed tokens may encourage the model to extract informa-tion from salient patches, though the effect is small and could partly reflect variance; we leave a rigorous investigation to future work. This cross-mode compatibility offers deployment flexibility: a single checkpoint can serve low-latency (with PixelPrune) or maximum-accuracy (with full tokens) scenarios. 
+
+4.5 Efficiency Analysis 4.5.1 Inference Efficiency 
+
+Table 4 reports prefill-stage efficiency on two benchmarks that span opposite ends of the spectrum: ScreenSpot Pro Scientific (single-page, 26.2% retention) and MMLongBench-Doc (multi-page, 50.3% retention with up to dozens of pages per sample). We measure on 8 NVIDIA H20 GPUs (batch size 1), discarding the first sample per GPU to exclude warmup. Across this range, PixelPrune achieves 3.0–4.2 × TTFT speedup, 3.5–6.6 × FLOPs reduction, and 45–63% KV cache memory savings, while per-sample selector overhead remains negligible (see Selector column). These gains come from reduced computation across all three stages—ViT encoder, Patch Merger, and LLM—with the ViT attention saving being roughly quadratic in the pruning ratio (detailed derivations in Appendix E). 
+
+4.5.2 Training Efficiency 
+
+Because PixelPrune operates at the input level, it is fully compatible with standard training opti-mizations such as FlashAttention, enabling direct application during training. Table 5 reports the efficiency measured during the from-scratch experiment in Section 4.4. With 40.8% average retention, PixelPrune achieves 2.0 × speedup on both forward and backward passes, cutting wall-clock time from 49.1 h to 25.3 h ( 1.9 ×) and peak GPU memory by 33.6% (57.8 →38.4 GB). The modest gap 8Table 4: Inference efficiency on Qwen3-VL-2B (batch size 1, H20 GPU). MML-Doc: MMLongBench-Doc; SS-Pro Sci.: ScreenSpot Pro Scientific. Selector: per-sample overhead of the pixel-level selector. Speedup factors are relative to the Full baseline.                                                   
+
+> Selector Retain FLOPs ViT Lat. TTFT KV Cache FLOPs TTFT Dataset Method (ms) (%) (TFLOPs) (ms) (ms) (GB) Speedup Speedup MML-Doc Full –100.0 2694 4898 18477 13.2 1.0 ×1.0 ×
+> PixelPrune 19.1 50.3 762 2143 6114 7.2 3.5 ×3.0 ×
+> SS-Pro Sci. Full –100.0 70 625 833 0.8 1.0 ×1.0 ×
+> PixelPrune 1.2 26.2 11 115 198 0.3 6.6 ×4.2 ×
+
+Table 5: Training efficiency measured during the from-scratch experiment in Section 4.4. Speedup is relative to Full.                     
+
+> Method Retain Forward (s) Backward (s) Peak Mem (GB) Wall Time (h)
+> Full 100.0% 7.9 35.3 57.8 49.1 PixelPrune 40.8% 3.9 18.0 38.4 25.3
+> Speedup –2.0 ×2.0 ×↓33.6% 1.9 ×
+
+between per-step and wall-clock speedup reflects fixed-cost components (data loading, gradient synchronization) that are unaffected by token count. The 19.4 GB memory reduction can be traded for larger batch sizes or longer sequences on the same hardware. 
+
+4.6 Ablation Studies 
+
+Unless otherwise noted, all ablations use Qwen3-VL-2B on six benchmarks: DocVQA, InfoVQA, and ChartQA (document, training-free) and ScreenSpot V2 Web/Mobile/Desktop (GUI, fine-tuned at a smaller scale than §4.3; see Appendix B). 
+
+4.6.1 Comparison of Prediction Strategies 
+
+We compare Raster (1D row-major scan), Serpentine (alternating row direction), and Pred-2D (neighbor-selective 2D prediction). All guarantee exact recoverability with O(N ) complexity. Table 6 reports retain ratio and accuracy. The strategies form a 1D-to-2D progression. Serpentine improves over Raster by making row transitions spatially local, yielding modest retention reductions (e.g., ChartQA 76 .7→74 .9%). Pred-2D further lowers retention by additionally exploiting vertical redundancy, with the largest gains on GUI benchmarks where rectangular panels span multiple rows (e.g., GUI-Web 42 .5→39 .7%, GUI-Desktop 64 .4→61 .9%). Despite the progressive compression gains, all three strategies achieve comparable accuracy, confirming that the predictor design primarily affects compression efficiency rather than downstream task performance. We therefore adopt Pred-2D as the default for the best compression–accuracy trade-off. 
+
+4.6.2 Effect of Matching Threshold 
+
+We compare two distance metrics—MAE (mean absolute error) and Max (maximum per-pixel difference), both normalized to [0 , 1] —across several thresholds τ (Table 8). At τ =0 (exact matching), accuracy is already competitive with all τ > 0 configurations on most benchmarks. When τ > 0, Max consistently outperforms MAE, which degrades rapidly as it averages per-pixel differences and masks critical outliers (e.g., ChartQA 76.6% vs 43.5% at τ =0 .05 ). Max maintains strong accuracy even at high compression: at τ =0 .10 , DocVQA retention drops to 45.1% with less than 1% accuracy loss. ChartQA is the most sensitive to τ , as chart understanding requires spatial layout reasoning beyond pure text recognition. This suggests that fine-tuning with PixelPrune may be needed for such tasks under aggressive pruning. We further evaluate on general-domain images in Appendix F, covering both exact and near-exact matching. 9Table 6: Comparison of prediction strategies. 
+
+Document GUI DocVQA InfoVQA ChartQA Web Mobile Desktop Method Ret. Acc. Ret. Acc. Ret. Acc. Ret. Acc. Ret. Acc. Ret. Acc. 
+
+Raster 70.1 92.0 77.8 71.4 76.7 77.6 42.5 87.2 50.5 91.8 64.4 90.1 
+
+Serpentine 70.0 92.1 77.4 71.2 74.9 77.1 41.8 88.6 50.1 91.2 64.1 88.9 
+
+Pred-2D 70.1 92.0 76.7 71.5 73.1 77.0 39.7 86.5 49.1 92.2 61.9 90.1 
+
+Table 8: Distance metrics and thresholds. Document = training-free; GUI = +KD model from Section 4.3. τ is normalized to [0 , 1] .                                                                                                                                            
+
+> Document GUI DocVQA InfoVQA ChartQA Web Mobile Desktop Distance τRet. Acc. Ret. Acc. Ret. Acc. Ret. Acc. Ret. Acc. Ret. Acc.
+> Full (100%) 100 92.7 100 72.3 100 78.8 100 88.1 100 92.0 100 91.6 Exact ( τ=0) 70.1 92.0 76.7 71.5 73.1 77.0 39.7 87.6 49.1 92.4 61.9 91.6 MAE 0.005 61.8 92.0 66.7 70.4 53.1 74.4 36.0 87.4 35.9 92.2 42.7 91.6 0.020 37.0 90.9 56.9 68.4 35.0 69.4 31.3 86.7 27.1 91.2 30.7 88.9 0.050 28.6 86.8 47.1 65.8 23.3 43.5 25.7 81.2 20.6 88.2 23.3 82.0 0.100 21.2 69.5 35.1 55.4 13.2 25.8 17.8 63.2 14.4 79.6 14.9 59.6 Max 0.005 69.8 92.1 75.5 71.2 72.6 77.2 39.2 87.9 44.7 92.4 53.9 91.0 0.020 66.1 91.8 71.7 71.6 69.3 76.4 38.0 87.9 38.2 92.6 45.7 91.6 0.050 53.1 91.8 68.0 71.1 62.2 76.6 37.1 88.3 34.4 92.2 40.1 91.9 0.100 45.1 91.7 62.4 70.5 56.8 74.8 35.8 87.9 30.1 92.0 35.9 93.1
+
+4.6.3 Token Reduction at Different ViT Depths 
+
+We ablate the pruning position within the Qwen3-VL-2B ViT encoder (24 blocks; DeepStack at blocks 5, 11, 17). All settings apply the same retain mask at different depths—after the 0th, 4th, 17th, or final ViT block, or before the ViT (PixelPrune default)—so the retained tokens share the same spatial positions but carry features from different depths. Table 7: Token reduction at different ViT depths.                                      
+
+> Doc. GUI Depth Doc Info Chart Web Mob. Desk.
+> After ViT 92.2 71.0 76.8 88.1 92.2 90.4 After 17th 91.9 71.1 76.1 86.7 92.4 92.2
+> After 4th 92.2 71.4 77.0 89.9 92.6 89.8 After 0th 92.1 71.3 76.9 86.7 93.0 90.4
+> Before ViT 92.0 71.5 77.0 86.5 92.2 90.1
+
+Table 7 reveals two findings. First , accuracy is largely insensitive to pruning depth: no single layer consistently dominates, and PixelPrune (be-fore ViT) performs on par with all post-ViT vari-ants despite the latter preserving richer learned features for the kept tokens. For structured im-ages, which patches to keep matters more than 
+
+where in the network they are pruned. Second ,earlier pruning yields greater computational sav-ings. After-ViT/17th/4th/0th pruning saves 0%/29%/83%/96% of ViT FLOPs for removed tokens, respectively; only PixelPrune (before ViT) saves 100%, delivering full-pipeline acceleration. 
+
+## 5 Conclusion 
+
+We presented PixelPrune, a pixel-level adaptive patch pruning method that removes redundant visual tokens before the ViT encoder via 2D predictive coding. On document benchmarks, PixelPrune matches full-token accuracy with 23–50% token reduction across three model scales without any training; on GUI benchmarks, light post-training and training-from-scratch settings recover the accu-racy gap while delivering significant training acceleration. Across document and GUI benchmarks, PixelPrune achieves up to 4.2 × inference speedup, 1.9 × training acceleration, and 33.6% memory reduction, while adapting gracefully to general-domain images (Appendix F). 10 References 
+
+Haotian Liu, Chunyuan Li, Qingyang Wu, and Yong Jae Lee. Visual instruction tuning. In NeurIPS ,2023. Bo Li, Yuanhan Zhang, Dong Guo, Renrui Zhang, Feng Li, Hao Zhang, Kaichen Zhang, Peiyuan Zhang, Yanwei Li, Ziwei Liu, and Chunyuan Li. Llava-onevision: Easy visual task transfer. TMLR ,2025a. Zhe Chen, Jiannan Wu, Wenhai Wang, Weijie Su, Guo Chen, Sen Xing, Muyan Zhong, Qinglong Zhang, Xizhou Zhu, Lewei Lu, et al. Internvl: Scaling up vision foundation models and aligning for generic visual-linguistic tasks. In CVPR , 2024a. Zhe Chen, Weiyun Wang, Yue Cao, Yangzhou Liu, Zhangwei Gao, Erfei Cui, Jinguo Zhu, Shenglong Ye, Hao Tian, Zhaoyang Liu, et al. Expanding performance boundaries of open-source multimodal models with model, data, and test-time scaling. arXiv preprint arXiv:2412.05271 , 2024b. Shuai Bai, Yuxuan Cai, Ruizhe Chen, Keqin Chen, Xionghui Chen, Zesen Cheng, Lianghao Deng, Wei Ding, Chang Gao, Chunjiang Ge, Wenbin Ge, Zhifang Guo, Qidong Huang, Jie Huang, Fei Huang, Binyuan Hui, Shutong Jiang, Zhaohai Li, Mingsheng Li, Mei Li, Kaixin Li, Zicheng Lin, Junyang Lin, Xuejing Liu, Jiawei Liu, Chenglong Liu, Yang Liu, Dayiheng Liu, Shixuan Liu, Dunjie Lu, Ruilin Luo, Chenxu Lv, Rui Men, Lingchen Meng, Xuancheng Ren, Xingzhang Ren, Sibo Song, Yuchong Sun, Jun Tang, Jianhong Tu, Jianqiang Wan, Peng Wang, Pengfei Wang, Qiuyue Wang, Yuxuan Wang, Tianbao Xie, Yiheng Xu, Haiyang Xu, Jin Xu, Zhibo Yang, Mingkun Yang, Jianxin Yang, An Yang, Bowen Yu, Fei Zhang, Hang Zhang, Xi Zhang, Bo Zheng, Humen Zhong, Jingren Zhou, Fan Zhou, Jing Zhou, Yuanzhi Zhu, and Ke Zhu. Qwen3-vl technical report, 2025a. URL https://arxiv.org/abs/2511.21631 .Mostafa Dehghani, Basil Mustafa, Josip Djolonga, Jonathan Heek, Matthias Minderer, Mathilde Caron, Andreas Steiner, Joan Puigcerver, Robert Geirhos, Ibrahim M Alabdulmohsin, et al. Patch n’ pack: Navit, a vision transformer for any aspect ratio and resolution. In NeurIPS , 2023. Peng Wang, Shuai Bai, Sinan Tan, Shijie Wang, Zhihao Fan, Jinze Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin Ge, et al. Qwen2-vl: Enhancing vision-language model’s perception of the world at any resolution. arXiv preprint arXiv:2409.12191 , 2024. Shuai Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin Ge, Sibo Song, Kai Dang, Peng Wang, Shijie Wang, Jun Tang, et al. Qwen2.5-vl technical report. arXiv preprint arXiv:2502.13923 ,2025b. Qwen Team. Qwen3.5: Towards native multimodal agents, February 2026. URL https://qwen. ai/blog?id=qwen3.5 .Liang Chen, Haozhe Zhao, Tianyu Liu, Shuai Bai, Junyang Lin, Chang Zhou, and Baobao Chang. An image is worth 1/2 tokens after layer 2: Plug-and-play inference acceleration for large vision-language models. In ECCV , 2024c. Senqiao Yang, Yukang Chen, Zhuotao Tian, Chengyao Wang, Jingyao Li, Bei Yu, and Jiaya Jia. Visionzip: Longer is better but not necessary in vision language models. In CVPR , 2025. Yuzhang Shang, Mu Cai, Bingxin Xu, Yong Jae Lee, and Yan Yan. Llava-prumerge: Adaptive token reduction for efficient large multimodal models. arXiv preprint arXiv:2403.15388 , 2024. Saeed Ranjbar Alvar, Gursimran Singh, Mohammad Akbari, and Yong Zhang. Divprune: Diversity-based visual token pruning for large multimodal models. In CVPR , 2025. Kele Shao, Keda Tao, Kejia Zhang, Sicheng Feng, Mu Cai, Yuzhang Shang, Haoxuan You, Can Qin, Yang Sui, and Huan Wang. A survey of token compression for efficient multimodal large language models. arXiv preprint arXiv:2507.20198 , 2025. Junnan Li, Dongxu Li, Silvio Savarese, and Steven Hoi. Blip-2: Bootstrapping language-image pre-training with frozen image encoders and large language models. In ICML , 2023. 11 Wentong Li, Yuqian Yuan, Jian Liu, Dongqi Tang, Song Wang, Jie Qin, Jianke Zhu, and Lei Zhang. Tokenpacker: Efficient visual projector for multimodal llm. arXiv preprint arXiv:2407.02392 ,2024. Yefei He, Feng Chen, Jing Liu, Wenqi Shao, Hong Zhou, Kaipeng Zhang, and Bohan Zhuang. Zipvl: Efficient large vision-language models with dynamic token sparsification. arXiv preprint arXiv:2410.08584 , 2024. Marcelo J. Weinberger, Gadiel Seroussi, and Guillermo Sapiro. The LOCO-I lossless image com-pression algorithm: Principles and standardization into JPEG-LS. IEEE Transactions on Image Processing , 9(8):1309–1324, 2000. Thomas Boutell. PNG (portable network graphics) specification version 1.0. RFC , 2083:1–102, 1997. doi: 10.17487/RFC2083. Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. FlashAttention: Fast and memory-efficient exact attention with IO-awareness. In NeurIPS , 2022. Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, et al. An image is worth 16x16 words: Transformers for image recognition at scale. In ICLR , 2021. Kaiming He, Xinlei Chen, Saining Xie, Yanghao Li, Piotr Dollár, and Ross Girshick. Masked autoencoders are scalable vision learners. In CVPR , 2022. Yongming Rao, Wenliang Zhao, Benlin Liu, Jiwen Lu, Jie Zhou, and Cho-Jui Hsieh. Dynamicvit: Efficient vision transformers with dynamic token sparsification. In NeurIPS , 2021. Youwei Liang, Chongjian Ge, Zhan Tong, Yibing Song, Jue Wang, and Pengtao Xie. Not all patches are what you need: Expediting vision transformers via token reorganizations. In ICLR , 2022. Daniel Bolya, Cheng-Yang Fu, Xiaoliang Dai, Peizhao Zhang, Christoph Feichtenhofer, and Judy Hoffman. Token merging: Your vit but faster. In ICLR , 2023. Rohan Choudhury, Guanglei Zhu, Sihan Liu, Koichiro Niinuma, Kris M. Kitani, and László Jeni. Don’t look twice: Faster video transformers with run-length tokenization. arXiv preprint arXiv:2411.05222 , 2024. Jinze Bai, Shuai Bai, Shusheng Yang, Shijie Wang, Sinan Tan, Peng Wang, Junyang Lin, Chang Zhou, and Jingren Zhou. Qwen-vl: A versatile vision-language model for understanding, localization, text reading, and beyond. arXiv preprint arXiv:2308.12966 , 2023. Long Xing, Qidong Huang, Xiaoyi Dong, Jiajie Lu, Pan Zhang, Yuhang Zang, Yuhang Cao, Conghui He, Jiaqi Wang, Feng Wu, and Dahua Lin. Pyramiddrop: Accelerating your large vision-language models via pyramid visual redundancy reduction. arXiv preprint arXiv:2410.17247 , 2024. Ting Liu, Liangtao Shi, Richang Hong, Yue Hu, Quanjun Yin, and Linfeng Zhang. Multi-stage vision token dropping: Towards efficient multimodal large language model. arXiv preprint arXiv:2411.10803 , 2024a. Dehua Zheng, Mouxiao Huang, Borui Jiang, Hailin Hu, and Xinghao Chen. Towards lossless ultimate vision token compression for vlms. arXiv preprint arXiv:2512.09010 , 2025. Yuan Chen, Zichen Wen, Yuzhou Wu, Xuyang Liu, Shuang Chen, Junpeng Ma, Weijia Li, Conghui He, and Linfeng Zhang. IPCV: Information-preserving compression for MLLM visual encoders. 
+
+arXiv preprint arXiv:2512.18747 , 2025. Anwen Hu, Haiyang Xu, Jiabo Ye, Ming Yan, Liang Zhang, Bo Zhang, Chen Li, Ji Zhang, Qin Jin, Fei Huang, and Jingren Zhou. mplug-docowl 1.5: Unified structure learning for ocr-free document understanding. In Findings of EMNLP , 2024a. Anwen Hu, Haiyang Xu, Liang Zhang, Jiabo Ye, Ming Yan, Ji Zhang, Qin Jin, Fei Huang, and Jingren Zhou. mplug-docowl2: High-resolution compressing for ocr-free multi-page document understanding. arXiv preprint arXiv:2409.03420 , 2024b. 12 Yuliang Liu, Biao Yang, Qiang Liu, Zhang Li, Zhiyin Ma, Shuo Zhang, and Xiang Bai. Textmonkey: An ocr-free large multimodal model for understanding document. arXiv preprint arXiv:2403.04473 ,2024b. Haoran Wei, Chenglong Liu, Jinyue Chen, Jia Wang, Lingyu Kong, Yanming Xu, Zheng Ge, Liang Zhao, Jianjian Sun, Yuang Peng, Chunrui Han, and Xiangyu Zhang. General ocr theory: Towards ocr-2.0 via a unified end-to-end model. arXiv preprint arXiv:2409.01704 , 2024. Jaemin Son, Sujin Choi, and Inyong Yun. Index-preserving lightweight token pruning for efficient document understanding in vision-language models. CoRR , abs/2509.06415, 2025. Wenyi Hong, Weihan Wang, Qingsong Lv, Jiazheng Xu, Wenmeng Yu, Junhui Ji, Yan Wang, Zihan Wang, Yuxuan Zhang, Juanzi Li, et al. Cogagent: A visual language model for gui agents. In 
+
+CVPR , 2024. Yujia Qin, Yining Ye, Junjie Fang, Haoming Wang, Shihao Liang, Shizuo Tian, Junda Zhang, Jiahao Li, Yunxin Li, Shijue Huang, et al. Ui-tars: Pioneering automated gui interaction with native agents. arXiv preprint arXiv:2501.12326 , 2025. Tianbao Xie, Jiaqi Deng, Xiaochuan Li, Junlin Yang, Haoyuan Wu, Jixuan Chen, Wenjing Hu, Xinyuan Wang, Yuhui Xu, Zekun Wang, Yiheng Xu, Junli Wang, Doyen Sahoo, Tao Yu, and Caiming Xiong. Scaling computer-use grounding via user interface decomposition and synthesis. 
+
+arXiv preprint arXiv:2505.13227 , 2025. Kevin Qinghong Lin, Linjie Li, Difei Gao, Zhengyuan Yang, Shiwei Wu, Zechen Bai, Weixian Lei, Lijuan Wang, and Mike Zheng Shou. Showui: One vision-language-action model for gui visual agent. arXiv preprint arXiv:2411.17465 , 2024. Minesh Mathew, Dimosthenis Karatzas, and CV Jawahar. Docvqa: A dataset for vqa on document images. In WACV , 2021. Aniruddha Kembhavi, Mike Salvato, Eric Kolve, Minjoon Seo, Hannaneh Hajishirzi, and Ali Farhadi. A diagram is worth a dozen images. In ECCV , 2016. Ahmed Masry, Xuan Long Do, Jia Qing Tan, Shafiq Joty, and Enamul Hoque. Chartqa: A benchmark for question answering about charts with visual and logical reasoning. In ACL Findings , 2022. Minesh Mathew, Viraj Bagal, Rubèn Tito, Dimosthenis Karatzas, Ernest Valveny, and C.V. Jawahar. Infographicvqa. In WACV , 2022. Yuliang Liu, Zhang Li, Mingxin Huang, Biao Yang, Wenwen Yu, Chunyuan Li, Xucheng Yin, Cheng-lin Liu, Lianwen Jin, and Xiang Bai. Ocrbench: On the hidden mystery of ocr in large multimodal models. Science China Information Sciences , 2024c. Yubo Ma, Yuhang Zang, Liangyu Chen, Meiqi Chen, Yizhu Jiao, Xinze Li, Xinyuan Lu, Ziyu Liu, Yan Ma, Xiaoyi Dong, Pan Zhang, Liangming Pan, Yu-Gang Jiang, Jiaqi Wang, Yixin Cao, and Aixin Sun. Mmlongbench-doc: Benchmarking long-context document understanding with visualizations. In NeurIPS , 2024. Jake Poznanski, Jon Borchardt, Jason Dunkelberger, Regan Huff, Daniel Lin, Aman Rangapur, Luca Soldaini, Kyle Lo, and Chris Wilhelm. olmocr: Unlocking trillions of tokens in pdfs with vision language models. arXiv preprint arXiv:2502.18443 , 2025. Zhilong Wu, Ziyang Meng, Kaixin Li, Hongzhan Lin, Ziyang Luo, Yuchen Tian, Jing Ma, Zhiyong Huang, and Tat-Seng Chua. Screenspot-v2: Towards robust gui grounding via multi-domain web data. arXiv preprint arXiv:2507.07768 , 2025. Kaixin Li, Ziyang Meng, Hongzhan Lin, Ziyang Luo, Yuchen Tian, Jing Ma, Zhiyong Huang, and Tat-Seng Chua. Screenspot-pro: Gui grounding for professional high-resolution computer use. In 
+
+ACM MM , 2025b. Haodong Duan, Xinyu Fang, Junming Yang, et al. VLMEvalKit: An open-source toolkit for evaluating large multi-modality models. arXiv preprint arXiv:2407.11691 , 2024. 13 Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, and Yuxiong He. Zero: Memory optimizations toward training trillion parameter models. In SC , 2020. Geoffrey E. Hinton, Oriol Vinyals, and Jeffrey Dean. Distilling the knowledge in a neural network. 
+
+CoRR , abs/1503.02531, 2015. 
+
+## A Pixel-Level Redundancy and Resolution Statistics 
+
+Table 9 summarizes the pixel-level patch redundancy and resolution characteristics of all benchmarks. We divide each image into non-overlapping 32 ×32 blocks and count the number of pixel-unique 
+
+blocks (those whose pixel content appears exactly once in the image) versus duplicate blocks (those sharing identical pixel content with at least one other block in the same image). Duplicate Ratio 
+
+is the dataset-level fraction of non-unique blocks, 1 − P 
+
+> i
+
+Ui/ P 
+
+> i
+
+Ni, where Ui and Ni are the unique and total block counts for the i-th image. This global dedup statistic characterizes the overall pixel-level redundancy of each benchmark; PixelPrune’s actual retain ratio (§4) is higher because its causal prediction can only exploit redundancy along the scan order. We also report the Mean Resolution (width ×height in pixels) of each benchmark after Qwen3-VL’s default resolution preprocessing ( min_pixels =256 ×256, max_pixels =4096 ×4096). Resolution directly affects the number of visual tokens: higher-resolution benchmarks produce more patches and thus more opportunities for redundancy, but the relationship is not strictly monotonic—content density matters as well. On average across benchmarks, GUI images exhibit higher duplication (51.4% mean across 9 benchmarks) than documents (39.7% mean across 7 benchmarks), driven by large solid-color regions such as backgrounds, panels, and status bars. The range spans from SSPro-Scientific (77.6%, paper-like backgrounds) to SSPro-CAD (40.3%, dense content). Among documents, MMLongBench-Doc leads (52.4%, multi-page white margins) while InfoVQA is lowest (28.6%, dense infographics). Table 9: Pixel-level patch redundancy and resolution statistics (patch size 32 ×32 , exact match). Duplicate Ratio = fraction of non-unique patches (global dedup within each image). 
+
+## Benchmark #Images Mean Resolution Duplicate Ratio (%) 
+
+## Document Understanding 
+
+## OCRBench 1,000 615 ×732 38.5 DocVQA 1,286 1775 ×2082 33.4 InfoVQA 500 1141 ×2929 28.6 ChartQA 2,500 768 ×584 40.8 AI2D 1,204 609 ×486 37.7 MMLongBench-Doc 5,784 1284 ×1405 52.4 olmOCRBench 1,403 1556 ×2007 46.6 
+
+## GUI Understanding 
+
+## SSv2-Web 251 2397 ×1348 63.6 SSv2-Mobile 248 1387 ×2339 56.2 SSv2-Desktop 231 1369 ×907 42.3 SSPro-Dev. 299 3624 ×2119 43.0 SSPro-Creative 341 3040 ×1616 46.6 SSPro-CAD 261 3448 ×1190 40.3 SSPro-Scientific 254 2716 ×1616 77.6 SSPro-Office 230 2980 ×1778 51.0 SSPro-OS 196 3926 ×2118 41.7 14 Table 10: Training-free results on Document Understanding Benchmarks using Qwen3.5. Format follows Table 1. Numbers in parentheses show the dataset-level retain ratio of PixelPrune.                                                                   
+
+> Model Method OCRBench DocVQA InfoVQA ChartQA AI2D MML-Doc olmOCR Avg
+> (66.1%) (70.1%) (76.7%) (73.1%) (69.2%) (50.3%) (56.9%) Qwen3.5-2B Full 87.3 93.5 75.4 78.8 79.6 32.4 49.9 71.0
+> PixelPrune 87.9 92.5 74.3 77.9 78.7 31.6 48.7 70.2 Qwen3.5-4B Full 86.6 95.4 81.6 85.1 84.9 45.4 53.5 76.1
+> PixelPrune 86.6 95.3 80.7 84.7 84.7 45.4 53.6 75.9 Qwen3.5-9B Full 88.3 95.7 84.4 86.2 86.7 53.1 54.1 78.4
+> PixelPrune 88.0 95.5 83.7 85.2 86.5 51.9 53.3 77.7
+
+## B Training Details 
+
+Post-training KD (§4.3) uses 32 GPUs × 36 samples/GPU for 2,000 steps. Training from scratch (§4.4) halves the per-GPU batch size to 18 to avoid OOM under the Full configuration (which retains all visual tokens), and accordingly doubles the steps to 4,000 to match the total sample budget. Ablations on prediction strategy (§4.6) and ViT depth (§4.6.3) each use 8 GPUs × 36 samples/GPU for 1,000 steps. 
+
+## C Cross-Architecture Validation: Qwen3.5 
+
+To verify generalization beyond Qwen3-VL, we evaluate PixelPrune on Qwen3.5 (training-free, document benchmarks). Qwen3.5 shares the NaViT-style ViT with separate spatial positional encodings, making it directly compatible with PixelPrune. Notably, Qwen3.5 employs a hybrid attention mechanism in the LLM: it interleaves standard full attention layers with linear attention layers. The linear attention layers lack explicit positional encoding injection and rely only on naturally decaying temporal ordering for sequence awareness. This architectural difference tests whether PixelPrune’s position-preserving design remains effective when the LLM’s positional signal is weaker and partially implicit. Table 10 shows that PixelPrune maintains small accuracy gaps across all scales ( ≤0.8% Avg), confirming generalization across NaViT-based architectures. 
+
+## D Training from Scratch: Detailed Convergence 
+
+Table 11 reports intermediate evaluation results during training from scratch (Section 4.4), comparing 
+
+Full and PixelPrune configurations. Each configuration uses the same visual token setting for both training and inference: Full trains and evaluates with all tokens, while PixelPrune trains and evaluates with compressed tokens. Both configurations converge comparably, reaching similar accuracy by step 2,400 and plateauing around step 2,400–3,200. PixelPrune achieves slightly higher final performance (mean 58.1 vs. 56.6 at step 4,000), possibly because reduced token count provides implicit regularization. 
+
+## E Detailed FLOPs Analysis 
+
+We derive the FLOPs formula for the Qwen3-VL architecture, which comprises three stages: ViT encoding, Patch Merger (including DeepStack), and LLM processing. For an input image with N
+
+patches ( N = ( H/p ) × (W/p ) for ViT patch size p) and T text tokens: FLOPs total = Lv
+
+ N  8D2 
+
+> v
+
++ 4 Dv Df,v 
+
+ + 4 N 2Dv
+
+| {z }
+
+> (a) ViT Encoder
+
++ Lm
+
+NM 2
+
+ 2D2 
+
+> in
+
++ 2 Din Dl
+
+| {z }
+
+> (b) Patch Merger & DeepStack
+
++ Ll
+
+ NlCl + 4 N 2 
+
+> l
+
+Dl
+
+| {z }
+
+> (c) LLM
+
+(3) 15 Table 11: Training from scratch convergence: intermediate evaluation results every 400 steps. We report grounding accuracy (%) on ScreenSpot V2 (SSv2) and ScreenSpot Pro (SSPro). “Full” = trained and evaluated with all tokens; “PixelPrune” = trained and evaluated with compressed tokens.                                                                                                                                                                                                                                          
+
+> ScreenSpot V2 ScreenSpot Pro Mode Step Web Mobile Desktop Avg Dev. Cre. CAD Sci. Office OS Avg
+> Full 400 66.1 78.2 75.1 73.2 14.7 14.1 5.0 20.5 22.6 10.7 14.6 800 74.4 84.4 82.3 80.4 22.4 19.6 12.6 24.4 29.1 15.3 20.6 1200 78.0 87.2 85.9 83.7 24.7 22.6 14.9 29.5 40.9 24.5 26.2 1600 78.7 88.4 85.0 84.1 29.8 28.2 13.4 31.5 42.6 25.5 28.5 2000 78.7 84.4 83.5 82.2 25.1 23.5 14.2 27.6 40.9 25.0 26.0 2400 79.4 84.4 87.4 83.8 29.4 24.9 16.9 34.3 48.3 29.1 30.5 2800 80.1 78.6 85.6 81.5 32.1 26.7 15.3 35.4 49.1 30.6 31.5 3200 79.9 84.8 85.0 83.2 31.8 26.1 16.5 33.9 49.1 27.6 30.8 3600 80.1 83.4 85.0 82.9 31.1 27.3 16.1 34.3 48.7 28.6 31.0 4000 79.9 81.6 83.8 81.8 31.8 26.7 15.3 35.0 49.6 30.6 31.5 PixelPrune 400 61.1 81.4 76.3 73.0 13.4 10.9 4.6 15.7 17.8 11.2 12.3 800 72.3 86.0 82.3 80.2 21.7 19.1 7.7 26.4 29.6 13.8 19.7 1200 75.5 87.6 84.1 82.4 22.4 20.2 13.0 29.5 36.1 21.9 23.9 1600 76.2 87.0 87.1 83.5 27.4 26.4 14.9 33.9 42.6 26.0 28.5 2000 78.3 87.2 86.8 84.1 27.4 23.5 14.6 30.7 41.7 28.1 27.7 2400 79.6 85.2 88.3 84.4 30.1 27.6 15.7 34.6 50.9 27.0 31.0 2800 79.4 86.4 86.8 84.2 27.8 27.9 14.2 34.3 50.0 29.1 30.5 3200 80.8 87.4 87.7 85.3 31.4 27.3 14.6 34.3 51.3 28.6 31.2 3600 79.6 85.8 88.0 84.5 30.1 28.4 16.1 34.3 50.4 30.1 31.6 4000 79.9 85.6 88.9 84.8 30.8 27.3 15.7 34.6 52.6 27.6 31.4
+
+where Nl = N/M 2 + T is the total LLM sequence length ( M =2 is the spatial merge factor, T is the number of text tokens), Df,v is the ViT FFN dimension, Din = M 2 · Dv is the Patch Merger input dimension, Lm = 1 + |I ds | accounts for the main merger plus DeepStack mergers, and Cl is the per-token linear cost of the LLM (defined in Eq. 4 below). 
+
+(a) ViT Encoder. Each of the Lv ViT blocks contains multi-head self-attention (MHSA) and a feed-forward network (FFN). Linear projections contribute 8D2 
+
+> v
+
++ 4 Dv Df,v FLOPs per token (QKV, output, and two FFN layers); attention maps contribute 4N 2Dv FLOPs per layer. The ViT computes attention per image (controlled by cu_seqlens ), so N refers to the patch count of a single image. 
+
+(b) Patch Merger & DeepStack. After M ×M spatial merge, each token has dimension Din =
+
+M 2Dv . The merger MLP consists of fc1 : Din → Din (2 NM 2 D2 
+
+> in
+
+FLOPs) and fc2 : Din → Dl
+
+(2 NM 2 Din Dl FLOPs). The main merger runs once on the final ViT output; each DeepStack merger runs on an intermediate layer’s output, giving a total count of Lm.
+
+(c) LLM. Qwen3-VL uses Grouped-Query Attention (GQA) with nq query heads and nkv key-value heads, and a gated MLP (SwiGLU). The per-token linear cost per decoder layer is: 
+
+Cl = 2 Dl(2 nq + 2 nkv )dh
+
+| {z }
+
+> QKV + output proj.
+
++ 6 DlDf,l 
+
+| {z }
+
+> Gated MLP (gate + up + down)
+
+(4) where dh = Dl/n q and Df,l is the LLM FFN dimension. The Q and output projections each have dimension Dl × Dl, while K and V projections have dimension Dl × (nkv dh). Attention maps add 
+
+4N 2 
+
+> l
+
+Dl FLOPs per layer (since nq dh = Dl, this is independent of nkv ). 
+
+Architecture parameters. For Qwen3-VL-2B: (a) ViT: Lv =24 , Dv =1024 , Df,v =4096 , nh=16 ;(b) Patch Merger: M =2 , Din = 4096 , Dl=2048 , |I ds |=3 ; (c) LLM: Ll=28 , Dl=2048 , Df,l =6144 ,
+
+nq =16 , nkv =8 , dh=128 .
+
+FLOPs savings with PixelPrune. Let Ns = |S| ≤ N denote the number of retained patches after PixelPrune (§3.2). Replacing N with Ns in the formula above yields: (i) ViT : attention FLOPs reduce from O(N 2) to O(N 2 
+
+> s
+
+) (quadratic saving), linear FLOPs reduce proportionally; (ii) Patch Merger : scales linearly, from O(N/M 2) to O(Ns/M 2); (iii) LLM : the sequence length reduces 16 Table 12: General-domain evaluation on Qwen3-VL-2B (training-free, Max distance metric). Each benchmark reports retain ratio (%) and accuracy (%). Bold indicates the best accuracy among PixelPrune variants per benchmark.                                                                                          
+
+> MMBench MMMU MMStar RealWorldQA HR-Bench V*Bench
+> τRet. Acc. Ret. Acc. Ret. Acc. Ret. Acc. Ret. Acc. Ret. Acc.
+> Full (no dedup) 100 77.1 100 50.3 100 55.1 100 66.3 100 70.6 100 71.2 0 (exact) 94.7 77.1 80.1 49.2 81.2 55.1 97.7 66.3 96.3 71.0 99.7 71.2 0.005 94.2 76.9 79.2 49.7 80.5 55.1 97.6 66.1 94.9 70.8 99.3 71.2 0.02 91.8 76.9 76.1 49.1 77.2 55.3 96.6 65.8 84.6 71.4 94.0 73.8
+> 0.05 88.0 76.5 72.4 50.3 73.3 55.0 89.2 66.1 77.3 72.0 87.7 72.8 0.10 83.5 76.5 68.0 48.2 68.8 54.8 75.4 67.1 70.1 71.9 82.3 71.2
+
+from Nl to N ′ 
+
+> l
+
+= Ns/M 2 + T , so attention reduces from O(N 2 
+
+> l
+
+) to O(N ′2 
+
+> l
+
+). When Ns ≪ N , the end-to-end reduction is substantial across all three stages. Plugging the architecture parameters and measured Ns into Eq. 3 yields the theoretical FLOPs reported in Table 4. 
+
+## F General-Domain Evaluation 
+
+Although PixelPrune primarily targets document and GUI scenarios, we evaluate whether it degrades performance on general-domain images with rich textures and fewer uniform regions (Table 12; six benchmarks, Qwen3-VL-2B, training-free). Exact matching ( τ =0 ) retains 80–100% of tokens with ≤1.1% accuracy change. Near-exact matching further reduces retention: at τ =0 .05 , retention drops to 72–89% yet accuracy stays within 0.6% on most benchmarks. Even at τ =0 .10 (68–83% retention), degradation remains modest ( ≤2%). Overall, PixelPrune’s content-adaptive compression gracefully handles general-domain images: exact matching preserves nearly all tokens with negligible accuracy change, while near-exact matching provides moderate compression when needed. 17

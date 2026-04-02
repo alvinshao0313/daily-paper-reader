@@ -1,0 +1,635 @@
+Title: A Switch-Centric In-Network Architecture for Accelerating LLM Inference in Shared-Memory Network
+
+URL Source: https://arxiv.org/pdf/2603.28239v1
+
+Published Time: Tue, 31 Mar 2026 02:17:56 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# A Switch-Centric In-Network Architecture for Accelerating LLM Inference in Shared-Memory Network 
+
+# Aojie Jiang 
+
+aojie@smail.nju.edu.cn Nanjing University China 
+
+# Kang Zhu 
+
+kang_zhu@smail.nju.edu.cn Nanjing University China 
+
+# Zhiheng Zhang 
+
+zhz@smail.nju.edu.cn Nanjing University China 
+
+# Zhengxu Su 
+
+suzhengxu@smail.nju.edu.cn Nanjing University China 
+
+# Juntao Liu 
+
+liujuntaoyjy@chinamobile.com China Mobile Research Institute China 
+
+# Yuan Du 
+
+yuandu@nju.edu.cn Nanjing University China 
+
+# Li Du 
+
+ldu@nju.edu.cn Nanjing University China 
+
+## Abstract 
+
+In-network computing techniques, exemplified by NVLink Sharp (NVLS), offer a promising approach to addressing the communica-tion bottlenecks in LLM inference by offloading collective opera-tions, such as All-Reduce, to switches. However, the accelerator-centric architecture of NVLS suffers from two fundamental limi-tations: 1) it relies on GPU load instructions to trigger reduction operations, which means that the data reduced in the switch must be additionally transferred back to the initiating GPU rather than being broadcast directly, thereby introducing unnecessary commu-nication overhead; 2) due to its architectural constraints, NVLS cannot offload operators that are not decomposable into memory-semantic instructions, such as the in-network quantization (INQ) proposed in this work. As a result, All-Reduce in NVLS must operate at FP16/BF16 precision, leading to substantial bandwidth waste. To address these limitations, we propose SCIN, the first switch-centric in-network architecture for shared-memory networks of AI accelerators, enabling both low-latency and high-bandwidth All-Reduce. Specifically, we introduce an in-switch accelerator (ISA) capable of initiating memory-semantic operations for in-network processing, together with a co-designed communication fabric that incurs negligible protocol overhead. By eliminating redundant data movement, SCIN delivers lower All-Reduce latency than NVLS. Moreover, by integrating a quantization module into the ISA, SCIN enables INQ for All-Reduce, reducing its precision to 8 bits and nearly doubling bandwidth with negligible accuracy loss. We also present a prototype of SCIN on a multi-FPGA system to demon-strate its feasibility and effectiveness. Experimental results on an 8-GPU system show that, compared with a state-of-the-art soft-ware algorithm, our design accelerates All-Reduce by up to 8.7x for small messages and 3.8x for large messages, leading up to 1.74x faster Time To First Token (TTFT) and 1.34x faster Time Per Output Token (TPOT) on LLaMA-2 models. 
+
+## Keywords 
+
+In-Network Computing, Distributed LLM Inference, Tensor Paral-lelism, In-Network Quantization 
+
+## 1 Introduction 
+
+The rapid growth of large language models (LLMs) has imposed unprecedented computation and memory demands, making dis-tributed inference [ 3, 51 , 58 , 59 ] absolutely essential for a wide range of AI accelerators, including GPUs [ 49 ], TPUs [ 30 ] and other domain-specific accelerators [ 1, 38 ]. Among various parallelization strategies, tensor parallelism (TP) [ 45 , 66 ] is widely used to par-tition large matrix operations across multiple GPUs. By reducing per-GPU computation latency and memory usage, TP enables effi-cient inference for large models and offers better GPU utilization [ 64 ]. However, its reliance on numerous All-Reduce operations makes it highly communication-intensive and structurally complex [ 56 ]. The TP overhead during both training and inference stages impacts performance, but its impact is typically more significant during the inference. Unlike the AllReduce operation for gradient synchronization during training, which can sometimes effectively overlap with computations in back propagation [ 44 ], the AllReduce operation in TP inference is directly located on the execution criti-cal path [ 51 ]. Therefore, devices are forced to pause while waiting for these AllReduce operations to complete, directly reducing the computational efficiency of individual devices. Second, TP infer-ence presents distinct interconnect requirements in the prefill and decode stages [ 41 ]. During prefill, each request typically incurs a single large-message All-Reduce, whereas during decode, each request generates multiple small-message All-Reduce operations, with the number scaling linearly with the number of output tokens. Therefore, the interconnect must simultaneously provide high band-width and low latency to satisfy the performance requirements of TTFT and TPOT, respectively. Recent research [ 56 , 66 ] indicates that up to 60% of end-to-end latency for TP inference is caused by All-Reduce operations between GPUs, even for computing nodes equipped with high-bandwidth NVLink for GPU interconnect. To overcome this limitation, interconnects are becoming denser and faster to keep pace with demand. NVIDIA DGX nodes [ 25 ], powered by high-bandwidth NVLink and NVSwitch [ 17 , 26 ], have become essential infrastructure for scaling up LLM systems via TP. However, as models continue to grow, these systems still face 
+
+> 1
+> arXiv:2603.28239v1 [cs.AR] 30 Mar 2026 Aojie Jiang, Kang Zhu, Zhiheng Zhang, Zhengxu Su, Juntao Liu, Yuan Du, and Li Du
+
+immense pressure from massive inter-GPU data transfers. This has motivated the introduction of specialized hardware to acceler-ate collective reductions in NVSwitches, known as NVLink Sharp (NVLS) [ 31 , 46 ]. NVLS employs an accelerator-centric architecture, as illustrated in Figure 1(left). By offloading data reduction to the switch ports, it reduces the required inter-GPU data movement, significantly lowering the communication overhead compared to ring All-Reduce [ 31 ]. However, this switch-centric architecture faces several critical constraints. First, because data reduction oper-ations within the NVSwitch are triggered via GPU load instructions (multimem.ld_reduce ), the reduced data generated in the switch cannot be directly broadcast to the participating GPUs. Instead, they must first be sent back to the initiating GPU and then broadcast by the initiating GPU via Store instructions ( multimem.st ). Such round-trip data movement is fundamentally redundant and there-fore introduces significant communication overhead. Second, due to its architectural constraints, NVLS can offload only a limited class of operators and is unable to accelerate operations that cannot be decomposed into memory-semantic instructions, making it fail to meet today’s acceleration demands. For example, there is currently a significant gap between computation precision and communication precision. Through model quantization, low-precision formats such as FP8, INT8, and even FP4 have been widely adopted to accelerate computation and reduce memory usage [ 33 , 40 ]. However, due to hardware limitations, existing LLM inference frameworks typically transmit the output activations of attention blocks and feed-forward blocks in high precision (FP16/BF16) during TP inference [ 8, 32 , 47 ], resulting in substantial bandwidth waste in All-Reduce operations. To overcome the above limitations, we are driven toward a switch-centric paradigm. By fully exploiting the advantage of switch’s central position in the system, this paradigm enables full offload-ing of low-latency collective reductions and supports a variety of in-network operations that are not supported by NVLS, thereby unlocking the full acceleration potential of in-switch computing, as shown in Figure 1(right). Accordingly, we propose SCIN, a switch-centric in-network computing architecture for shared-memory net-works of AI accelerators, simultaneously enabling both low-latency and high-bandwidth All-Reduce. To implement SCIN, we propose an in-switch accelerator (ISA) together with a co-designed communication fabric. In a shared-memory system, where accelerators share a unified global address space, the ISA can access accelerator memory, allowing it to load data from memory and write reduced results back directly. This eliminates redundant data movement and thus reduces communica-tion latency. At the same time, it enables full offloading of collective reductions, unlike NVLS, which still requires hardware resources on the accelerator side for scheduling. To support this mechanism, only an additional 1-bit field is required in the packet header to distinguish ISA-initiated memory transactions from accelerator-initiated ones. Furthermore, because the ISA is located at the center of the system, SCIN incurs lower global synchronization overhead than NVLS both before and after All-Reduce operation. These La-tency improvements substantially benefits the decode phase of LLM inference, which is dominated by latency-bound small-message communication. The data plane of the ISA is highly customizable, making it pos-sible to implement the desired in-network data processing and opening up new opportunities for optimizing LLM systems through cross-layer co-design. To bridge the gap between computation pre-cision and All-Reduce precision, we insert a data quantization mod-ule into the ISA pipeline to reduce All-Reduce precision to 8 bits. This in-network quantization (INQ) introduces only one additional quantization step, independent of the TP size, nearly halving the communication volume with almost no accuracy loss. This band-width improvement substantially benefits the prefill phase of LLM inference, which is dominated by bandwidth-bound large-message communication. We implement the proposed in-network architecture on a pro-totype system composed of five FPGAs to validate the feasibility and effectiveness of SCIN. We also build a network simulator cal-ibrated against the hardware prototype to further evaluate SCIN on larger-scale systems. To the best of our knowledge, this is the first work to propose a switch-centric in-network architecture for shared-memory systems. We summarize our main contributions as follows: 
+
+• We propose SCIN, the first switch-centric in-network com-puting architecture for multi-accelerator shared-memory systems, enabling both low-latency and high-bandwidth All-Reduce. 
+
+• To implement SCIN, we propose an in-switch accelerator (ISA) and a co-designed communication fabric to efficiently execute collective reductions. By eliminating redundant data movement and reducing global synchronization over-head, our design significantly lowers All-Reduce latency. 
+
+• Powered by SCIN, we further enable in-network quanti-zation (INQ) for All-Reduce by integrating quantization hardware into the ISA, achieving nearly 2 × communication compression with almost no accuracy loss. 
+
+• We implement SCIN on a multi-FPGA system and validate its feasibility and effectiveness on real hardware. We further evaluate SCIN on more general large-scale systems using a simulator calibrated against this prototype. 
+
+• Experimental results on an 8-GPU system show that, com-pared with a state-of-the-art software algorithm, our design accelerates All-Reduce by up to 8.7 × for small messages and 3.8 × for large messages, leading up to 1.74x TTFT and 1.34x lower TPOT on LLaMA-2 models [58]. 
+
+## 2 Background and Motivation 
+
+The parameter sizes of LLMs have grown to tens or even hundreds of billions [ 51 , 58 ], far exceeding the memory capacity of a single GPU and necessitating distributed multi-GPU inference. Among existing strategies, tensor parallelism (TP) [ 2, 56 ] is one of the most effective ways to enable efficient inference at scale by splitting weights across GPUs. However, the TP strategy involves communication-intensive All-Reduce operations, which introduce substantial communication delays. The following section provides an overview of TP inference and the motivation behind SCIN. 
+
+## 2.1 Tensor Parallelism in LLM Inference 
+
+1) Message size distribution in TP: Under TP, each transformer layer introduces two All-Reduce operations, typically located at the end of the attention block and the MLP block. Notably, the 
+
+> 2
+
+A Switch-Centric In-Network Architecture for Accelerating LLM Inference in Shared-Memory Network Port0 Port1 Port2 Port3                         
+
+> GPU0 GPU1 GPU2 GPU3
+> Switch
+> Port0 Port1 Port2 Port3
+> GPU0 GPU1 GPU2 GPU3
+> Switch
+> Data Aggregated data
+> Stage 1: GPU issue pull request for reduction
+> Stage 2: GPU issue push request for broadcast
+> Redundant transmission
+> Port0 Port1 Port2 Port3
+> GPU0 GPU1 GPU2 GPU3
+> In-Switch Accelerator
+> Port0 Port1 Port2 Port3
+> GPU0 GPU1 GPU2 GPU3
+> Stage 2: customized in-network operations before push request
+> In-Switch Accelerator Switch
+> Switch
+> Switch
+> Stage 1: In-Switch Accelerator issue pull request
+
+Figure 1: Two architectures for in-network computing: accelerator-centric architecture (left) and the proposed switch-centric architecture (right). Tensor Parallel 
+
+> Input
+> LayerNorm
+> Self Attention
+> Linear
+> All-Reduce
+> Output
+> LayerNorm
+> Linear
+> GeLU
+> Linear
+> All-Reduce
+> Tensor Parallel
+
+(a) Tensor Parallelism in LLM Prefill Decode   
+
+> 10 2
+> 10 1
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> 10 4
+> Size [MB]
+
+(b) Distribution of AllReduce message sizes across varying input configurations in Llama-2-70B Tensor Parallelism (Prefill vs. Decode) ( batch size ∈ [ 1, 128 ], sequence length ∈ [ 128 , 4096 ]). 
+
+Figure 2: Tensor Parallelism and All-Reduce message size distribution in LLM inference 
+
+communication size per operation differs significantly depending on the inference stage. In the prefill stage, the communication size per All-Reduce is 2𝑏𝑠ℎ , whereas in the decode stage it reduces to 
+
+2𝑏ℎ , where 𝑏 denotes the batch size, 𝑠 the sequence length, and ℎ
+
+the hidden size. As illustrated in Figure ?? , the average communi-cation size in the prefill stage is several orders of magnitude larger than that in the decode stage. Furthermore, because decode pro-ceeds autoregressively, the number of All-Reduce operations scales linearly with the number of generated output tokens. This phase-dependent behavior leads to fundamentally different interconnect requirements. During prefill, large-message collectives demand high bandwidth to sustain throughput. In contrast, during decode, 0% 
+
+25% 
+
+50% 
+
+75% 
+
+100% 
+
+(1,512) (1,4096) (16,512) (16,4096) (64,512) (64,4096) 
+
+Input Configuration 
+
+0% 
+
+25% 
+
+50% 
+
+75% 
+
+100%         
+
+> Time Breakdown
+> 7B 13B 70B FP16 FP8 7B 13B 70B FP16 FP8
+
+Figure 3: Communication and computation time breakdown of LLaMA-2 inference with TP=8 under different stage: Prefill (top) and Decode (bottom). The x-axis labels are shown as (a, b), denoting batch size and prefill length, respectively. 
+
+the numerous small-message collectives are latency-sensitive, re-quiring low atency interconnect to avoid performance degradation. 
+
+2) Collective communication bottlenecks in TP Inference: 
+
+Unlike training, where All-Reduce operations can be overlapped with backpropagation computations to hide communication latency [44 ], All-Reduce in TP inference resides strictly on the critical execu-tion path. As illustrated in Figure 2a, the device must stall until the All-Reduce operation fully completes. To quantify this limitation, we analyze the communication overhead using our profile-driven simulator, as detailed in Section 4.1, on a real H200 GPU with the TensorRT-LLM framework [ 47 ]. As shown in Figure 3(top), with TP=8, All-Reduce accounts for up to 47% and 25% of execution time in the prefill and decode phases, respectively. Furthermore, this communication bottleneck is being amplified by rapid advance-ments in both software and computational hardware. For example, 
+
+3Aojie Jiang, Kang Zhu, Zhiheng Zhang, Zhengxu Su, Juntao Liu, Yuan Du, and Li Du 
+
+within just the six months between MLPerf 3.1 and 4.0 [ 53 ], bench-mark performance for the GPT-J model [ 60 ] on the H100 hardware improved by 2.4x to 2.9x purely through software optimization [ 50 ]. On the hardware side, compute capability growth has significantly outpaced interconnect bandwidth scaling. Over the past 20 years, peak server FLOPS have scaled at approximately 3.0x every two years, while interconnect bandwidth has grown by only about 1.4x every two years [ 21 ]. When evaluating inference latency under FP8 precision, as shown in Figure 3(bottom), the higher FP8 FLOPS relative to FP16 increase the fraction of time spent on All-Reduce to 59% in the prefill phase and 30% in the decode phase. We anticipate that this communication bottleneck will likely be further magni-fied in the future, driven by software improvements and the faster scaling of compute capabilities. 
+
+3) Communication compression in TP Inference: Unlike gradient compression in distributed training for All-Reduce, where precision loss can be mitigated through backpropagation [ 13 , 61 ], quantization errors in inference tend to accumulate across layers. Current LLM inference frameworks, such as vLLM [ 32 ], SGLang [ 67 ], and TensorRT-LLM [ 47 ], typically retain the output activa-tions of each attention block and feed-forward block in high pre-cision (e.g., BF16 or FP16) during TP communication to preserve model accuracy. To mitigate the communication bottleneck in TP inference, many approaches have been proposed to quantize the data exchanged in All-Reduce operations. One class of prior work [ 18 , 23 , 36 ] is based on direct All-Reduce [ 52 ], where each GPU directly sends its activations to all other GPUs and then performs local reduction. Due to its smaller number of communication steps, this approach can achieve lower performance degradation under quantization. However, direct All-Reduce is not very suitable for switch-based topologies, as it can cause severe network conges-tion [ 62 ]. Another representative design, EQuARX [ 4], proposes compressing communication data on the top of ring-based All-Reduce over Google TPU torus networks [ 30 ]. In ring All-Reduce, the communication data is partitioned into N chunks, where N is the number of participating accelerators. Each chunk then traverses the ring communication pattern for a total of 2(𝑁 − 1) rounds, con-sisting of a reduce-scatter phase and an all-gather phase. As a result, the maximal achievable bandwidth is 𝑁   
+
+> 2(𝑁 −1)
+
+of the total payload bandwidth. If quantization is applied to ring All-Reduce, the data in each chunk must undergo 𝑁 − 1 rounds of quantization and de-quantization during the reduce-scatter phase, and the quantization error introduced in each round accumulates over time. As a result, although EQuARX adopts a fine-grained block-wise quantization strategy, it still suffers from substantial accuracy degradation due to the fundamental limitation of the ring algorithm. Moreover, in this approach, as the TP size increases, more quantization steps are required, leading to more severe performance degradation. 
+
+4) Impact of system scale on TP communication: A impor-tant aspect is the scale of the computing system. Due to the rapid development of LLMs, it is necessary to integrate more GPUs in a node, such as GB200 NVL72 [ 49 ], which consists of 72 GB200 GPUs interconnected via NVLink and NVSwitche. Therefore, as the TP degree increases, the computational workload per GPU decreases, while the communication size remains unchanged, since it depends only on the model hidden size and the input. Moreover, ring-based All-Reduce requires more communication steps as the system grows. Together, these factors increase the fraction of communication time in overall execution, making TP inference increasingly sensitive to interconnect performance at larger scales. 
+
+## 2.2 Limitations in Existing In-Network Computing Architecture 
+
+The high cost of All-Reduce has motivated the development of specialized hardware to accelerate collective communication. Prior work has shown that offloading reduction computation into the net-work can be effective. However, most of these approaches [ 5, 9 , 22 ]are designed for CPU and message-passing protocols, rather than AI accelerators and shared-memory network. NVIDIA’s NVLink SHARP (NVLS) [ 31 , 46 ] introduces in-network reduction into multi-GPU shared-memory systems, adopting an accelerator-centric ar-chitecture, as illustrated in Figure 1(left). In NVLS, All-Reduce is decomposed into two stages: reduce-scatter and all-gather. In the first stage, the GPU issues pull request by multimem.ld_reduce 
+
+instructions to fetch data from all participating GPUs. As data ar-rives at the switch, reduction is performed at its ports. Due to the requirement of load instruction semantics, the reduced data must be first returned to the initiating GPU, completing the reduce-scatter stage. In the second stage, the GPU issues push request by 
+
+multimem.st instructions to send the reduced data to switch. The switch then broadcasts the data to all participating GPUs, com-pleting the all-gather stage. Furthermore, to guarantee that data is correctly produced and consumed, explicit synchronization are required both before and after the collective operation. While NVLS enables in-switch reduction within multi-GPU shared-memory systems, its accelerator-centric paradigm exhibits several fundamental limitations: 1) Redundant data transmission: because the reduction is executed via processor load instructions, the final result computed within the switch must first be returned to the initiating GPU rather than being directly broadcast to all destinations, introducing substantial communication overhead, as illustrated in Figure 1(left). 2) Limited operator support: this ar-chitecture relies on GPU to trigger in-network operations, which restricts its ability to accelerate other operations that are not decom-posable into memory-semantic instructions, such as the in-network quantization (INQ) proposed in this work. instructions, such as the in-network quantization (INQ) proposed in this work, making it fail to meet today’s acceleration demands. 3) Partially offloading: although reduction is performed within the switch, the accelerator-centric architecture still consumes precious GPU Streaming Mul-tiprocessor (SM) resources to initiate requests and control the en-tire execution process. 4) High synchronization latency: unlike switch-centric architectures, where GPUs can synchronize directly with the switch without traversing additional network components, accelerator-centric designs require traversal of the switch fabric for synchronization among accelerators, incurring higher synchro-nization latency. 5) High hardware cost: sustaining full bandwidth requires switch internal speedup [ 31 ], since reduction and broadcast respectively aggregate traffic from multiple ports to one port and broadcast data from one port to multiple ports, incurring additional hardware cost. 
+
+> 4A Switch-Centric In-Network Architecture for Accelerating LLM Inference in Shared-Memory Network
+
+## 2.3 Design Philosophy 
+
+Motivated by the increasingly dominant communication overhead in LLM inference at scale and the limitations of accelerator-centric in-network architecture, we propose SCIN, a switch-centric in-network computing architecture for shared-memory networks of AI accelerators, as illustrated in Figure 1(right). Our design philoso-phy is to fully leverage the switch’s central position in the system to unlock the full potential of in-network computing. To this end, we co-design the in-switch accelerator (ISA) with the communication fabric to ensure compatibility with existing system. By minimizing the number of network hops for data movement and further en-abling in-network quantization (INQ), SCIN simultaneously enables high-bandwidth and low-latency All-Reduce. We summarize the core advantages of SCIN as follows: 1) Low-latency All-Reduce : because the ISA issues the pull request, data reduced within ISA can be directly broadcast back to all partic-ipating accelerates. Unlike accelerator-centric designs that force reduced data to traverse back to the initiating GPU before broad-casting, our switch-centric architecture eliminates this redundant data traversal. This effectively cuts the count of network hops for data movement in half, hereby reducing communication latency and saving power. 2) Supporting for customized in-network operations : SCIN features the ISA with a highly customizable data plane, making it possible to implement the desired in-network data processing beyond collective communication. This flexibility opens up new opportunities for optimizing LLM systems through cross-layer co-design. Building on this capability, we further propose in-network quantization, which improves All-Reduce bandwidth by nearly 2x with negligible accuracy loss. 3) Full offloading : SCIN offloads collective operations totally into the ISA. Accelerators only participate in lightweight synchronization at the boundaries of the operation, freeing precious accelerator resources for compute. 4) Lower synchronization overhead : In accelerator-centric designs, synchronization messages between GPUs must traverse the switch fabric. In contrast, our switch-centric approach allows direct syn-chronization between the endpoint accelerators and the switch, effectively reducing synchronization latency by 50%, thereby fur-ther reducing the overall latency By concurrently optimizing bandwidth and latency, our proposed architecture systematically alleviates the bandwidth bottlenecks of the prefill phase and the latency bottlenecks of the decode phase in LLM inference. 
+
+## 3 Design and Implementation 
+
+The goal of SCIN is to reduce the end-to-end execution time of both the prefill and decode phases in LLM TP inference by performing data reduction and compression directly within the switch. 
+
+## 3.1 Challenges 
+
+As discussed, a switch-centric architecture offers theoretical bene-fits for LLM inference. However, realizing this paradigm requires overcoming three key challenges. 
+
+1) Existing communication protocols and their hardware im-plementations are primarily designed for packet forwarding. The SCIN, however, must enable direct memory access between the ISA and the AI accelerators, without affecting the regular network functions and with minimal protocol overhead. 
+
+2) In LLM inference, All-Reduce operations appear between compute kernels on the execution path. Stalls at the communication-computation boundaries lie directly on the critical path. Unlike accelerator-centric designs that primarily manage synchronization between GPUs, our architecture requires synchronization between the ISA and the accelerators. To minimize this synchronization overhead, a lightweight and programming-friendly synchronization mechanism must be designed. 
+
+3) AI accelerators typically expose high degrees of concurrency and employ multiple DMA engines, which makes packet arrival order at the switch nondeterministic. Moreover, to maximize band-width utilization with minimal resources, data transfers need be ef-ficiently orchestrated. Therefore, the switch must efficiently buffer, reorder, and process packets, while providing isolation and high throughput across concurrent collectives. In the following, we address these challenges and detail the microarchitecture of SCIN. Furthermore, we present a prototype based on multiple FPGAs to show how SCIN can be realized in a real hardware system, to demonstrate its feasibility and effectiveness. 
+
+## 3.2 Network Protocol Extension 
+
+In shared-memory systems designed for AI accelerators, dedicated communication protocols such as NVLink [ 26 ], Scale-Up Ethernet (SUE) [ 12 ], and Ultra Accelerator Link (UALink) [ 16 ] have been proposed to support memory transactions between AI accelerators. However, enabling the proposed ISA to directly access endpoint accelerator memory via the communication fabric inevitably ne-cessitates modifications to existing communication protocols and their hardware implementations. To address this challenge, we propose a hardware microarchitec-ture for the switch port, as illustrated in the Figure 4(left). In this architecture, the ISA is directly connected to each switch port to communicate with all acclerators within the node. Similar to the mechanisms in UALink [ 16 ], each port maintains sets of queues to buffer various memory-semantic messages, including Read/Write Data Queues, Request Queues, and Response Queues. We physi-cally expand these queues into two independent sets: Switch RX/TX Queues and ISA RX/TX Queues. These queues independently serve standard packet forwarding and ISA memory transactions forward-ing, respectively. The ISA achieves communication with the end-point accelerators by issuing and receiving requests or responses strictly through its dedicated queues. We only introduce a 1-bit In-Network Computing (INC) flag into the packet header to support SCIN with negligible protocol overhead. This flag is used to explic-itly indicate whether a packet originates from or is destined for the ISA. On the receiving (RX) side, the port logic utilizes this 1-bit INC flag to demultiplex and route the incoming data streams to either the ISA or the Switch Core. On the transmitting (TX) side, data packets from both the ISA and the Switch Core are allocated trans-mission bandwidth using a round-robin arbitration scheme, thereby minimizing interference with regular network packets forwarding. 
+
+> 5
+
+Aojie Jiang, Kang Zhu, Zhiheng Zhang, Zhengxu Su, Juntao Liu, Yuan Du, and Li Du Accumulator               
+
+> Wave Table 0
+> ......
+> From rx
+> rdata buffer of Port 0
+> 0
+> Table ID Status Start Addr Date Scales
+> 0Idle
+> 1Ready 0x1000
+> 2Wating 0x8000
+> From other Ports
+> To tx wdata buffer of Port 0 Is participant
+> Quant.
+> Unit
+> Dequant.
+> Unit
+> Is participant To other Ports
+> ......
+> Switch Core
+> In-Switch Accekerator
+> Port 0
+> Table Manager
+> Barrier Manager
+> polling
+> Ready
+> Idle Ack
+> Table ID
+> Wave Controller
+> Instr. Queue
+> Instr.
+> Config. Bus
+> Read request
+> Write request To tx request buffer of participating ports
+> From rx request/wdata buffer
+> Finish
+> Sync. flag
+> From/to other Wave Tabels
+> Allocate
+> Deallocate
+> From rx response buffer
+> Write response
+> Wave Gen. Port 2
+> Port 1
+> Port 3
+
+Switch 
+
+In-Switch Accelerator   
+
+> Accelerator 0
+> Ingress
+> Accelerator 2
+> ISA Rx Queues (Request/Response /Rdata/Wdara)
+> Switch Rx Queues
+> Egress
+> ISA Tx Queues (Request/Response /Wdara)
+> Switch Tx Queues
+> RX
+> Round-Robin Select
+> To ISA
+> From ISA
+> To Switch Core
+> From
+> Switch Core
+> Accelerator 3
+> INC Flag
+> Accelerator 1
+
+Port  
+
+> TX
+> （only relevant paths are shown)
+> 2
+> 3
+> 56
+> 8
+> 77
+> 4
+
+## ... 
+
+## ... 
+
+## ...... 
+
+## ... 
+
+## ... ... ... ... 
+
+> 1
+
+Figure 4: Switch Micro-architecture for SCIN Accelerator_TP_Inference ()      
+
+> {
+> // Perform Attention Block
+> Attention();
+> // Atomically increment the switch’s synchronization counter
+> Arrive();
+> // Poll the local flag until it becomes 1
+> Wait();
+> // Perform Feed_Forward Block
+> Feed_Forward(); }
+> one netwrok hop
+> Switch_All_Reduce ()
+> {
+> // Poll the local counter until it equals the number of participants
+> Wait();
+> // Execute All-Reduce operation
+> Execute();
+> // Writes to the synchronization flag of each participant
+> Arrive(); }
+> one netwrok hop
+
+Figure 5: The synchronization mechanism in SCIN 
+
+## 3.3 Synchronization Mechanism 
+
+In a shared-memory system, devices exchange results through shared memory. A synchronization flag or counter is required to indicate when data has been produced, i.e., when it is globally vis-ible and can be safely consumed. After the producer writes the data but before it updates the synchronization flag or counter, a memory fence is required to guarantee correct memory ordering between the producer and the consumer. In a typical TP inference scenario, the communication kernel is located between the atten-tion kernel and the feed-forward kernel, as illustrated in Figure 5. After an accelerator finishes the computation and arrives at the All-Reduce operation, it first performs an atomic increment on the memory location corresponding to the synchronization counter in the ISA. It then polls its local synchronization flag and waits until it receives the completion notification sent back by the ISA before proceeding to subsequent computation. On the switch side, before executing the All-Reduce operation, the ISA first polls the local synchronization counter. Once the counter reaches the number of participants for this operation, the ISA knows that all accelerators have arrived at the synchronization point and it can safely initiate the All-Reduce operation while resetting the counter. After the All-Reduce completes and all write responses are received, the reduced data is guaranteed to be safely written into accelerator memory. Only then does the ISA notify all participants by updating their syn-chronization flags. Upon receiving the notification, each accelerator leaves the waiting state and proceeds to the next computation. The same principle can be used to other computation-communication synchronization scenarios. Compared with accelerator-centric methods, in which each GPU signals its arrival at the start or end synchronization point of a collective operation by atomically incrementing the synchroniza-tion counters of all participants by the multimem.red instruction, our approach shortens the synchronization path from two network hops to one. As a result, it reduces synchronization latency by approximately 50%. 
+
+## 3.4 In-switch Accelerator Design 
+
+As described above, the ISA communicates with accelerator memory through dedicated memory interfaces attached to switch ports with negligible protocol overhead, and synchronizes with accelerators using a lightweight mechanism. Building on this substrate, we describe how the ISA performs collective operations to realize the SCIN paradigm. Figure 4(right) illustrates the ISA architecture. 
+
+6A Switch-Centric In-Network Architecture for Accelerating LLM Inference in Shared-Memory Network Instr. ID Length Address Source Destination QuantEnable                         
+
+> 2 bytes
+> (1) Instruction Format
+> Instr. ID Length Address 8'b11111111 8'b11111111 0
+> (2) All-Reduce among all accelerators
+> Instr. ID Length Address 8'b00000001 8'b11111110 0
+> (4) Broadcast the data from accelerator 0 to the other accelerators
+> Instr. ID Length Address 8'b11111111 8'b00000001 0
+> (5) Reduce the data from all accelerators to accelerator 0
+> 8 bytes 48 bytes 1 bytes 1 bytes 1 bit
+> Instr. ID Length Address 8'b11111111 8'b11111111 1
+> (3) INQ All-Reduce among all accelerators
+
+Figure 6: Instruction format of the ISA 1. Wave-Based Regulation. because response packets may return in arbitrary order, the data arriving at the ISA may not be reduced immediately. Therefore, before issuing read requests, the ISA must reserve buffer space in advance for data returned in subsequent responses to avoid overflow. The size of the reduction buffer must be properly provisioned to sustain full link bandwidth, which can be estimated using Little’s Law [ 39 ]. Assuming a single-tier topology, let the minimum required reduction buffer capacity be 𝐶 min , the bandwidth between the accelerator and the switch be 𝐵 , the link latency be 𝐿 , and the accelerator’s response latency be 𝐿 acc .
+
+𝐶 min = 𝐵 · ( 2𝐿 + 𝐿 acc ) (1) Accordingly, the traffic injected by the ISA must be regulated under finite buffer resources so as to fully utilize bandwidth while prevent-ing buffer overflow. We achieve this by regulating the number of outstanding requests in the network, similar to accelerator-centric designs [ 31 ]. Specifically, given a total buffer capacity 𝐶 , a request larger than 𝐶 is partitioned into multiple sub-requests, which are then executed sequentially so that the amount of in-flight data does not exceed 𝐶 . Synchronization is required between requests to ensure that the next request is injected only after buffer resources used by the previous request have been released. Naively serializing sub-requests, however, introduces substantial synchronization stalls between consecutive sub-requests. To amor-tize this cost, the ISA allows up to 𝑘 waves to remain outstanding at the same time, with each wave occupying 𝐶 /𝑘 buffer space. These waves overlap in time, hiding synchronization latency while pre-serving buffer safety. This mechanism is implemented by two key ISA components: a wave controller, which governs issuance and synchronization, and a set of wave tables, which buffer in-flight data. Section 4.4 evaluates the impact of buffer size and the number of waves. 
+
+2. Instruction Format. Unlike accelerator-centric approaches, which configure the switch multicast region (MCR) [ 31 ] table before application execution to support routing for subsequent multimem 
+
+instructions, our architecture either preloads ISA instructions into an instruction queue or configures them on demand through a configuration interface (e.g., PCIe). Figure 6 shows the instruc-tion format for an 8-accelerator node. Each instruction contains an Instruction ID, a Length field specifying the total transfer size, and per-accelerator Address fields indicating the source address of the operands. Each address is 48 bits, and we assume the final result is written back in place to the original address. SCIN can op-tionally reuse the MCR mechanism adopted by accelerator-centric approaches. In that case, only a single address is needed to index the data across all accelerators. However, this requires the reduction data to be symmetrically allocated in the address spaces of all accel-erators, increasing software-side memory management overhead. The Source and Destination bitmasks specify, respectively, the ac-celerators that contribute operands and those that receive the final results. For example, when both fields are all ones, the instruction implements All-Reduce; when Source includes all accelerators but Destination selects only one, the instruction implements Reduce. Therefore, the Reduce-Scatter operation can be realized by com-posing multiple Reduce instructions or by designing a specialized instruction for it (not shown). More generally, different combina-tions of Source and Destination can express a variety of regular and irregular collective primitives. The QuantEnable field indicates whether INQ is enabled. We next describe the ISA microarchitec-ture in the regular mode, followed by its extension for quantized All-Reduce. 
+
+3. ISA Microarchitecture. The ISA consists of two key compo-nents: a wave controller and a set of per-accelerator wave tables. The wave controller is responsible for fetching ISA instructions, per-forming synchronization, allocating storage, and issuing read/write requests. Each entry in the wave table stores one wave, including its data, base address, associated scale factor (when INC is enabled), and state bits such as IDLE, WAITING, and READY. Execution proceeds at wave granularity. After fetching an ISA instruction ❶, the wave controller first polls the barrier manager to determine whether all participating accelerators have produced the required data ❷. At the same time, it queries the table manager to determine whether any free entries are available in all relevant wave tables ❸. Once both conditions are met, the controller issues read requests opportunistically based on the number of currently idle entries ❹. If the available capacity is insufficient to cover the full transfer length, only a partial segment is issued, and the remain-ing segments are deferred until entries are released. To ensure that each returning read response knows where it should be placed in the wave tables, the ISA reuses the existing tag field in the packet header to encode the location in the wave tables. Because the re-sponse packet carries the same tag as the corresponding request, the ISA can konw its storage position directly upon arrival. Con-cretely, the tag encodes the target table-entry index together with the packet offset within that entry. Since the tag (or transaction ID) field is typically large enough to distinguish all outstanding packets required to sustain full bandwidth, and is therefore sufficient to uniquely identify all packets stored in the wave tables. Upon arrival, each response packet is stored into the corresponding wave-table location according to its tag ❺. Once all entries associated with a given wave become READY, the corresponding wave is read out from the wave table and sent to the tree-based accumulator ❻, after which the corresponding entries are released and made available for subsequent waves. Since the compute units in the ISA have a fixed processing latency, the wave controller can issue the corresponding write request at the appropriate time, together with the write data 
+
+> 7Aojie Jiang, Kang Zhu, Zhiheng Zhang, Zhengxu Su, Juntao Liu, Yuan Du, and Li Du Token dim
+> Hidden dim
+> Token dim
+> Activation
+> Scale factors
+> Hidden dim
+> 64
+
+Figure 7: Block-wise quantization with one scale factor for every 64 values 
+
+produced by the accumulator ❼. Once all write responses are re-ceived, the operation is complete and the result becomes visible to the participating accelerators. The ISA then signals completion by writing a synchronization flag to the designated synchronization address of each participant ❸. For operations that do not involve computation, the compute pipeline can be bypassed. Notably, multi-ple synchronization resources can be integrated to support multiple parallel computation streams, and multiple wave controllers can also be incorporated to improve instruction-level parallelism. 
+
+4. Implementation of INQ All-Reduce. To preserve accuracy, we apply dynamic block-wise quantization to the output activations of both the MLP and attention blocks, as illustrated in Figure 7. Specifically, every 64 elements along the hidden dimension form one quantization block, and each block is associated with an inde-pendent scale factor. This design achieves 1.94x compression with only one additional quantization step, in contrast to the 𝑁 − 1 quan-tization steps required by ring-based schemes, while maintaining model accuracy (evaluations are provided in the section 4.2). For hardware simplicity, we directly use the maximum absolute value within each block as the clipping range to compute its scale factor. We assume that the activation data and scale factors are stored separately in accelerator memory. This design incurs lower hard-ware overhead, since it avoids any data-layout transformation of the original contiguous feature maps in accelerator memory by loading data and its scale factors separately with two instructions. When the QuantEnable field of an ISA instruction is set to 1, indi-cating INA All-Reduce, we assume that the next instruction in the instruction queue is a dedicated instruction for loading scale factors and contains the addresses of the scale factors on all participating accelerators. During execution, the wave controller first loads a fixed-size chunk of scale factors into the scale field of the allocated table entry—for example, 128 B when the wave size is 4 KB—and then loads the corresponding activation data. Once the wave entry becomes READY, they are read from the wave tables and passed through the dequantization unit, followed by the accumulator and then the quantization unit ❽. These stages are fully pipelined to hide latency. The scale factors generated for each wave by the quan-tization unit are transmitted immediately after the corresponding data, packaged into one or more dedicated scale packets. For exam-ple, with a 4 KB wave and a maximum packet payload of 128 B, the scale factors for one wave occupy exactly one full packet. 
+
+Figure 8: The photograph of SCIN prototype 
+
+## 3.5 A FPGA-based Prototype of SCIN 
+
+We implement a SCIN prototype to demonstrate its feasibility and effectiveness. The prototype implements the architecture shown in Figure 4 and consists of four endpoint FPGAs, which emulate accelerators, and one switch FPGA. A photograph of the proto-type is shown in Figure 8. We use the AMD Aurora IP [ 6 ] to im-plement the physical and link layers, while the transport layer is organized as four types of buffers, each dedicated to a different class of memory transactions with credit-based flow control. On the accelerator side, the NoC adopts the AXI protocol [ 10 ] and the INC flag is carried in the AXI user signals. We develop a proto-col translation module between the NoC and the transport-layer buffers, similar to that implemented in the SUE [ 12 ]. This mod-ule automatically packs AXI requests and responses issued by the NoC into the corresponding transport-layer queues, and conversely unpacks memory transactions from the transport layer into AXI transactions, which are then used to load data from or write data to block RAM. On the switch side, the ISA communicates directly with the transport queues through handshake signals, avoiding unnecessary protocol-conversion latency. In this prototype, ISA instructions are preconfigured through a JTAG interface using the AMD JTAG-to-AXI Master IP [ 7]. We do not implement INQ All-Reduce in this prototype; instead, we evaluate it using a network simulator calibrated against the prototype system. In this system, the switch communicates with each endpoint through a single link, where each link consists of four GTY lanes. Each lane provides 32 Gbps bidirectional bandwidth, resulting in an aggregate bidi-rectional bandwidth of 128 Gbps per link. The FPGA boards are connected using Multi-Gigabit Board (MGB) connectors [ 57 ]. A 32 B flit size is used, and accordingly the system operates at 250 MHz to sustain full bandwidth. The packet header occupies one flit, and the maximum packet payload is 4 KB, which maps exactly to one full AXI burst transfer. The wave size is set to 4 KB. In this prototype, the endpoint-to-switch latency is approxi-mately 360 ns, consisting of 20 cycles of transport-layer latency and 70 cycles of latency in the link and physical layers introduced by the Aurora IP. We achieve an All-Reduce latency of 2.62 𝜇 s for 4KB messages and 2.27 ms for 16MB messages, excluding synchroniza-tion latency in both cases. We define bandwidth utilization as the ratio between the achieved All-Reduce bandwidth (i.e., algorithm bandwidth) and the total link bandwidth. For large messages, the 
+
+> 8A Switch-Centric In-Network Architecture for Accelerating LLM Inference in Shared-Memory Network
+
+achieved All-Reduce bandwidth reaches 92.4% of the total band-width. This is substantially higher than the theoretical maximum bandwidth utilization of ring All-Reduce, 𝑁   
+
+> 2(𝑁 −1)
+
+, where 𝑁 is the number of accelerators. Because all modules in the system process different waves in a fully pipelined manner, overall throughput is bottlenecked by the slowest pipeline stage. Profiling shows that the remaining unutilized bandwidth comes from three sources: 1) the 64B/66B encoding and link-maintenance overhead in the Aurora IP (∼ 3% ), 2) non-ideal circuit effects such as pipeline bubbles between AXI transactions ( ∼ 3% ), and 3) protocol overhead ( ∼ 1% ). All FPGA devices used in the prototype are AMD xcvu13p-flga2577-2-i chips. The switch FPGA consumes 7% of LUT, 5% of FF, 23% of BRAM, and 12% of GT resources. 
+
+## 4 Evaluation 4.1 Methodology 
+
+Hardware-Calibrated Network Simulator. Although our FPGA prototype demonstrates the feasibility and efficiency of SCIN, it is limited in bandwidth, system scale, and implementation cost. We therefore use a network simulator to evaluate SCIN on a larger and more practical system. We build a custom cycle-level network simu-lator based on BookSim2 [ 29 ] to evaluate SCIN on an 8-accelerator system interconnected by 4 switches, following a topology consis-tent with NVIDIA DGX-H200 [ 48 ]. We extend the switch model in BookSim2 to implement the SCIN detailed in Section 3. The transport-layer queues for different memory transaction types are mapped to separate virtual channels (VC). The VCs are sized to cover the round-trip latency between the switch and the accelerator. The maximum packet payload is set to 128B, and the packet header occupies 16B (one flit). Read requests and write responses are all modeled as single-flit packets. The link between an accelerator node and a switch node is configured with a latency of 250 ns and an aggregate bidirectional bandwidth of 900 GB/s. The compute-unit latency inside the ISA is set to 20 cycles in the regular mode and 100 cycles in the INC mode. We use software ring All-Reduce as the baseline, since it is widely adopted due to its performance and broad applicability. For ring All-Reduce, we adopt a data-fence-flag semantic to pass large chunks of data around the ring: data is con-sidered consumable once the corresponding flag becomes visible. We also compare SCIN with accelerator-centric approaches based on the results reported in their work. To ensure simulation fidelity, we calibrate the simulator against our FPGA prototype. After calibration, the discrepancy between simulated and measured results is below 6%, as shown in Figure 9. The remaining error mainly comes from the fact that the links and processing modules in the simulator are modeled ideally, unlike those in the prototype, as discussed in Section 3.5. Despite this small residual error, we believe the calibrated simulator is sufficiently accurate to evaluate SCIN for academic research purposes. 
+
+Profiling-Based Compute Simulator. In TP inference, computa-tion and communication do not overlap and can therefore be simu-lated independently. To evaluate the impact of SCIN on end-to-end LLM inference latency, we build a TensorRT-LLM-based [ 47 ] pro-filing tool to measure single-GPU execution latency for LLaMA-2 models (7B/13B/70B) [ 58 ] on an H200 GPU under a production-like execution path. We collect device-side kernel execution time from 212 213 214 215 216 217 218 219 220 221 222 223 224 
+
+> AllReduce Size (bytes)
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> 10 4
+> Latency (us)
+> FPGA-based hardware prototype
+> Simulator
+
+Figure 9: AllReduce Latency: FPGA hardware prototype vs. hardware-calibrated simulator 
+
+TensorRT runtime profiler outputs, excluding CPU launch overhead, to obtain the real compute latency. Since each GPU executes the same operators under TP we simulate TP workloads by sharding attention heads and MLP intermediate dimensions according to the TP degree, such that the per-GPU compute load matches practical TP deployments. 
+
+Quantization Evaluation Setup. For quantization evaluation, we implement our evaluation framework on top of the open-source SmoothQuant codebase [ 63 ]. We simulate the computation path of INQ All-Reduce in software to evaluate its impact on model accu-racy. The data involved in All-Reduce is symmetrically quantized, and the scale factor for each block is computed from the maximum absolute value within that block. We evaluate the impact of apply-ing INQ All-Reduce to both FP16 models and FP8-quantized models and also compare with ring-based quantized (RQ) All-Reduce. For FP8 quantization, both weights and activations are quantized sym-metrically on a per-tensor basis, while activations are quantized dynamically. INQ allreduce is evaluated on several LLM models with different architectures, including LLaMA-2 [ 58 ], Mistral [ 27 ], and Mixtral [ 28 ], where Mixtral is a Mixture-of-Experts (MoE) model. Model accuracy is measured on multiple datasets, including the Massively Multitask Language Understanding (MMLU) [ 24 ] with five-shots and zero-shot Common Sense QA benchmarks such as WinoGrande [ 54 ], PIQA [ 11 ], HellaSwag [ 65 ], ARC [ 15 ], BoolQ [ 14 ]and OBQA [ 43 ]. All evaluations are conducted using the Language Model Evaluation Harness [20]. 
+
+## 4.2 In-Network Quantized All-Reduce 
+
+We first compare INQ allreduce with RQ allreduce. Table 1 reports the perplexity results under different quantization bit widths and block sizes with TP = 8. When All-Reduce is quantized to INT8, INQ All-Reduce preserves nearly the same perplexity as the FP16 baseline, with only a 0.0025 PPL degradation when the block size is 64, and consistently outperforms RQ All-Reduce. At INT4, INQ All-Reduce incurs acceptable perplexity degradation at smaller block sizes and significantly outperforms RQ All-Reduce. These results indicate that our compression method is more robust than RQ All-Reduce under more challenging quantization settings, and therefore generalizes better across different models and datasets. Moreover, because our method requires only a single additional quantization 
+
+> 9Aojie Jiang, Kang Zhu, Zhiheng Zhang, Zhengxu Su, Juntao Liu, Yuan Du, and Li Du
+
+Table 1: Comparison of perplexity for the LLaMA-2-7B model under FP16 precision across different block sizes when ap-plying RQ All-Reduce or INQ All-Reduce separately (TP = 8). Results are evaluated on the WikiText-2 dataset [ 42 ] with a sequence length of 2048. Lower perplexity is better. Method Bits Block Size 
+
+32 64 128 256 512 FP16 5.4721 RQ AR INT8 5.4742 5.4755 5.4757 5.4839 5.5050 INQ AR INT8 5.4736 5.4746 5.4741 5.4815 5.5020 RQ AR INT4 5.7977 5.9782 6.5894 7.7286 14.1795 INQ AR INT4 5.6055 5.6695 5.8628 6.1649 7.1776 step regardless of TP size, it will scale better than the ring-based method at larger TP sizes. In this work, we choose to quantize All-Reduce to 8 bits with a block size of 64 in order to preserve model accuracy, thereby achieving near-lossless compression and nearly 2x communication reduction. Table 2 presents the evaluation results of 8-bit INQ All-Reduce on several LLMs with a block size of 64 and TP = 8. These results demonstrate that, across all evaluated datasets, INQ All-Reduce generalizes well to models with diverse architectures and precisions, including both full-precision and FP8-quantized models, while introducing almost no additional accuracy degradation. In some cases, slight improvements are observed—consistent with expectations when applying activation quantization in LLMs [35]. 
+
+## 4.3 All-Reduce Bandwidth and Latency Improvement 
+
+The All-Reduce Bandwidth is defined as the message size divided by the simulated execution time, independent of the number of nodes. The maximum achievable unidirectional payload bandwidth is 360 GB/s. Figure 10a reports the All-Reduce performance under four settings: with or without INQ, and with or without accounting for synchronization overhead at the beginning and end of the opera-tion. For INQ All-Reduce, we define its bandwidth as the equivalent bandwidth required to achieve the same performance without INQ. Synchronization overhead is defined as the round-trip latency be-tween the switch and the accelerator. The table size and the number of waves are selected to achieve the best performance. For large messages, SCIN achieves close to the maximum achievable payload bandwidth while requiring only 66 KB of capacity per wave table, including 64 KB for data and 2 KB for quantization parameters. This is enabled by the wave regulation mechanism, which effectively hides synchronization overhead while utilizing buffer resources efficiently. Synchronization has a significant impact on the band-width of small messages, but its overhead is gradually amortized as message size increases. Compared with ring All-Reduce, SCIN achieves up to 8.7x speedup for small messages in an 8-node system, even when synchroniza-tion overhead is included. SCIN also significantly outperforms the accelerator-centric NVLink NVLS. By eliminating redundant data traversal and reducing synchronization latency, SCIN delivers much larger benefits for small messages than NVLS, which reports only about 4x speedup over ring All-Reduce [ 31 ]. For large messages, 32K 128K 512K 2M 8M 32M 
+
+All-Reduce size (bytes)  
+
+> 120
+> 240
+> 360
+> 480
+> 600
+> 720
+> Bandwidth (GB/s)
+> All-Reduce w sync
+> All-Reduce w/o sync
+> INQ All-Reduce w sync
+> INQ All-Reduce w/o sync
+> (a) All-Reduce Bandwidth 0
+> 2
+> 4
+> 6
+> 8
+> 10
+> 12 All-Reduce w sync
+> All-Reduce w/o sync
+> INQ All-Reduce w sync
+> INQ All-Reduce w/o sync
+> 32K
+> 64K
+> 128K
+> 256K
+> 512K
+> 1M
+> 2M
+> 4M
+> 8M
+> 16M
+> 32M
+> All-Reduce size (bytes)
+> 0
+> 4
+> 8
+> 12
+> 16
+> 20
+> 24
+> Speedup vs. Ring All-Reduce
+> (b) Speedup over SW ring for 8-node (top) and 16-node (bottom).
+
+Figure 10: Simulated All-Reduce performance with 16 waves per table, each wave with 4 kB of data and 128 B of scale. 
+
+SCIN achieves up to 2x speedup over ring All-Reduce. Enabling INQ further reduces communication volume, yielding nearly 2x equivalent bandwidth relative to the non-INQ case and increasing the speedup to as much as 3.8x over ring All-Reduce. This is sub-stantially higher than the about 2x speedup reported for NVLink NVLS [ 31 ]. For small messages, communication is typically latency-bound and the dequantization-quantization pipeline introduced by INQ slightly increases latency. We also evaluate SCIN on a 16-node system. The results show that SCIN provides orders-of-magnitude lower latency for small messages, since its required network hop counts does not increase as system scales. 
+
+## 4.4 Wave Regulation 
+
+Without wave regulation, the ISA can process only one request at a time. Large messages must therefore be split into multiple non-overlapping requests and processed in a strictly serialized manner. This introduces substantial synchronization overhead and prevents effective bandwidth utilization. In addition, bandwidth is highly sen-sitive to the reduction-table size, as shown in Figure 11a. According to Equation (1), a 64 KB capacity per table (excluding scale-factor storage) is sufficient to cover the round-trip latency. However, with-out wave regulation, this buffer size achieves only about 2/3 of the 
+
+> 10 A Switch-Centric In-Network Architecture for Accelerating LLM Inference in Shared-Memory Network
+
+Table 2: Accuracy (%) of 8-bit INQ All-Reduce on FP16 and FP8 Models (TP = 8, Block Size = 64 )Method MMLU Common Sense QA Hums. STEM Social Other Avg. HellaSwag PIQA WinoGrande ARC-e ARC-c BoolQ OBQA Avg. 
+
+LLaMA-2-7B 43.25 37.11 51.84 52.75 45.86 76.01 79.11 69.14 74.58 46.25 77.71 44.20 66.71 
+
+FP16 + INQ AR 43.17 37.23 51.45 52.94 45.81 76.06 79.05 69.14 74.37 46.42 77.83 44.00 66.70 
+
+FP8 42.91 37.81 51.15 51.79 45.53 75.71 78.89 69.14 73.91 45.14 77.65 44.20 66.38 
+
+FP8 + INQ AR 42.38 37.65 50.76 52.53 45.40 75.85 78.78 68.82 74.54 45.56 77.74 43.80 66.44 
+
+LLaMA-2-13B 53.45 43.77 63.18 61.47 55.18 79.38 80.52 72.14 77.40 49.06 80.55 45.20 69.18 
+
+FP16 + INQ AR 53.05 44.15 63.15 61.80 55.20 79.37 80.52 71.98 77.61 49.23 80.55 45.60 69.27 
+
+FP8 51.48 43.61 62.79 61.60 54.43 79.15 79.82 71.90 77.40 49.15 80.24 46.60 69.18 
+
+FP8 + INQ AR 52.14 43.55 62.98 61.67 54.69 79.28 80.09 71.67 76.77 48.98 80.00 46.20 69.00 
+
+Mistral-7B 56.83 52.49 73.35 70.49 62.50 81.09 82.21 74.11 79.46 53.84 83.76 44.20 71.24 
+
+FP16 + INQ AR 56.64 52.93 72.83 70.10 62.33 80.93 82.21 74.74 79.46 54.01 83.52 44.80 71.38 
+
+FP8 55.64 52.81 72.41 69.17 61.67 80.80 81.94 74.27 79.04 53.33 83.00 43.40 70.82 
+
+FP8 + INQ AR 55.88 52.55 72.18 69.55 61.73 80.81 81.94 73.95 79.17 53.67 83.39 44.00 70.99 
+
+Mixtral-8x7B 64.80 61.47 80.86 77.66 70.42 84.00 83.62 76.48 83.59 59.56 85.29 46.20 74.10 
+
+FP16 + INQ AR 65.06 61.47 81.05 77.44 70.50 84.00 83.62 75.69 83.75 59.81 85.26 47.40 74.22 
+
+FP8 64.36 61.47 81.25 76.25 70.04 83.98 83.35 75.61 82.91 60.15 85.41 48.20 74.23 
+
+FP8 + INQ AR 64.21 60.70 81.05 76.50 69.83 83.90 83.35 75.14 83.21 59.22 85.38 46.40 73.80 32K 128K 512K 2M 8M 32M 
+
+> Allreduce size (bytes)
+> 0
+> 60
+> 120
+> 180
+> 240
+> Bandwidth (GB/s)
+> 32 KB
+> 48 KB
+> 64 KB
+> 80 KB
+> 96 KB
+
+(a) Simulation results for various table sizes without wave regulation. 32K 128K 512K 2M 8M 32M 
+
+> Allreduce size (bytes)
+> 0
+> 60
+> 120
+> 180
+> 240
+> 300
+> 360
+> Bandwidth (GB/s)
+> 1 Wave
+> 2 Waves
+> 4 Waves
+> 16 Waves
+> 64 Waves
+
+(b) Simulation results for varying wave counts with a 64 KB buffer 
+
+Figure 11: Simulation results with and without wave regula-tion in non-INQ mode 
+
+total bandwidth. Synchronization overhead is amortized only with a substantially larger reduction buffer. Figure 11b shows the achieved bandwidth under wave regulation a 64 KB total buffer in non-INQ mode. Compared with the no-regulation case, bandwidth improves significantly as the number of waves increases. This is because multiple in-flight waves overlap in time, effectively hiding synchronization latency and enabling efficient utilization of the wave tables. The results show that the marginal benefit decreases rapidly as the number of waves increases, and that 16 waves are sufficient to sustain full bandwidth. Further increasing the number of waves introduces additional hardware overhead in wave tracking and scheduling logic. 
+
+## 4.5 LLM TP Inference 
+
+We evaluate the impact of SCIN on TP inference through an in-tegrated network-and-compute simulation framework. Based on the different interconnect requirements of the prefill and decode stages, we enable quantization for All-Reduce in the prefill stage, while leaving All-Reduce unquantized in the decode stage. Figure 12 shows the speedup of SCIN over software ring All-Reduce for TP inference on the LLaMA-2 family of models. Under FP16 precision, SCIN achieves 1.52x speedup in TTFT and 1.29x speedup in TPOT. Under FP8 precision, due to faster inference kernels, SCIN achieves 1.74x TTFT speedup and 1.34x TPOT speedup. For TPOT, larger speedups are typically observed at smaller prefill lengths. This is because All-Reduce message size in the decode stage does not in-crease with input sequence length, whereas computation time does. As a result, the overall fraction of time spent on communication decreases as sequence length grows, reducing the relative speedup provided by SCIN. In the prefill phase, we observe that the speedup tends to stabilize as the input batch size and prefill length increase. This is due to two factors. First, larger batch sizes and longer input sequences generally lead to more stable GPU utilization. Second, the bandwidth of large All-Reduce messages also converges to a steady value. Together, these effects cause the speedup to approach a stable level. The same trend is observed for LLaMA2-70B. Due to its larger model size, the prefill speedup varies only slightly across different batch sizes and input sequence lengths. We expect larger speedups on future GPUs, as they are likely to become more bandwidth-sensitive. Moreover, the speedup is expected to increase with system scale because, for a fixed input, the All-Reduce message 
+
+> 11 Aojie Jiang, Kang Zhu, Zhiheng Zhang, Zhengxu Su, Juntao Liu, Yuan Du, and Li Du
+
+(1,512) 
+
+(1,4096) 
+
+(16,512) 
+
+(16,4096) 
+
+(64,512) 
+
+(64,4096) 
+
+(1,512) 
+
+(1,4096) 
+
+(16,512) 
+
+(16,4096) 
+
+(64,512) 
+
+(64,4096) 
+
+(1,512) 
+
+(1,4096) 
+
+(16,512) 
+
+(16,4096) 
+
+(64,512) 
+
+(64,4096) 
+
+0.0 
+
+0.4 
+
+0.8 
+
+1.2 
+
+1.6 
+
+> Speedup vs. Ring
+
+Llama2-7B Llama2-13B Llama2-70B 
+
+FP16 FP8 TTFT TBT FP16 FP8 TTFT TBT 
+
+Figure 12: TTFT and TPOT speedup of SCIN over the software ring All-Reduce algorithm for LLaMA-2 models with TP = 8. The x-axis labels are shown as (a, b), denoting batch size and prefill length, respectively. 
+
+size remains unchanged as the TP size increases, and SCIN there-fore maintains nearly constant All-Reduce latency. At the same time, the compute time per accelerator decreases, and ring-based All-Reduce requires more communication steps. 
+
+## 5 Related Work 
+
+To mitigate the bottleneck of collective communication, many prior works have introduced specialized hardware into switches to accelerate collective operations. Klenk et al . [31] introduced an accelerator-centric architecture where in-network computing is triggered by accelerators issuing memory instructions, which in-curs redundant data transfers and limits operator flexibility. Further-more, a switch fabric speedup is required to sustain full bandwidth. Following this line, Zhang et al . [66] propose a compute-aware in-switch computing framework to enable consumer accelerators to actively fetch reduced data rather than having the data pushed to them, facilitating fine-grained compute-communication overlap by removing global barrier synchronization. However, its founda-tional accelerator-centric architecture retains the aforementioned limitations. iSwitch [ 37 ] accelerates All-Reduce for reinforcement learning training by integrating an in-switch accelerator within an FPGA. However, port limitations on their in-switch accelerator pre-vent it from processing data at line rate. Additionally, the iSwitch system relies on a CPU-initiated communication model over Ether-net protocols, where the in-switch accelerator passively receives data. In contrast, SCIN is specifically designed for accelerator-based shared-memory systems. IBM’s BlueGene system [ 5 ], PERCS [ 9 ], and Mellanox’s SHARP [ 22 ] employ custom interconnect architec-tures to accelerate collective communications in HPC applications. However, these approaches are also designed for CPUs and commu-nicate via message passing rather than accelerators communicating via shared-memory fabrics. Many recent works [ 19 , 34 , 55 ] have explored programmable switches for in-network reduction. How-ever, unlike SCIN, these approaches are fundamentally constrained by the limited flexibility and on-chip resources of programmable switches, making it difficult to support operators such as activation quantization that can be naturally integrated into SCIN. 
+
+## 6 Conclusion 
+
+In this work,we propose SCIN, a switch-centric in-network architec-ture for shared-memory networks of AI accelerators, that enables both low-latency and high-bandwidth All-Reduce. Compared with accelerator-centric designs, SCIN eliminates redundant data move-ment and reduces global synchronization overhead, significantly lowering All-Reduce latency. Powered by SCIN, we further propose an in-network quantized All-Reduce method that achieves nearly 2× communication compression with almost no accuracy loss. To demonstrate its feasibility and effectiveness, we implement a proto-type of SCIN on a multi-FPGA system. Experimental results show that SCIN accelerates All-Reduce by up to 8.7 × for small messages and 3.8 × for large messages, leading to up to 1.74x faster TTFT and 1.34x faster TPOT on LLaMA-2 models. 
+
+## References                  
+
+> [1] Dennis Abts, Garrin Kimmell, Andrew Ling, John Kim, Matt Boyd, Andrew Bitar, Sahil Parmar, Ibrahim Ahmed, Roberto DiCecco, David Han, John Thompson, Michael Bye, Jennifer Hwang, Jeremy Fowers, Peter Lillian, Ashwin Murthy, Elyas Mehtabuddin, Chetan Tekur, Thomas Sohmers, Kris Kang, Stephen Maresh, and Jonathan Ross. 2022. A software-defined tensor streaming multiprocessor for large-scale machine learning. In Proceedings of the 49th Annual International Symposium on Computer Architecture . 567–580. [2] Amey Agrawal, Nitin Kedia, Jayashree Mohan, Ashish Panwar, Nipun Kwatra, Bhargav S Gulavani, Ramachandran Ramjee, and Alexey Tumanov. 2024. Vidur: A large-scale simulation framework for llm inference. Proceedings of Machine Learning and Systems 6 (2024), 351–366. [3] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav S Gulavani, Alexey Tumanov, and Ramachandran Ramjee. 2024. Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve. Proceedings of 18th USENIX Symposium on Operating Systems Design and Implementation, 2024, Santa Clara (2024). [4] Ibrahim Ahmed, Clemens Schaefer, Gil Tabak, Denis Vnukov, Zenong Zhang, Anatoliy Yevtushenko, and Andy Davis. 2025. EQuARX: Efficient Quantized AllReduce in XLA for Distributed Machine Learning Acceleration. arXiv preprint arXiv:2506.17615 (2025). [5] George Almási, Philip Heidelberger, Charles J Archer, Xavier Martorell, C Chris Erway, José E Moreira, Burkhard Steinmacher-Burow, and Yili Zheng. 2005. Opti-mization of MPI collective communication on BlueGene/L systems. In Proceedings of the 19th annual international conference on Supercomputing . 253–262. [6] AMD. 2026. Aurora 64B/66B. https://doi.org/en/products/adaptive-socs-and-fpgas/intellectual-property/aurora64b66b.html [7] AMD. 2026. JTAG to AXI Master. https://doi.org/en/products/adaptive-socs-and-fpgas/intellectual-property/jtag_to_axi_master.html [8] Reza Yazdani Aminabadi, Samyam Rajbhandari, Ammar Ahmad Awan, Cheng Li, Du Li, Elton Zheng, Olatunji Ruwase, Shaden Smith, Minjia Zhang, Jeff Rasley, 12
+
+A Switch-Centric In-Network Architecture for Accelerating LLM Inference in Shared-Memory Network 
+
+and Yuxiong He. 2022. DeepSpeed- Inference: Enabling Efficient Inference of Transformer Models at Unprecedented Scale. In SC22: International Conference for High Performance Computing, Networking, Storage and Analysis . 1–15. https: //doi.org/10.1109/SC41404.2022.00051 [9] Baba Arimilli, Ravi Arimilli, Vicente Chung, Scott Clark, Wolfgang Denzel, Ben Drerup, Torsten Hoefler, Jody Joyner, Jerry Lewis, Jian Li, Nan Ni, and Ram Rajamony. 2010. The PERCS High-Performance Interconnect. In 2010 18th IEEE Symposium on High Performance Interconnects . 75–82. https://doi.org/10.1109/ HOTI.2010.16 [10] ARM. 2026. AMBA AXI Protocol Specification. https://doi.org/documentation/ ihi0022/latest/ [11] Yonatan Bisk, Rowan Zellers, Ronan Le Bras, Jianfeng Gao, and Yejin Choi. 2019. PIQA: Reasoning about Physical Commonsense in Natural Language. arXiv:1911.11641 [cs.CL] https://arxiv.org/abs/1911.11641 [12] Broadcom. 2025. Scale-Up Ethernet Framework Specification. https://doi.org/ doc/scale-up-ethernet-framework [13] Chuyan Chen, Yutong He, Pengrui Li, Weichen Jia, and Kun Yuan. 2026. Greedy low-rank gradient compression for distributed learning with convergence guar-antees. IEEE Transactions on Signal Processing (2026). [14] Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina Toutanova. 2019. BoolQ: Exploring the Surprising Difficulty of Natural Yes/No Questions. arXiv:1905.10044 [cs.CL] https://arxiv.org/abs/ 1905.10044 [15] Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. 2018. Think you have Solved Question Answer-ing? Try ARC, the AI2 Reasoning Challenge. arXiv:1803.05457v1 (2018). [16] Ultra Accelerator Link Consortium. 2025. UALink 1.0 Specification. https: //doi.org/specifications/ualink-1-0-specification/ [17] John Danskin and Denis Foley. 2016. Pascal GPU with NVLink. In 2016 IEEE Hot Chips 28 Symposium (HCS) . IEEE, 1–24. [18] Harry Dong, Tyler Johnson, Minsik Cho, and Emad Soroush. 2024. Towards Low-Bit Communication for Tensor Parallel LLM Inference. In NeurIPS Workshop .https://arxiv.org/abs/2411.07942 [19] Jiawei Fei, Chen-Yu Ho, Atal N Sahu, Marco Canini, and Amedeo Sapio. 2021. Efficient sparse collective communication and its application to accelerate dis-tributed deep learning. In Proceedings of the 2021 ACM SIGCOMM 2021 Conference .676–691. [20] Leo Gao, Jonathan Tow, Baber Abbasi, Stella Biderman, Sid Black, Anthony DiPofi, Charles Foster, Laurence Golding, Jeffrey Hsu, Alain Le Noac’h, Haonan Li, Kyle McDonell, Niklas Muennighoff, Chris Ociepa, Jason Phang, Laria Reynolds, Hailey Schoelkopf, Aviya Skowron, Lintang Sutawika, Eric Tang, Anish Thite, Ben Wang, Kevin Wang, and Andy Zou. 2024. The Language Model Evaluation Harness. https://doi.org/10.5281/zenodo.12608602 [21] Amir Gholami, Zhewei Yao, Sehoon Kim, Coleman Hooper, Michael W. Mahoney, and Kurt Keutzer. 2024. AI and Memory Wall. IEEE Micro 44, 3 (2024), 33–39. https://doi.org/10.1109/MM.2024.3373763 [22] Richard L. Graham, Devendar Bureddy, Pak Lui, Hal Rosenstock, Gilad Shainer, Gil Bloch, Dror Goldenerg, Mike Dubman, Sasha Kotchubievsky, Vladimir Koush-nir, Lion Levi, Alex Margolin, Tamir Ronen, Alexander Shpiner, Oded Wertheim, and Eitan Zahavi. 2016. Scalable Hierarchical Aggregation Protocol (SHArP): A Hardware Architecture for Efficient Data Reduction. In 2016 First Interna-tional Workshop on Communication Optimizations in HPC (COMHPC) . 1–10. https://doi.org/10.1109/COMHPC.2016.006 [23] Jan Hansen-Palmus, Michael Truong Le, Oliver Hausdörfer, and Alok Verma. 2024. Communication compression for tensor parallel LLM inference. arXiv preprint arXiv:2411.09510 (2024). [24] Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. 2021. Measuring Massive Multitask Language Un-derstanding. arXiv:2009.03300 [cs.CY] https://arxiv.org/abs/2009.03300 [25] Alex Ishii, Denis Foley, Eric Anderson, Bill Dally, Glenn Dearth, Larry Dennison, Mark Hummel, and John Schafer. 2018. Nvswitch and dgx-2 nvlink-switching chip and scale-up compute server. In Hot Chips .[26] Alexander Ishii and Ryan Wells. 2022. The nvlink-network switch: Nvidia’s switch chip for high communication-bandwidth superpods. In 2022 IEEE Hot Chips 34 Symposium (HCS) . IEEE, 1–23. [27] Albert Q. Jiang, Alexandre Sablayrolles, Arthur Mensch, Chris Bamford, De-vendra Singh Chaplot, Diego de las Casas, Florian Bressand, Gianna Lengyel, Guillaume Lample, Lucile Saulnier, Lélio Renard Lavaud, Marie-Anne Lachaux, Pierre Stock, Teven Le Scao, Thibaut Lavril, Thomas Wang, Timothée Lacroix, and William El Sayed. 2023. Mistral 7B. arXiv:2310.06825 [cs.CL] https: //arxiv.org/abs/2310.06825 [28] Albert Q. Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, Gianna Lengyel, Guillaume Bour, Guillaume Lample, Lélio Renard Lavaud, Lucile Saulnier, Marie-Anne Lachaux, Pierre Stock, Sandeep Subramanian, Sophia Yang, Szymon Antoniak, Teven Le Scao, Théophile Gervet, Thibaut Lavril, Thomas Wang, Timothée Lacroix, and William El Sayed. 2024. Mixtral of Experts. arXiv:2401.04088 [cs.LG] https://arxiv.org/abs/2401.04088 [29] Nan Jiang, Daniel U Becker, George Michelogiannakis, James Balfour, Brian Towles, David E Shaw, John Kim, and William J Dally. 2013. A detailed and flexible cycle-accurate network-on-chip simulator. In 2013 IEEE international symposium on performance analysis of systems and software (ISPASS) . IEEE, 86–96. [30] Norman P. Jouppi, George Kurian, Sheng Li, Peter Ma, Rahul Nagarajan, Lifeng Nai, Nishant Patil, Suvinay Subramanian, Andy Swing, Brian Towles, Cliff Young, Xiang Zhou, Zongwei Zhou, and David Patterson. 2023. TPU v4: An Optically Reconfigurable Supercomputer for Machine Learning with Hardware Support for Embeddings. arXiv:2304.01433 [cs.AR] https://arxiv.org/abs/2304.01433 [31] Benjamin Klenk, Nan Jiang, Greg Thorson, and Larry Dennison. 2020. An in-network architecture for accelerating shared-memory multiprocessor collectives. In 2020 ACM/IEEE 47th Annual International Symposium on Computer Architecture (ISCA) . IEEE, 996–1009. [32] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAtten-tion. In Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles .[33] Jiedong Lang, Zhehao Guo, and Shuyu Huang. 2024. A comprehensive study on quantization techniques for large language models. In 2024 4th International conference on artificial intelligence, robotics, and communication (ICAIRC) . IEEE, 224–231. [34] ChonLam Lao, Yanfang Le, Kshiteej Mahajan, Yixi Chen, Wenfei Wu, Aditya Akella, and Michael Swift. 2021. {ATP }: In-network aggregation for multi-tenant learning. In 18th USENIX Symposium on Networked Systems Design and Implementation (NSDI 21) . 741–761. [35] Jemin Lee, Sihyeong Park, Jinse Kwon, Jihun Oh, and Yongin Kwon. 2024. Explor-ing the trade-offs: Quantization methods, task difficulty, and model size in large language models from edge to giant. arXiv preprint arXiv:2409.11055 (2024). [36] Qingyuan Li, Bo Zhang, Liang Ye, Yifan Zhang, Wei Wu, Yerui Sun, Lin Ma, and Yuchen Xie. 2024. Flash communication: Reducing tensor parallelization bottle-neck for fast large language model inference. arXiv preprint arXiv:2412.04964 
+
+(2024). [37] Youjie Li, Iou-Jen Liu, Yifan Yuan, Deming Chen, Alexander Schwing, and Jian Huang. 2019. Accelerating distributed reinforcement learning with in-switch computing. In Proceedings of the 46th International Symposium on Computer Architecture . 279–291. [38] Heng Liao, Bingyang Liu, Xianping Chen, Zhigang Guo, Chuanning Cheng, Jianbing Wang, Xiangyu Chen, Peng Dong, Rui Meng, Wenjie Liu, Zhe Zhou, Ziyang Zhang, Yuhang Gai, Cunle Qian, Yi Xiong, Zhongwu Cheng, Jing Xia, Yuli Ma, Xi Chen, Wenhua Du, Shizhong Xiao, Chungang Li, Yong Qin, Liudong Xiong, Zhou Yu, Lv Chen, Lei Chen, Buyun Wang, Pei Wu, Junen Gao, Xiaochu Li, Jian He, Shizhuan Yan, and Bill McColl. 2025. UB-Mesh: a Hierarchically Localized nD-FullMesh Datacenter Network Architecture. arXiv:2503.20377 [cs.AR] https: //arxiv.org/abs/2503.20377 [39] John DC Little and Stephen C Graves. 2008. Little’s law. In Building intuition: insights from basic operations management models and principles . Springer, 81– 100. [40] Shih-yang Liu, Zechun Liu, Xijie Huang, Pingcheng Dong, and Kwang-Ting Cheng. 2023. Llm-fp4: 4-bit floating-point quantized transformers. In Proceedings of the 2023 conference on empirical methods in natural language processing . 592– 605. [41] Xiaoyu Ma and David Patterson. 2026. Challenges and Research Directions for Large Language Model Inference Hardware. arXiv preprint arXiv:2601.05047 
+
+(2026). [42] Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. 2016. Pointer Sentinel Mixture Models. arXiv:1609.07843 [cs.CL] [43] Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. 2018. Can a Suit of Armor Conduct Electricity? A New Dataset for Open Book Question Answering. arXiv:1809.02789 [cs.CL] https://arxiv.org/abs/1809.02789 [44] Deepak Narayanan, Aaron Harlap, Amar Phanishayee, Vivek Seshadri, Nikhil R Devanur, Gregory R Ganger, Phillip B Gibbons, and Matei Zaharia. 2019. PipeDream: Generalized pipeline parallelism for DNN training. In Proceedings of the 27th ACM symposium on operating systems principles . 1–15. [45] Deepak Narayanan, Mohammad Shoeybi, Jared Casper, Patrick LeGresley, Mostofa Patwary, Vijay Korthikanti, Dmitri Vainbrand, Prethvi Kashinkunti, Julie Bernauer, Bryan Catanzaro, Amar Phanishayee, and Matei Zaharia. 2021. Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM. In SC21: International Conference for High Performance Computing, Networking, Storage and Analysis . 1–14. [46] NVIDIA. 2022. Upgrading Multi-GPU Interconnectivity with the Third-Generation NVIDIA NVSwitch . https://developer.nvidia.com/blog/?p=53977 [47] NVIDIA. 2023. Tensorrt-llm. https://doi.org/NVIDIA/TensorRT-LLM [48] NVIDIA. 2024. NVIDIA DGX H200. https://doi.org/en-us-dgx-systems/dgx-h200-datasheet?ncid=no-ncid [49] NVIDIA. 2024. NVIDIA GB200 NVL72 Delivers Trillion-Parameter LLM Training and Real-Time Inference. https://doi.org/blog/nvidia-gb200-nvl72-delivers-trillion-parameter-llm-training-and-real-time-inference/?ncid=no-ncid 13 Aojie Jiang, Kang Zhu, Zhiheng Zhang, Zhengxu Su, Juntao Liu, Yuan Du, and Li Du 
+
+[50] NVIDIA. 2024. NVIDIA H200 Tensor Core GPUs and NVIDIA TensorRT-LLM Set MLPerf LLM Inference Records. https://doi.org/blog/nvidia-h200-tensor-core-gpus-and-nvidia-tensorrt-llm-set-mlperf-llm-inference-records/ [51] Reiner Pope, Sholto Douglas, Aakanksha Chowdhery, Jacob Devlin, James Brad-bury, Jonathan Heek, Kefan Xiao, Shivani Agrawal, and Jeff Dean. 2023. Efficiently scaling transformer inference. Proceedings of machine learning and systems 5(2023), 606–624. [52] Saeed Rashidi, Srinivas Sridharan, Sudarshan Srinivasan, and Tushar Krishna. 2020. ASTRA-SIM: Enabling SW/HW Co-Design Exploration for Distributed DL Training Platforms. In 2020 IEEE International Symposium on Performance Analy-sis of Systems and Software (ISPASS) . 81–92. https://doi.org/10.1109/ISPASS48437. 2020.00018 [53] Vijay Janapa Reddi, Christine Cheng, David Kanter, Peter Mattson, Guenther Schmuelling, Carole-Jean Wu, Brian Anderson, Maximilien Breughe, Mark Charlebois, William Chou, Ramesh Chukka, Cody Coleman, Sam Davis, Pan Deng, Greg Diamos, Jared Duke, Dave Fick, J. Scott Gardner, Itay Hubara, Sachin Idgunji, Thomas B. Jablin, Jeff Jiao, Tom St. John, Pankaj Kanwar, David Lee, Jeffery Liao, Anton Lokhmotov, Francisco Massa, Peng Meng, Paulius Micike-vicius, Colin Osborne, Gennady Pekhimenko, Arun Tejusve Raghunath Rajan, Dilip Sequeira, Ashish Sirasao, Fei Sun, Hanlin Tang, Michael Thomson, Frank Wei, Ephrem Wu, Lingjie Xu, Koichi Yamada, Bing Yu, George Yuan, Aaron Zhong, Peizhao Zhang, and Yuchen Zhou. 2019. MLPerf Inference Benchmark. arXiv:1911.02549 [cs.LG] [54] Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. 2019. WinoGrande: An Adversarial Winograd Schema Challenge at Scale. arXiv:1907.10641 [cs.CL] https://arxiv.org/abs/1907.10641 [55] Amedeo Sapio, Marco Canini, Chen-Yu Ho, Jacob Nelson, Panos Kalnis, Changhoon Kim, Arvind Krishnamurthy, Masoud Moshref, Dan Ports, and Pe-ter Richtárik. 2021. Scaling distributed machine learning with {In-Network }
+
+aggregation. In 18th USENIX Symposium on Networked Systems Design and Im-plementation (NSDI 21) . 785–808. [56] Prajwal Singhania, Siddharth Singh, Lannie Dalton Hough, Ishaan Revankar, Harshitha Menon, Charles Jekel, and Abhinav Bhatele. [n. d.]. Understanding Communication Bottlenecks in Multi-node LLM Inference. ([n. d.]). [57] Synopsys. 2026. Pre-Silicon Prototyping. https://doi.org/verification/emulation-prototyping/prototyping.html [58] Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Almahairi, Yas-mine Babaei, Nikolay Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhos-ale, Dan Bikel, Lukas Blecher, Cristian Canton Ferrer, Moya Chen, Guillem Cucurull, David Esiobu, Jude Fernandes, Jeremy Fu, Wenyin Fu, Brian Fuller, Cynthia Gao, Vedanuj Goswami, Naman Goyal, Anthony Hartshorn, Saghar Hosseini, Rui Hou, Hakan Inan, Marcin Kardas, Viktor Kerkez, Madian Khabsa, Isabel Kloumann, Artem Korenev, Punit Singh Koura, Marie-Anne Lachaux, Thibaut Lavril, Jenya Lee, Diana Liskovich, Yinghai Lu, Yuning Mao, Xavier Martinet, Todor Mihaylov, Pushkar Mishra, Igor Molybog, Yixin Nie, Andrew Poulton, Jeremy Reizenstein, Rashi Rungta, Kalyan Saladi, Alan Schelten, Ruan Silva, Eric Michael Smith, Ranjan Subramanian, Xiaoqing Ellen Tan, Binh Tang, Ross Taylor, Adina Williams, Jian Xiang Kuan, Puxin Xu, Zheng Yan, Iliyan Zarov, Yuchen Zhang, Angela Fan, Melanie Kambadur, Sharan Narang, Aurelien Rodriguez, Robert Stojnic, Sergey Edunov, and Thomas Scialom. 2023. Llama 2: Open Foundation and Fine-Tuned Chat Models. arXiv:2307.09288 [cs.CL] https://arxiv.org/abs/2307.09288 [59] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. Attention is all you need. Advances in neural information processing systems 30 (2017). [60] Ben Wang and Aran Komatsuzaki. 2021. GPT-J-6B: A 6 Billion Parameter Autore-gressive Language Model. https://github.com/kingoflolz/mesh-transformer-jax. [61] Guanhua Wang, Heyang Qin, Sam Ade Jacobs, Connor Holmes, Samyam Rajb-handari, Olatunji Ruwase, Feng Yan, Lei Yang, and Yuxiong He. 2023. Zero++: Extremely efficient collective communication for giant model training. arXiv preprint arXiv:2306.10209 (2023). [62] William Won, Midhilesh Elavazhagan, Sudarshan Srinivasan, Swati Gupta, and Tushar Krishna. 2024. TACOS: Topology-Aware Collective Algorithm Synthesizer for Distributed Machine Learning. In Proceedings of the 2024 57th IEEE/ACM International Symposium on Microarchitecture . 856–870. https://doi.org/10.1109/ MICRO61859.2024.00068 [63] Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. 2023. Smoothquant: Accurate and efficient post-training quantization for large language models. In International conference on machine learning . 38087–38099. [64] Lang Xu, Kaushik Kandadi Suresh, Quentin Anthony, Nawras Alnaasan, and Dha-baleswar K Panda. 2025. Characterizing communication patterns in distributed large language model inference. In 2025 IEEE Symposium on High-Performance Interconnects (HOTI) . IEEE, 1–11. [65] Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. 2019. HellaSwag: Can a Machine Really Finish Your Sentence? arXiv:1905.07830 [cs.CL] https://arxiv.org/abs/1905.07830 [66] Chen Zhang, Qijun Zhang, Zhuoshan Zhou, Yijia Diao, Haibo Wang, Zhe Zhou, Zhipeng Tu, Zhiyao Li, Guangyu Sun, Zhuoran Song, Zhigang Ji, Jingwen Leng, and Minyi Guo. 2026. Towards Compute-Aware In-Switch Computing for LLMs Tensor-Parallelism on Multi-GPU Systems. In 2026 IEEE International Symposium on High Performance Computer Architecture (HPCA) . 1–15. https://doi.org/10. 1109/HPCA68181.2026.11408460 [67] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. SGLang: efficient execution of structured language model programs. In Proceedings of the 38th International Conference on Neural Information Processing Systems .14
