@@ -1,0 +1,482 @@
+Title: ScoutAttention: Efficient KV Cache Offloading via Layer-Ahead CPU Pre-computation for LLM Inference
+
+URL Source: https://arxiv.org/pdf/2603.27138v1
+
+Published Time: Tue, 31 Mar 2026 00:28:02 GMT
+
+Number of Pages: 7
+
+Markdown Content:
+# ScoutAttention: Efficient KV Cache Offloading via Layer-Ahead CPU Pre-computation for LLM Inference 
+
+## Qiuyang Zhang 
+
+Huazhong University of Science and Technology Wuhan, China qyzhang@hust.edu.cn 
+
+## Kai Zhou 
+
+Huazhong University of Science and Technology Wuhan, China kezzy@hust.edu.cn 
+
+## Ding Tang 
+
+Huazhong University of Science and Technology Wuhan, China dinger@hust.edu.cn 
+
+## Kai Lu ∗
+
+Huazhong University of Science and Technology Wuhan, China kailu@hust.edu.cn 
+
+## Cheng Li 
+
+Huawei Technologies Hefei, China licheng56@huawei.com 
+
+## Zhenyu Yang 
+
+Huawei Technologies Hefei, China yangzhenyu33@huawei.com 
+
+## Peng Xu 
+
+Research Center for High Efficiency Computing Infrastructure Zhejiang Lab Hangzhou, China xup@zhejianglab.com 
+
+## Jiguang Wan 
+
+Huazhong University of Science and Technology Wuhan, China jgwan@hust.edu.cn 
+
+## Abstract 
+
+Large language models encounter critical GPU memory capacity constraints during long-context inference, where KV cache mem-ory consumption severely limits decode batch sizes. While exist-ing research has explored offloading KV cache to DRAM, these approaches either demand frequent GPU-CPU data transfers or impose extensive CPU computation requirements, resulting in poor GPU utilization as the system waits for I/O operations or CPU processing to complete. We propose ScoutAttention, a novel KV cache offloading frame-work that accelerates LLM inference through collaborative GPU-CPU attention computation. To prevent CPU computation from bottlenecking the system, ScoutAttention introduces GPU-CPU collaborative block-wise sparse attention that significantly reduces CPU load. Unlike conventional parallel computing approaches, our framework features a novel layer-ahead CPU pre-computation al-gorithm, enabling the CPU to initiate attention computation one layer in advance, complemented by asynchronous periodic recall mechanisms to maintain minimal CPU compute load. Experimental results demonstrate that ScoutAttention maintains accuracy within 2.4% of baseline while achieving 2.1x speedup compared to existing offloading methods.  
+
+> ∗Kai Lu is the corresponding author
+> This work is licensed under a Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License.
+> DAC ’26, Long Beach, CA, USA
+> ©2026 Copyright held by the owner/author(s). ACM ISBN xxxxxxxxxxxxxxxxxxxxxxxxx https://doi.org/xxxxxxxxxxxxxxxxxxxxxxx
+
+ACM Reference Format: 
+
+Qiuyang Zhang, Kai Zhou, Ding Tang, Kai Lu, Cheng Li, Zhenyu Yang, Peng Xu, and Jiguang Wan. 2026. ScoutAttention: Efficient KV Cache Of-floading via Layer-Ahead CPU Pre-computation for LLM Inference. In 
+
+63rd ACM/IEEE Design Automation Conference (DAC ’26), July 26–29, 2026, Long Beach, CA, USA. ACM, New York, NY, USA, 7 pages. https://doi.org/ xxxxxxxxxxxxxxxxxxxxxxx 
+
+## 1 Introduction 
+
+In recent years, Large Language Models (LLMs) have achieved un-precedented progress across a wide range of application domains [ 13 ]. Traditionally, these advances have been driven by increas-ing model size and training data—a paradigm known as train-time scaling [7]. However, with the diminishing returns of train-time scaling, the field is gradually shifting toward inference-time scaling 
+
+strategies [ 17 ]. Pioneered by models such as OpenAI’s o1 [ 6] and DeepSeek-R1 [ 4], inference-time scaling significantly extends out-put length through a “think-before-answer” approach, employing chain-of-thought (CoT) reasoning that enables models to perform more extensive computation during inference. Concurrently, to fully harness the capabilities of LLMs, real-world applications increasingly depend on sophisticated context en-gineering techniques [ 12 ]. Approaches such as Retrieval-Augmented Generation (RAG) [ 9] and few-shot prompting inject contextual information into prompts, resulting in longer inputs that enable LLMs to better understand user queries and produce more accurate responses. While these two trends, extending input length through context engineering and extending output length through chain-of-thought reasoning, have significantly improved LLM performance, their convergence places substantial pressure on the decoding stage. Specifically, the decoding is bottlenecked by GPU memory capacity. Since decoding is memory-bound, effective batching is crucial for  
+
+> arXiv:2603.27138v1 [cs.LG] 28 Mar 2026 DAC ’26, July 26–29, 2026, Long Beach, CA, USA Qiuyang Zhang et al.
+
+improving GPU utilization and throughput. However, GPU memory capacity constraints limit the maximum batch size, as longer se-quences consume substantially more memory. For example, given that a 32k-token Qwen3-32B request consumes 8GB for the KV cache, the total memory usage (including weights and activations) on an 80GB GPU limits the batch size to one, which greatly limits inference throughput. To address the memory bottleneck, existing work attempts to offload part of the KV cache to DRAM during inference. For ex-ample, InfiniGen [ 8] offloads less important tokens to DRAM after the prefill phase, retaining only a subset of tokens on the GPU to reduce memory usage. During the decode stage, it predicts the important tokens for the next layer one-layer-ahead and prefetches them back to the GPU. Although this approach mitigates the GPU memory capacity constraint, it introduces a new I/O bottleneck. We observe that in InfiniGen, even with prefetching, slow I/O causes the GPU to stall for 61% of the end-to-end execution time, leading to a substantial performance degradation. Beyond recall-based KV cache offloading methods, there also exist co-attention approaches that compute attention directly on the CPU. For example, HGCA [ 3] avoids recalling KV tokens back to the GPU; instead, tokens offloaded to the CPU are processed concurrently on the CPU alongside GPU computation. Although this parallel attention strategy eliminates the I/O bottleneck in recall-based methods, it introduces a new compute bottleneck on the CPU. Given that GPU attention computation is approximately 20x faster than CPU, this parallel execution scheme still results in GPU idle time. Our experimental results reveal that with HGCA, the GPU remains idle for 57% of its execution time while waiting for CPU attention computation to complete. We propose ScoutAttention , an efficient KV cache offloading framework for LLM inference. Since CPU-side attention computa-tion achieves higher effective throughput than PCIe data transfer, ScoutAttention adapts a co-attention strategy to eliminate slow recall I/O. To prevent CPU computation from becoming the new performance bottleneck, ScoutAttention introduces a novel layer-ahead CPU pre-computation mechanism. Unlike conventional parallel execution, this approach initiates CPU computation one layer in advance, effectively hiding latency through pipelining. Building on this foundation, ScoutAttention implements GPU-CPU collaborative block-wise sparse attention , which strategically retains only the most critical KV cache blocks on the GPU while offloading the remainder to CPU memory. Our key observation is that the importance distribution of KV cache blocks exhibits strong temporal locality—adjacent decode tokens typically attend to highly overlapping sets of important blocks. By exploiting this property, ScoutAttention limits CPU computation to only a small subset of top-k blocks not present in the GPU cache, significantly reducing computational overhead while preserving model accuracy. Moreover, to avoid increased CPU workload caused by temporal drift in the set of important blocks, we introduce asynchronous periodic KV cache recall , which periodically recalls important KV blocks to the GPU to correct the drift. Unlike prior recall-based methods, periodic recall in ScoutAttention is issued only after alayer finishes. Compared with InfiniGen’s one-layer-ahead recall, our asynchronous design stretches the I/O window from a single GPU attn imlp iattn i+1 mlp i+1 layer i layer( i+1) GPU attn imlp iattn i+1 mlp i+1 layer i layer( i+1) 
+
+(a) Full Attention: high attention computation under long-context. GPU PCIe attn recall i+1 attn recall i+2 attn recall iattn imlp imlp i+1 topk i+2 topk i+1 bubbles layer i layer( i+1) 61% attn i+1 GPU PCIe attn recall i+1 attn recall i+2 attn recall iattn imlp imlp i+1 topk i+2 topk i+1 bubbles layer i layer( i+1) 61% attn i+1 
+
+(b) InfiniGen: pipeline bubbles due to slow KV cache recall. GPU CPU attn imlp iattn i+1 mlp i+1 attn cpu i+1 topk i+1 ... topk ibubbles layer i layer( i+1) 57% attn cpu iGPU CPU attn imlp iattn i+1 mlp i+1 attn cpu i+1 topk i+1 ... topk ibubbles layer i layer( i+1) 57% attn cpu i
+
+(c) HGCA: pipeline bubbles due to slow CPU-side computation. GPU CPU attn imlp iattn cpu i+1 topk i+1 attn i+1 mlp i+1 attn cpu i+2 topk i+2 PCIe async periodic recall i... cpu ilayer i layer( i+1) ... ... GPU CPU attn imlp iattn cpu i+1 topk i+1 attn i+1 mlp i+1 attn cpu i+2 topk i+2 PCIe async periodic recall i... cpu ilayer i layer( i+1) ... ... 
+
+(d) ScoutAttention: efficient inference pipeline through layer-ahead CPU pre-computation. 
+
+Figure 1: Inference pipeline of different KV cache offloading methods. 
+
+layer to an entire decode step of one token, ensuring that the GPU never stalls waiting for I/O. We implement ScoutAttention on SGLang [23] and evaluate its accuracy and performance across multiple datasets. The results show that the average accuracy degradation of ScoutAttention compared with full attention is less than 2.1%, while its decod-ing throughput reaches 5.1x that of full attention and 2.1x that of existing offloading methods. 
+
+## 2 Background and Motivation 2.1 LLM Inference and Prefill-Decode Disaggregation 
+
+Large language models (LLMs) implement autoregressive sequence modeling with a deep stack of Transformer blocks [ 16 ], each com-prising multi-head attention and a feed-forward network (FFN) with residual connections. During inference, this architecture operates in two distinct phases. The prefill phase processes the entire input prefix in one pass, gen-erating and storing the 𝐾 and 𝑉 vectors in the KV cache . The 
+
+decode phase then produces tokens autoregressively, reusing the cached K/V to compute each subsequent token. Prefill is compute-bound due to its highly parallel workload, whereas decode is memory-bound as it repeatedly accesses the expanding KV cache. These contrasting resource demands lead to performance in-terference when both phases share the same hardware. Prefill-Decode disaggregation addresses this by running the two phases on separate, specialized compute clusters, enabling better resource utilization, lower tail latency, and more reliable SLO compliance [24][14]. ScoutAttention: Efficient KV Cache Offloading via Layer-Ahead CPU Pre-computation for LLM Inference DAC ’26, July 26–29, 2026, Long Beach, CA, USA 4 16 64 256 1024 4096 
+
+> Size (KB)
+> 0
+> 5
+> 10
+> 15
+> 20
+> Bandwidth (GB/s)
+
+Figure 2: I/O bandwidth be-tween GPU and CPU. 0 1 2 3 4 
+
+> Time (s)
+> 0
+> 20
+> 40
+> GPU Utilization (%)
+> HGCA InfiniGen
+
+Figure 3: Low GPU utilization of HGCA and InfiniGen. 
+
+## 2.2 Sparse Attention 
+
+Attention exhibits inherent sparsity, with fewer than 20% of tokens accounting for more than 80% of the total attention weights. Build-ing on this observation, a growing body of work [ 22 ][ 15 ][ 18 ][ 10 ]propose sparse attention algorithms that reduce computation by se-lectively involving only the most influential tokens in the attention computation. Among these sparse attention algorithms, block-wise sparsity has attracted considerable interest. It segments the KV cache into fixed-size blocks and summarizes each block with a block digest 
+
+𝐾 digest . During attention computation, the top-k important blocks are selected according to the dot product between 𝑄 and 𝐾 digest .Different block-wise sparse methods adopt different strategies for generating block digests. For example, Quest [ 15 ] constructs digests using channel-wise min/max pooling over 𝐾 , MoBA [ 11 ] uses mean pooling of 𝐾 , and NSA [ 21 ] incorporates a learnable Multi-Layer Perceptron (MLP) to generate digests from 𝐾 .
+
+## 2.3 Related Work and Motivation 
+
+To mitigate the large GPU memory footprint associated with long-context processing, recent studies have investigated offloading the KV cache to DRAM. These approaches fall into two primary strate-gies: recall-based method and co-attention approach. Figure 1 illus-trates the pipeline of different methods. 
+
+Recall-based offloading. Recall-based approaches involve reload-ing the KV cache back to GPU memory when needed for computa-tion. For example, InfiniGen offloads most tokens to DRAM while keeping only critical tokens on the GPU. During attention com-putation, it introduces a predictive mechanism that identifies the important tokens for the next layer and initiates the recall I/O one layer in advance, enabling overlap between I/O and computation. However, interconnection bandwidth poses a critical bottleneck for these methods. Figure 2 demonstrates the severe I/O bandwidth constraints between a 80GB HBM GPU and CPU, which communi-cate through a PCIe 4x16 interface. With a KV cache size of roughly 4 KB per token per layer, the effective I/O bandwidth is only 800 MB/s. Even when transferring at a coarser granularity using a page size of 32 tokens (128 KB), the bandwidth increases to about 15 GB/s, which remains low compared with the 1.9 TB/s HBM band-width. Our evaluation reveals that despite InfiniGen’s sophisticated one-layer-ahead prefetching strategy, the GPU remains idle for 61% of execution time at a batch size of 40, resulting in very low GPU utilization, as shown in Figure 3. 
+
+Co-attention approach. For the co-attention approach, tokens offloaded to DRAM are computed directly on the CPU. For instance, GPU -CPU Sparse Co -attention Inference Kernel Top -KKernel Layer -ahead CPU Pre -computation Async Periodic KV Cache Recall GPU CPU HBM DRAM KV Cache Block Digest KV Cache SMs I/O workers CPU workers CPU workers Cores §3.2 §3. 3§3. 4
+
+Figure 4: Overall architecture of ScoutAttention. 
+
+HGCA [ 3] retains only a sliding window of 25% tokens on the GPU, offloading the remaining 75% tokens to the CPU. During computation, the GPU and CPU execute in parallel: the GPU-side performs full attention calculation, while the CPU-side employs sparse attention based on moving average attention weights. Although this co-attention approach eliminates the slow I/O bottleneck present in recall-based methods, it introduces a new bot-tleneck caused by the significant computational disparity between the CPU and GPU. In decoding-phase attention, the GPU is roughly 20x faster than the CPU. Consequently, the parallel execution in HGCA results in about 57% GPU idle time under batch size of 40. 
+
+## 3 Design of ScoutAttention 3.1 Overview 
+
+We present ScoutAttention, a GPU-CPU collaborative sparse at-tention mechanism designed for efficient KV cache offloading. To maximize performance, ScoutAttention is built on three key de-sign principles: 1) GPU-CPU co-attention , which mitigates PCIe bandwidth bottlenecks; 2) CPU-side pre-computation , which hides CPU compute latency; and 3) integration with block-wise sparse attention , which reduces the CPU’s computational burden. Figure 4 illustrates the overall architecture of ScoutAttention. During the decoding stage, ScoutAttention offloads most unim-portant KV blocks to DRAM while retaining only block digests and a small set of important blocks on the GPU. During attention computation, we employ GPU-CPU cooperative sparse attention, where the top-k blocks are processed using a near-data computing approach (§3.2). To prevent slow CPU-side attention computation from becoming the system bottleneck, we introduce a novel layer-ahead CPU pre-computation algorithm (§3.3). In addition, to correct importance drift as decoding progresses, we propose an asynchro-nous periodic recall mechanism that keeps the CPU’s computational load low (§3.4). 
+
+## 3.2 GPU-CPU Collaborative Block-wise Sparse Attention 
+
+In modern AI servers, the CPU’s attention computation throughput (KV cache size divided by compute time) is significantly higher DAC ’26, July 26–29, 2026, Long Beach, CA, USA Qiuyang Zhang et al. : [2,5,7] : [1,5,7] scores block digest kv block kv block GPU merge 0123456701234567����top -k��top -k��\��\CPU attention flow GPU attention flow ��attention 𝑄 𝑖 𝑄 𝑖 𝑊 𝑄 𝑖 𝑋 𝑖 𝐵 𝑝𝑟𝑒𝑑 𝐵 𝑔𝑝𝑢 𝐵 𝑝𝑟𝑒𝑑 𝐵 𝑔𝑝𝑢 040415152626373704152637CPU 04152637CPU ×𝑄 𝑝 𝑟𝑒𝑑 𝑖 ×𝑄 𝑝 𝑟𝑒𝑑 𝑖 ×project project ����attention 157157��𝑋 𝑖 −1𝑊 𝑄 𝑖 
+
+Figure 5: Workflow of GPU-CPU collaborative block-wise sparse attention with layer-ahead CPU pre-computation. 
+
+than the KV cache transfer throughput over PCIe. A 36-core CPU can achieve an attention computation throughput of approximately 100 GB/s. However, as discussed in Sec. 2.3, the PCIe bandwidth for KV cache transfer reaches only about 15 GB/s. Motivated by this disparity, we adapt GPU–CPU co-attention rather than KV cache recall to enable efficient KV cache offloading. Unlike HGCA, which performs the entire sparse attention com-putation on the CPU, our design executes cooperative block-wise sparse attention across both CPU and GPU. As demonstrated in prior works (§ 2.2), block-wise sparse attention has been exten-sively validated for accuracy. In this paper, we employ Quest as our sparsification method; however, ScoutAttention is fully compatible with other sparsification algorithms such as DeepSeek NSA [21]. Building on block-wise sparse attention, ScoutAttention offloads less important KV cache blocks to DRAM while retaining only com-pact digests of each block and a fixed subset of critical blocks in GPU memory. During attention computation, the GPU first identifies the top-k blocks by computing the dot product between the query and each block’s digest. It then processes the blocks that reside on the GPU, while the fraction of top-k blocks that are not resident on the GPU are computed on the CPU. Finally, the intermediate results from both devices are merged on the GPU using the FlashAttention algorithm [ 2][ 19 ] to produce the final attention output. Figure 5 shows the overall workflow of ScoutAttention. This partitioning strategy is highly effective because important blocks exhibit strong temporal locality across adjacent tokens. As shown in Figure 6a, on average less than 15% of important blocks change between consecutive tokens. Since the GPU retains the important blocks identified in the preceding steps, the CPU needs to process only a small fraction of top-k blocks that not resident on the GPU in ScoutAttention, substantially reducing its computational overhead. 
+
+## 3.3 Layer-Ahead CPU Pre-computation 
+
+To further prevent CPU computation from becoming a bottleneck, we propose layer-ahead CPU pre-computation , a novel tech-nique that allows CPU-side attention computation to begin one layer ahead of the GPU’s execution. 
+
+Algorithm 1 Layer-ahead CPU Pre-computation  
+
+> 1:
+
+Input: layer i’s input 𝑋 𝑖 , query projection weight 𝑊 𝑄 , block digest 𝐾 digest . 
+
+> 2:
+
+Output: layer i’s attention output 𝐴 𝑖 . 
+
+> 3:
+
+⊲ Trigger next layer’s CPU-side pre-computation ⊳ 
+
+> 4:
+
+𝑄 𝑖 +1 
+
+> pred
+
+← 𝑊 𝑖 +1 
+
+> 𝑄
+
+𝑋 𝑖 ⊲ Get predict query of next layer  
+
+> 5:
+
+𝐵 𝑖 +1 
+
+> pred
+
+← TopK (𝑄 𝑖 +1
+
+> pred
+
+𝐾 𝑖 +1
+
+> digest ⊤
+
+) ⊲ Predict top-k blocks  
+
+> 6:
+
+𝐵 𝑖 +1 
+
+> cpu
+
+← 𝐵 𝑖 +1 
+
+> pred
+
+\ 𝐵 𝑖 +1 
+
+> gpu
+
+⊲ Blocks reside in CPU  
+
+> 7:
+
+spawn CPUAttn (𝐵 𝑖 +1
+
+> cpu
+
+) ⊲ Async CPU pre-computation  
+
+> 8:
+
+⊲ Compute current layer’s attention ⊳ 
+
+> 9:
+
+𝑄 𝑖 ← 𝑊 𝑖 𝑄 𝑋 𝑖  
+
+> 10:
+
+𝐴 𝑖  
+
+> gpu
+
+← GPUAttn (𝑄 𝑖 , 𝐵 𝑖 
+
+> gpu
+
+) 
+
+> 11:
+
+⊲ Merge with 𝐴 𝑖  
+
+> cpu
+
+triggered in previous layer ⊳ 
+
+> 12:
+
+𝐴 𝑖 ← Merge (𝐴 𝑖 
+
+> gpu
+
+, 𝐴 𝑖 
+
+> cpu
+
+) 
+
+> 13:
+
+return 𝐴 𝑖 
+
+Table 1: Cosine similarity between predict query and real query. Qwen 3 8B Gemma 3 12B Llama 3.1 8B Mistral 7B GLM 4 9B 
+
+0.94 0.93 0.96 0.97 0.94 As illustrated in Figure 1, ScoutAttention employs a pipelined execution strategy. While computing attention for layer i on the GPU, ScoutAttention first identifies the top-k important blocks for layer i+1. This enables proactive triggering of CPU-side attention computation for layer i+1, allowing it to run in parallel with the GPU’s processing of layer i. The GPU then computes the attention for layer i and merges it with the CPU-side attention results that were triggered during layer i-1. To enable CPU-side pre-computation, the key challenge is deter-mining how to obtain layer i+1’s attention query at layer i. Inspired by InfiniGen, which observes that the inputs of consecutive layers are highly similar due to residual connections, we hypothesize that it is possible to approximate 𝑄 𝑖 +1 by applying the next layer’s query projection matrix 𝑊 𝑖 +1 
+
+> 𝑄
+
+to the current layer’s input 𝑋 𝑖 , yielding a predicted query 𝑄 𝑖 +1
+
+> pred
+
+. To validate this hypothesis, we conducted experiments across various models and observed that the cosine similarity between 𝑄 𝑖 +1 
+
+> pred
+
+and 𝑄 𝑖 +1 remains consistently high, as shown in Table 1. This confirms that the predicted query provides a reliable approximation for CPU-side pre-computation. Building on this, we design a pre-computation algorithm as de-scribed in Algorithm 1 and illustrated in Figure 5. When the GPU is computing layer i, it first predicts the next layer’s query represen-tation 𝑄 𝑖 +1 
+
+> pred
+
+by applying the projection matrix 𝑊 𝑖 +1 
+
+> 𝑄
+
+to the current layer’s input 𝑋 𝑖 . Using 𝑄 𝑖 +1 
+
+> pred
+
+and the next layer’s digest key 𝐾 𝑖 +1
+
+> digest
+
+,the model then identifies the important blocks of the next layer by computing the dot product between them and selecting the top-k blocks, denoted as 𝐵 𝑖 +1
+
+> pred
+
+. Next, we compare 𝐵 𝑖 +1 
+
+> pred
+
+with the blocks already resident in GPU memory 𝐵 𝑖 +1
+
+> gpu
+
+. The blocks that are not yet ScoutAttention: Efficient KV Cache Offloading via Layer-Ahead CPU Pre-computation for LLM Inference DAC ’26, July 26–29, 2026, Long Beach, CA, USA 0 10 20 30 
+
+> decoding step
+> 0
+> 10
+> 20
+> 30
+> CPU compute ratio (%)
+
+(a) w/o periodic recall 0 10 20 30  
+
+> decoding step
+> 0
+> 10
+> 20
+> 30
+> CPU compute ratio (%)  layer 5
+> layer 10
+> layer 15
+> layer 20
+> layer 25
+> layer 30
+> layer 35
+
+(b) w/ periodic recall 
+
+Figure 6: CPU compute ratio (#token/budget) across decoding steps of Qwen 3 8B. 
+
+on the GPU are marked as 𝐵 𝑖 +1
+
+> cpu
+
+. These blocks are then triggered to perform pre-computation on the CPU. After completing this setup of layer i+1’s CPU-side pre-computation, the GPU proceeds with layer i’s attention computation. It first performs the GPU-side atten-tion to produce 𝐴 𝑖 
+
+> gpu
+
+, and then merges this result with the CPU-side output 𝐴 𝑖 
+
+> cpu
+
+, which was pre-computed during the previous layer, to obtain the final attention output 𝐴 𝑖 .Instead of executing CPU operations concurrently with GPU computation, our pre-computation strategy leverages the entire transformer layer’s processing window for CPU-side attention computation. This extended window spans GPU-side attention, feed-forward networks, and QKV projections. On an 80G HBM GPU running Qwen3-32B with a 4k sparsification budget, atten-tion computation alone requires 300us, while the complete trans-former layer consumes 900us during decoding. This layer-ahead pre-computation thus grants the CPU 3x more processing time com-pared to parallel computation approaches, effectively eliminating GPU idle periods. 
+
+## 3.4 Asynchronous Periodic KV Cache Recall 
+
+As decoding progresses, the set of important KV cache blocks grad-ually shifts. Because the CPU handles the KV blocks that are not resident on the GPU, whereas the GPU retains the important blocks identified after the prefill phase, this shift causes the CPU to process an increasingly large portion of tokens. Figure 6a illustrates the CPU compute ratio, defined as the number of tokens computed on the CPU relative to the sparse budget size at each decoding step. The ratio is low in the early decoding steps but shows a steady upward trend as generation proceeds, reflecting the drift in block importance. To mitigate performance degradation, we propose an asynchro-nous periodic KV cache recall mechanism. This process refreshes GPU-resident context by strategically recalling important blocks from DRAM at regular intervals. We recognize that the PCIe inter-connection is a significant bottleneck for fine-grained KV cache transfers. Therefore, our design is centered on two principles: min-imizing recall frequency and moving the data transfer operation off the critical inference path. Specifically, if the system decides to trigger a recall at layer i of decoding step m, ScoutAttention initiates the I/O operation after the attention computation for layer i is complete. This asynchronous approach provides a sufficient time window for the transfer, as the recalled blocks are not required 256 512 1K 2K 4K                                
+
+> 35
+> 40
+> 45
+> Score
+> Qasper
+> 256 512 1K 2K 4K
+> 22
+> 24
+> 26
+> NarrativeQA
+> 256 512 1K 2K 4K
+> 40
+> 42
+> 44
+> 2WikiMQA
+> 256 512 1K 2K 4K
+> 20
+> 22
+> 24
+> 26
+> DuReader
+> 256 512 1K 2K 4K
+> KV Cache Budget
+> 25
+> 30
+> Score
+> GovReport
+> 256 512 1K 2K 4K
+> KV Cache Budget
+> 22
+> 23
+> 24
+> QMSum
+> 256 512 1K 2K 4K
+> KV Cache Budget
+> 38
+> 39
+> 40
+> SAMSum
+> 256 512 1K 2K 4K
+> KV Cache Budget
+> 90
+> 95
+> 100
+> PassageRetrieval
+> FullKV HGCA InfiniGen ScoutAttention
+
+Figure 7: Results on LongBench of different methods. 
+
+by the GPU until layer i of the next decoding step m+1—typically offering a window exceeding 20ms. The recall interval is determined empirically via offline profiling. For this, we track the CPU compute ratio across decoding steps as in Figure 6a. We observe that different layers exhibit distinct patterns, leading us to establish per-layer recall intervals. For each layer, we determine the maximum number of steps that keeps the measured ratio below a threshold 𝛽 . This threshold, determined by the system’s GPU/CPU computational power ratio and intercon-nection bandwidth, balances CPU computation overhead against I/O volume. Based on our empirical analysis, we set the default threshold at 12%. Figure 6b illustrates the improved CPU compute ratio achieved through our asynchronous periodic KV cache recall mechanism, where the average CPU compute ratio is 8.2% and the average recall interval across all layers is 8.7. 
+
+## 4 Implementation and Evaluation 
+
+We implement ScoutAttention on SGLang [ 23 ], one of the most widely used inference frameworks. To efficiently identify the top-k blocks, we implement a block-wise top-k selection CUDA kernel based on FlashInfer [ 20 ]. For CPU-side attention computation, we build an optimized CPU attention worker using IPEX (Intel Exten-sion for PyTorch) [ 5]. We further partition CPU threads into groups, with each group handling one sequence in the batch, thereby im-proving overall attention computation throughput. 
+
+## 4.1 Baselines 
+
+We select three baselines: FullKV, which corresponds to a vanilla Transformer; InfiniGen, a recall-based KV cache offloading method; and HGCA, a co-attention-based KV cache offloading approach. All baselines are implemented in SGLang to ensure a fair comparison. 
+
+## 4.2 Accuracy Benchmark 
+
+We use LongBench [ 1 ], a widely adopted long context understand-ing benchmark for LLMs, to evaluate the accuracy of ScoutAttention. We select eight datasets, including Qasper, NarrativeQA, 2WikiMQA, DuReader, GovReport, QMSum, SAMSum, and PassageRetrieval. These datasets cover a variety of tasks including single document QA, multi document QA, summarization, and message retrieval. The context lengths reach up to 64k tokens. DAC ’26, July 26–29, 2026, Long Beach, CA, USA Qiuyang Zhang et al. 8192 16384 32768 65536 102400 
+
+> Input Length
+> 0
+> 250
+> 500
+> 750
+> 1000
+> Throughput (tok/s)
+> FullKV
+> HGCA
+> InfiniGen
+> ScoutAttention
+
+Figure 8: Decode throughput of different methods under vary-ing input length. 
+
+We evaluate ScoutAttention and baselines across different budget sizes, with all experiments conducted using the Qwen 3 8B model. As shown in Figure 7, ScoutAttention maintains robust accuracy across datasets. The slight accuracy drop relative to InfiniGen comes from using predicted queries for CPU side attention computation. However, because the cosine similarity between predicted and real queries is very high (see Table 1) and CPU-side computation ac-counts for only 8% of the total budget (§3.4), replacing real queries with predicted ones introduces minimal accuracy loss. Compared with full attention, ScoutAttention’s accuracy decreases by only 2.5% on average at a budget size of 1024 and 2.1% at a budget size of 2048. 
+
+## 4.3 Performance Evaluation 
+
+In performance evaluations, we focus solely on the decode instances in Prefill–Decode disaggregation architectures, evaluating only the decode phase while the prefill phase is handled separately. For all baseline methods, the sparse budget is fixed at 2,048 tokens, and the block size in ScoutAttention is set to 32. All experiments in this section are conducted using the Qwen 3 14B model. 
+
+Overall throughput. We first evaluate decoding throughput un-der varying input lengths. As shown in Figure 8, ScoutAttention con-sistently achieves the highest throughput across different sequence lengths. Moreover, as the input length increases, the speedup over FullKV grows steadily due to FullKV’s severe memory-capacity bottleneck. At an input length of 64k, ScoutAttention attains a 5.1x speedup over FullKV. For HGCA and InfiniGen, the large GPU idle time caused by I/O bottlenecks and CPU compute bottlenecks (§2.3) results in throughput that is even lower than FullKV at an 8k input length. Although both methods eventually surpass FullKV at larger input lengths, ScoutAttention still delivers up to a 2.1x speedup compared to them. 
+
+Impact of batch size and block size. Figure 9 illustrates through-put scaling across batch sizes for a 32k input length. HGCA and InfiniGen exhibit sublinear scaling and achieve only 1.31x and 1.21x speedups when increasing the batch size from 16 to 32, as they are constrained by CPU compute and I/O bottlenecks. In contrast, ScoutAttention demonstrates better scalability, achieving a 1.78x speedup from batch 16 to 32 and a 1.48x speedup from batch 32 to 64. Figure 10 illustrates the throughput of ScoutAttention on three different block sizes. As the block size increases, the total number of blocks decreases. This reduces the size of the digest cache used 16 32 64 
+
+> Batch Size
+> 0
+> 250
+> 500
+> 750
+> Throughput (tok/s)  HGCA
+> InfiniGen
+> ScoutAttention
+
+Figure 9: Decode throughput under different batch size. 16 32 64 
+
+> Block Size
+> 0
+> 200
+> 400
+> 600
+> 800
+> Throughput (tok/s)
+
+Figure 10: Decode through-put under varying block size. FullKV HGCA InfiniGen Ours    
+
+> 0
+> 25
+> 50
+> 75
+> 100
+> Percentage (%)  Attention FFN Topk Idle
+
+Figure 11: Latency Breakdown. w/o PC&PR w/o PR Ours  
+
+> 0
+> 200
+> 400
+> 600
+> 800
+> Throughput (tok/s)
+
+Figure 12: Ablation study. 
+
+for block selection, freeing up memory to support larger batch sizes and enhancing decode throughput. 
+
+Latency breakdown. Figure 11 presents the end-to-end latency breakdown, where idle represents GPU stalls due to CPU computa-tion dependencies or PCIe data transfers. HGCA experiences severe CPU compute bottlenecks, with idle time comprising 57% of total latency. InfiniGen performs even worse, with idle time rising to 61% due to significant I/O bottlenecks. In contrast, ScoutAttention dramatically reduces idle time to merely 6% by minimizing CPU computation and employing CPU-side pre-computation. 
+
+Ablation study. We perform an ablation study on ScoutAttention to quantify the performance contribution of each optimization. As shown in Figure 12, “PC” refers to pre-computation and “PR” to pe-riodic recall. By hiding CPU compute latency through layer-ahead pre-computation, PC achieves a 1.39x speedup. Meanwhile, asyn-chronous periodic KV-cache recall provides an additional 1.20x speedup by reducing the CPU compute load. 
+
+## 5 Conclusion 
+
+We propose ScoutAttention, an efficient GPU–CPU co-attention mechanism for KV cache offloading. To enable high-performance CPU-side computation, we introduce a novel layer-ahead CPU pre-computation algorithm paired with an asynchronous periodic recall mechanism. Experimental results show that ScoutAttention achieves only a 2.1% accuracy drop while delivering up to a 5.1x speedup compared to full attention. 
+
+## Acknowledgments 
+
+This work was sponsored by the National Key Research and De-velopment Program of China under Grant No.2023YFB4502701, the National Natural Science Foundation of China under Grant No.62502170 and No.62302465, the China Postdoctoral Science Foun-dation under Grant No.2024M751011, and the Postdoctor Project of Hubei Province under Grant No.2024HBBHCXA027. ScoutAttention: Efficient KV Cache Offloading via Layer-Ahead CPU Pre-computation for LLM Inference DAC ’26, July 26–29, 2026, Long Beach, CA, USA 
+
+## References 
+
+[1] Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. 2024. LongBench: A Bilingual, Multitask Benchmark for Long Context Understanding. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) . Association for Computational Linguistics, Bangkok, Thailand, 3119–3137. doi:10.18653/v1/2024.acl-long.172 [2] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. 2022. FLASHATTENTION: fast and memory-efficient exact attention with IO-awareness. In Proceedings of the 36th International Conference on Neural Informa-tion Processing Systems (New Orleans, LA, USA) (NIPS ’22) . Curran Associates Inc., Red Hook, NY, USA, Article 1189, 16 pages. [3] Weishu Deng, Yujie Yang, Peiran Du, Lingfeng Xiang, Zhen Lin, Chen Zhong, Song Jiang, Hui Lu, and Jia Rao. 2025. HGCA: Hybrid GPU-CPU Attention for Long Context LLM Inference. arXiv:2507.03153 [cs.LG] https://arxiv.org/abs/ 2507.03153 [4] Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Ruoyu Zhang, Runxin Xu, and et al. 2025. DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning. arXiv:2501.12948 [cs.CL] https://arxiv.org/abs/2501. 12948 [5] Intel Corporation. 2024. Intel LLM Library for PyTorch (IPEX-LLM). https: //github.com/intel/ipex-llm. Accessed: 2024-11-18. [6] Aaron Jaech, Adam Kalai, Adam Lerer, Adam Richardson, Ahmed El-Kishky, Aiden Low, and et al. 2024. OpenAI o1 System Card. arXiv:2412.16720 [cs.AI] https://arxiv.org/abs/2412.16720 [7] Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B. Brown, Benjamin Chess, Rewon Child, Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei. 2020. Scaling Laws for Neural Language Models. arXiv:2001.08361 [cs.LG] https: //arxiv.org/abs/2001.08361 [8] Wonbeom Lee, Jungi Lee, Junghwan Seo, and Jaewoong Sim. 2024. InfiniGen: Efficient Generative Inference of Large Language Models with Dynamic KV Cache Management. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . USENIX Association, Santa Clara, CA, 155–172. https://www.usenix.org/conference/osdi24/presentation/lee [9] Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich Küttler, Mike Lewis, Wen-tau Yih, Tim Rocktäschel, et al . 2020. Retrieval-augmented generation for knowledge-intensive nlp tasks. 
+
+Advances in neural information processing systems 33 (2020), 9459–9474. [10] Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024. SnapKV: LLM knows what you are looking for before generation. In Proceedings of the 38th International Conference on Neural Information Processing Systems (Vancouver, BC, Canada) (NIPS ’24) . Curran Associates Inc., Red Hook, NY, USA, Article 722, 24 pages. [11] Enzhe Lu, Zhejun Jiang, Jingyuan Liu, Yulun Du, Tao Jiang, Chao Hong, Shaowei Liu, Weiran He, Enming Yuan, Yuzhi Wang, Zhiqi Huang, Huan Yuan, Suting Xu, Xinran Xu, Guokun Lai, Yanru Chen, Huabin Zheng, Junjie Yan, Jianlin Su, Yuxin Wu, Neo Y. Zhang, Zhilin Yang, Xinyu Zhou, Mingxing Zhang, and Jiezhong Qiu. 2025. MoBA: Mixture of Block Attention for Long-Context LLMs. arXiv:2502.13189 [cs.LG] https://arxiv.org/abs/2502.13189 [12] Lingrui Mei, Jiayu Yao, Yuyao Ge, Yiwei Wang, Baolong Bi, Yujun Cai, Jiazhi Liu, Mingyu Li, Zhong-Zhi Li, Duzhen Zhang, Chenlin Zhou, Jiayi Mao, Tianze Xia, Jiafeng Guo, and Shenghua Liu. 2025. A Survey of Context Engineering for Large Language Models. arXiv:2507.13334 [cs.CL] https://arxiv.org/abs/2507.13334 [13] Humza Naveed, Asad Ullah Khan, Shi Qiu, Muhammad Saqib, Saeed Anwar, Muhammad Usman, Naveed Akhtar, Nick Barnes, and Ajmal Mian. 2025. AComprehensive Overview of Large Language Models. ACM Trans. Intell. Syst. Technol. 16, 5, Article 106 (Aug. 2025), 72 pages. doi:10.1145/3744746 [14] Pratyush Patel, Esha Choukse, Chaojie Zhang, Aashaka Shah, Íñigo Goiri, Saeed Maleki, and Ricardo Bianchini. 2025. Splitwise: Efficient Generative LLM In-ference Using Phase Splitting. In Proceedings of the 51st Annual International Symposium on Computer Architecture (Buenos Aires, Argentina) (ISCA ’24) . IEEE Press, 118–132. doi:10.1109/ISCA59077.2024.00019 [15] Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao, Baris Kasikci, and Song Han. 2024. QUEST: query-aware sparsity for efficient long-context LLM inference. In Proceedings of the 41st International Conference on Machine Learning (Vienna, Austria) (ICML’24) . JMLR.org, Article 1955, 11 pages. [16] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. Attention is all you need. Advances in neural information processing systems 30 (2017). [17] Yangzhen Wu, Zhiqing Sun, Shanda Li, Sean Welleck, and Yiming Yang. 2025. Inference Scaling Laws: An Empirical Analysis of Compute-Optimal Inference for LLM Problem-Solving. In The Thirteenth International Conference on Learning Representations . https://openreview.net/forum?id=VNckp7JEHn [18] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient Streaming Language Models with Attention Sinks. In The Twelfth Inter-national Conference on Learning Representations . https://openreview.net/forum? id=NG7sS51zVF [19] Zihao Ye. 2023. From Online Softmax to FlashAttention. https://courses.cs. washington.edu/courses/cse599m/23sp/notes/flashattn.pdf UW CSE 599M Spring 2023: ML for ML Systems, https://courses.cs.washington.edu/courses/cse599m/ 23sp/notes/flashattn.pdf. [20] Zihao Ye, Lequn Chen, Ruihang Lai, Wuwei Lin, Yineng Zhang, Stephanie Wang, Tianqi Chen, Baris Kasikci, Vinod Grover, Arvind Krishnamurthy, and Luis Ceze. 2025. FlashInfer: Efficient and Customizable Attention Engine for LLM Inference Serving. arXiv:2501.01005 [cs.DC] https://arxiv.org/abs/2501.01005 [21] Jingyang Yuan, Huazuo Gao, Damai Dai, Junyu Luo, Liang Zhao, Zhengyan Zhang, Zhenda Xie, Y. X. Wei, Lean Wang, Zhiping Xiao, Yuqing Wang, Chong Ruan, Ming Zhang, Wenfeng Liang, and Wangding Zeng. 2025. Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention. arXiv:2502.11089 [cs.CL] https://arxiv.org/abs/2502.11089 [22] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark Barrett, Zhangyang Wang, and Beidi Chen. 2023. H2O: heavy-hitter oracle for efficient generative inference of large language models. In Proceedings of the 37th International Conference on Neural Information Processing Systems (New Orleans, LA, USA) (NIPS ’23) . Curran Associates Inc., Red Hook, NY, USA, Article 1506, 50 pages. [23] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. SGLang: efficient execution of structured language model programs. In Proceedings of the 38th International Conference on Neural Information Processing Systems (Vancouver, BC, Canada) (NIPS ’24) .Curran Associates Inc., Red Hook, NY, USA, Article 2000, 27 pages. [24] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xuanzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: disaggregating prefill and decoding for goodput-optimized large language model serving. In Proceedings of the 18th USENIX Conference on Operating Systems Design and Implementation (Santa Clara, CA, USA) (OSDI’24) . USENIX Association, USA, Article 11, 18 pages.

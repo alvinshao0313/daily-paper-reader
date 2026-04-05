@@ -1,0 +1,1446 @@
+Title: Streaming Model Cascades for Semantic SQL
+
+URL Source: https://arxiv.org/pdf/2604.00660v1
+
+Published Time: Thu, 02 Apr 2026 00:55:43 GMT
+
+Number of Pages: 18
+
+Markdown Content:
+# Streaming Model Cascades for Semantic SQL 
+
+# Paweł Liskowski 
+
+pawel.liskowski@snowflake.com Snowflake Inc. Poznań, Poland 
+
+# Kyle Schmaus 
+
+kyle.schmaus@snowflake.com Snowflake Inc. San Francisco, CA, USA 
+
+## Abstract 
+
+Modern data warehouses extend SQL with semantic operators that invoke large language models on each qualifying row, but the per-row inference cost is prohibitive at scale. Model cascades reduce this cost by routing most rows through a fast proxy model and dele-gating uncertain cases to an expensive oracle. Existing frameworks, however, require global dataset access and optimize a single quality metric, limiting their applicability in distributed systems where data is partitioned across independent workers. We present two adaptive cascade algorithms designed for streaming, per-partition execution in which each worker processes its partition independently without inter-worker communication. SUPG-IT extends the SUPG statis-tical framework to streaming execution with iterative threshold refinement and joint precision-recall guarantees. GAMCAL replaces user-specified quality targets with a learned calibration model: a Generalized Additive Model maps proxy scores to calibrated proba-bilities with uncertainty quantification, enabling direct optimization of a cost-quality tradeoff through a single parameter. Experiments on six datasets in a production semantic SQL engine show that both algorithms achieve 𝐹 1 > 0.95 on every dataset. GAMCAL achieves higher 𝐹 1 per oracle call at cost-sensitive operating points, while SUPG-IT reaches a higher quality ceiling with formal guarantees on precision and recall. 
+
+## 1 Introduction 
+
+Modern data warehouses increasingly integrate large language models (LLMs) directly into SQL through semantic operators such as AI_FILTER , AI_CLASSIFY , and AI_JOIN [14 , 21 ]. These opera-tors enable users to write declarative queries that blend relational operations with semantic reasoning: filtering customer reviews by sentiment, classifying documents into categories, or joining tables based on semantic similarity. However, each semantic operator invokes an LLM on every qualifying row: a single AI_FILTER ap-plied to a million-row table may trigger hundreds of thousands of LLM calls, incurring costs that are orders of magnitude higher than traditional SQL operations and latencies measured in hours rather than seconds [14]. 
+
+Model cascades address this challenge by routing most rows through a fast, inexpensive proxy model (e.g., a small LLM or embedding-based classifier) while escalating only uncertain cases to a powerful but expensive oracle model (e.g., a large LLM). The proxy model produces a confidence score for each row, and learned thresholds 
+
+> ,
+> .
+
+partition rows into regions that can be accepted, rejected, or dele-gated to the oracle. Cascades have demonstrated substantial cost re-ductions across LLM workloads (up to 98% in API-based settings [ 2 ]and up to 90% in streaming inference [ 19 ]) and are recognized as a key optimization in semantic query processing systems [15, 21]. SUPG [13] provides a statistical framework for approximate selec-tion with guarantees, using importance-weighted oracle sampling to estimate a proxy score threshold that meets user-specified re-call or precision targets with high probability. However, deploying SUPG in production database systems reveals fundamental limi-tations along two axes. The first is architectural : SUPG assumes access to the entire dataset for computing normalized importance sampling weights, requiring a global pass over all proxy scores before any sampling can begin. In distributed database environ-ments where data is processed in partitions by parallel workers, such global synchronization is impractical. Furthermore, SUPG esti-mates thresholds in a single pass with no mechanism to refine them as oracle labels accumulate across batches. Production semantic SQL engines require algorithms that operate in online, streaming mode , updating their estimates incrementally. The second axis is methodological . SUPG optimizes for a single metric (either recall or precision) but not both simultaneously. An 
+
+AI_FILTER that achieves 95% recall but only 30% precision wastes downstream compute on false positives. The algorithm further as-sumes that proxy scores are well-calibrated, approximating the true probability 𝑃 (positive | 𝑥 ). In practice, proxy models are often poorly calibrated [ 7], leading to biased threshold estimates. Finally, users must specify fixed precision/recall targets that are often arbi-trary, since different datasets have different inherent difficulty and users may not know a priori what targets are achievable for their workload. We present two algorithms that address these architectural and methodological limitations, respectively: (1) SUPG with Iterative Targeting (SUPG-IT) extends SUPG to the streaming setting, refining two thresholds iteratively as or-acle samples accumulate across batches while jointly targeting both precision and recall. The algorithm clips corrected targets to prevent over-delegation and collapses to a balanced thresh-old when precision-recall constraints conflict. Each worker pro-cesses its partition independently without inter-worker com-munication. (2) GAM-Calibrated Cascade (GAMCAL) addresses the method-ological limitations that SUPG-IT inherits from the SUPG frame-work: reliance on proxy calibration and the need for users to specify fixed accuracy targets. GAMCAL learns a calibration  
+
+> 1
+> arXiv:2604.00660v1 [cs.DB] 1 Apr 2026 , , Liskowski et al.
+
+function mapping raw proxy scores to true probabilities using Generalized Additive Models (GAMs), then directly optimizes a cost-quality tradeoff controlled by a single parameter: 
+
+min 
+
+> 𝜏 low ,𝜏 high
+
+𝛼 · error (𝜏 low , 𝜏 high ) + ( 1 − 𝛼 ) · cost (𝜏 low , 𝜏 high ) (1) where 𝜏 low and 𝜏 high are the delegation thresholds and 𝛼 ∈[0, 1] is a weighting parameter. When 𝛼 is high, the cascade prioritizes classification quality; when low, it minimizes oracle calls. The formulation adapts automatically to dataset difficulty, eliminating arbitrary target specification. The two algorithms serve complementary roles, each addressing needs the other cannot: SUPG-IT is appropriate when users have explicit quality targets and want probabilistic guarantees, while GAMCAL is appropriate when users prefer the system to automati-cally balance quality against cost without specifying any targets. Both algorithms are designed for and evaluated in the context of Snowflake’s Cortex AISQL, a production SQL engine that processes semantic operators over millions of rows [ 14 ]. On six benchmarks, both algorithms exceed 𝐹 1 = 0.95 on every dataset. GAMCAL outperforms the SUPG cascade in LOTUS [ 21 ] at cost-sensitive operating points, leading on all six datasets under a 20% delegation budget and requiring up to 58% fewer oracle calls to reach 𝐹 1 ≥ 0.95 .SUPG-IT reaches the highest quality ceiling, with a mean peak 𝐹 1
+
+of 0.989 .In summary, our contributions are: 
+
+• A formalization of the model cascade problem for streaming semantic SQL with independent parallel workers, introducing two complementary problem formulations (Section 3). 
+
+• SUPG-IT, the first cascade algorithm that provides joint precision-recall guarantees in online, streaming execution (Section 4). 
+
+• GAMCAL, a calibration-based cascade that replaces user-specified targets with learned cost-quality optimization, using GAMs for probability calibration with uncertainty quantification (Section 5). The remainder of this paper is organized as follows. Section 2 reviews related work on approximate selection, model cascades, and probability calibration. Section 3 formalizes the cascade routing problem. Sections 4 and 5 present our two algorithms in detail. Section 6 evaluates both algorithms on six real-world benchmarks. Section 7 concludes with limitations and future directions. 
+
+## 2 Related Work 
+
+Approximate selection with proxy models. Kang et al. [ 13 ] intro-duced SUPG, a framework for approximate data selection that uses importance-weighted oracle sampling to find a proxy score thresh-old meeting a user-specified recall or precision target with high probability. Earlier systems such as NoScope [ 12 ] and probabilis-tic predicates [ 16 ] filtered data using proxy models but provided no statistical guarantees on result quality. SUPG addressed this gap through confidence bounds and variance-optimal importance sampling with weights proportional to the square root of proxy scores. Our work builds on SUPG while removing two assump-tions: that the entire dataset is available before sampling begins (enabling streaming execution) and that only a single metric is tar-geted (enabling joint precision-recall guarantees). GAMCAL further departs from the SUPG framework by replacing statistical threshold estimation with learned probability calibration. 
+
+LLM cascades. Routing queries through progressively more capable models has been explored extensively. FrugalGPT [ 2 ] learns a scor-ing function that predicts answer reliability and cascades queries through increasingly expensive API endpoints. Nie et al. [ 19 ] for-malize cascade learning as online imitation learning where smaller models learn from LLM demonstrations in a streaming setting. Jitkrittum et al. [ 11 ] characterize when confidence-based deferral is optimal and identify failure modes involving specialist models and label noise. Wang et al. [ 29 ] modify the small model’s training loss to focus on tokens that at least one cascade model predicts correctly. Zellinger and Thomson [ 34 ] model the joint distribution of calibrated confidences across a sequence of LLMs using Markov copulas, enabling continuous threshold optimization. Our setting differs from these methods in two respects. First, we operate on binary predicates embedded in SQL, where the proxy produces a continuous confidence score rather than a discrete pre-diction or generated text. Second, our algorithms must run in a streaming, per-partition execution model imposed by distributed database architectures, whereas most LLM cascade work assumes batch access to a validation set or centralized routing. 
+
+Probability calibration. Mapping model outputs to well-calibrated probabilities is a long-standing problem. Platt scaling [ 22 ] fits a logistic function to raw scores, temperature scaling [ 7] adjusts a single parameter, and isotonic regression [ 32 ] fits a non-parametric monotone map. Guo et al. [ 7] demonstrated that modern neural networks are often poorly calibrated despite high accuracy. Gener-alized Additive Models [ 8] offer a flexible middle ground through penalized spline fitting. Calibration has also been applied within cascade frameworks: Zellinger and Thomson [ 33 ] combine a non-linear log-transform with Platt scaling to improve routing decisions in LLM cascades with abstention. GAMCAL uses calibration for a different purpose: it trains a GAM on oracle samples to predict expected quality metrics for any threshold pair in closed form, enabling direct threshold optimization without additional oracle queries. 
+
+Semantic query processing. Several systems embed LLM-powered operators into SQL and dataframe APIs for processing unstructured data at scale [ 14 , 15 , 21 ]. LOTUS [ 21 ] includes cascade support based on single-pass SUPG. Cortex AISQL [ 14 ] processes semantic predicates over millions of rows in a distributed streaming model. An alternative line of work bypasses cascading entirely by training lightweight proxy models to replace LLM invocations: UQE [ 6 ] uses embedding-based classifiers for semantic filters, and Chung et al. [ 3 ]demonstrate order-of-magnitude cost reductions through full proxy replacement in BigQuery and AlloyDB. These approaches provide no statistical guarantees on precision or recall, relying instead on heuristic quality thresholds for fallback. Our cascades occupy a middle ground: they route individual records between proxy and oracle models with statistical quality guarantees (SUPG-IT) or learned cost-quality optimization (GAMCAL), accepting higher  
+
+> 2Streaming Model Cascades for Semantic SQL , ,
+
+per-predicate cost than full replacement in exchange for controlled accuracy. 
+
+## 3 Problem Formulation 
+
+We formalize the model cascade problem for binary semantic pred-icates, establishing a two-threshold decision framework, two com-plementary optimization objectives, and the streaming execution model required for deployment in distributed database systems. 
+
+## 3.1 Setting and Notation 
+
+Consider a dataset D = {𝑥 1, 𝑥 2, . . . , 𝑥 𝑛 } of 𝑛 records to be processed by a binary semantic predicate (e.g., AI_FILTER ). We have access to two models: 
+
+• Oracle model 𝑂 : D → { 0, 1}: An expensive but accurate model (e.g., a large LLM) that produces a binary label 𝑦 𝑖 = 𝑂 (𝑥 𝑖 )
+
+for each record, at per-invocation cost 𝑐 𝑂 .
+
+• Proxy model 𝐴 : D → [ 0, 1]: A fast, inexpensive model that returns a confidence score 𝐴 (𝑥 𝑖 ) ∈ [ 0, 1] estimating the probability that 𝑦 𝑖 = 1, at per-invocation cost 𝑐 𝐴 ≪ 𝑐 𝑂 .Following standard practice in the cascade literature [ 13 ], we treat oracle labels as ground truth and measure all quality metrics with respect to {𝑦 𝑖 }. The assumption is reasonable when the oracle is substantially more accurate than the proxy, as is typically the case for large versus small language models on semantic predicates [ 14 ]. Our goal is to produce predictions ˆ𝑦 𝑖 for all records while mini-mizing oracle invocations. Since 𝑐 𝐴 ≪ 𝑐 𝑂 , we assume the proxy is executed on all records, yielding scores {𝐴 (𝑥 𝑖 )} 𝑛 𝑖 =1.
+
+## 3.2 Two-Threshold Decision Framework 
+
+Our cascade algorithms partition records into three regions using two thresholds 𝜏 low and 𝜏 high where 0 ≤ 𝜏 low ≤ 𝜏 high ≤ 1:(1) Reject region (𝐴 (𝑥 ) < 𝜏 low ): The proxy is confident the record does not satisfy the predicate. Predict ˆ𝑦 = 0 without oracle evaluation. (2) Accept region (𝐴 (𝑥 ) ≥ 𝜏 high ): The proxy is confident the record satisfies the predicate. Predict ˆ𝑦 = 1 without oracle evaluation. (3) Uncertain region (𝜏 low ≤ 𝐴 (𝑥 ) < 𝜏 high ): The proxy lacks confidence. Invoke the oracle to obtain ˆ𝑦 = 𝑂 (𝑥 ).The delegation rate 𝑑 is the fraction of records routed to the oracle: 
+
+𝑑 = |{ 𝑥 𝑖 : 𝜏 low ≤ 𝐴 (𝑥 𝑖 ) < 𝜏 high }| 
+
+𝑛 (2) We state the framework in terms of the raw proxy score 𝐴 (𝑥 )
+
+for concreteness. More generally, the thresholds may operate on any monotone transformation of the proxy output. GAMCAL (Sec-tion 5) replaces 𝐴 (𝑥 ) with a calibrated decision score that incor-porates learned probability estimates (Section 5.2), but the three-region structure, quality metrics, and delegation rate carry over unchanged. 
+
+## 3.3 Quality Metrics 
+
+The cascade’s three-region structure determines how classification errors arise. Accepted records receive ˆ𝑦 𝑖 = 1 without oracle verifica-tion; those with 𝑦 𝑖 = 0 are false positives. Rejected records receive 
+
+ˆ𝑦 𝑖 = 0; those with 𝑦 𝑖 = 1 are false negatives. Delegated records receive ˆ𝑦 𝑖 = 𝑦 𝑖 from the oracle and contribute no errors. Errors thus originate exclusively from the accept and reject regions. Precision depends on 𝜏 high : raising it reduces false positives but delegates more records to the oracle. Recall is governed by 𝜏 low :lowering it reduces false negatives at the cost of higher delegation. We quantify quality using: Precision = TP TP + FP , Recall = TP TP + FN (3) 
+
+𝐹 𝛽 = (1 + 𝛽 2) · Precision · Recall 
+
+𝛽 2 · Precision + Recall (4) where 𝐹 𝛽 balances precision and recall ( 𝛽 > 1 favors recall; 𝛽 = 1
+
+yields the standard 𝐹 1 score). The cascade problem is thus a three-way tradeoff among precision, recall, and oracle cost. 
+
+## 3.4 Problem Formulations 
+
+We consider two complementary problem formulations, each ad-dressed by one of our algorithms. 
+
+3.4.1 Target-Based Formulation (SUPG-IT). Users specify mini-mum precision and recall targets 𝑡 𝑃 and 𝑡 𝑅 along with a failure probability 𝛿 . The goal is to find thresholds (𝜏 low , 𝜏 high ) such that, over the randomness of oracle sampling: 
+
+Pr [Precision ≥ 𝑡 𝑃 ] ≥ 1 − 𝛿 (5) 
+
+Pr [Recall ≥ 𝑡 𝑅 ] ≥ 1 − 𝛿 (6) while minimizing the delegation rate. The two constraints are cou-pled: improving recall requires lowering 𝜏 low while improving pre-cision requires raising 𝜏 high , and both adjustments widen the uncer-tain region. Satisfying both constraints simultaneously is harder than optimizing either in isolation, particularly when the proxy score distributions of positive and negative records overlap. 
+
+3.4.2 Cost-Quality Tradeoff Formulation (GAMCAL). Rather than specifying fixed targets, users provide a tradeoff parameter 𝛼 ∈[0, 1] controlling the balance between classification quality and oracle cost. The objective is: 
+
+min 
+
+> 𝜏 low ,𝜏 high
+
+𝛼 · error (𝜏 low , 𝜏 high ) + ( 1 − 𝛼 ) · cost (𝜏 low , 𝜏 high ) (7) where error captures classification quality (derived from 1 − 𝐹 𝛽 , nor-malized for comparability as detailed in Section 5.4) and cost is the delegation rate. The formulation adapts to dataset difficulty: easy datasets achieve low error with low cost, while difficult datasets require higher delegation rates. 
+
+## 3.5 Streaming Execution Model 
+
+Unlike batch algorithms that access the entire dataset simultane-ously, our algorithms operate in a streaming setting motivated by distributed database execution (Figure 1). Data is partitioned across 
+
+𝑊 parallel workers, worker 𝑤 processing its partition as a sequence  
+
+> 3, , Liskowski et al.
+
+Worker 𝑊 1  
+
+> local state
+> 𝜏 (1)
+> low , 𝜏 (1)
+> high
+
+Worker 𝑊 2  
+
+> local state
+> 𝜏 (2)
+> low , 𝜏 (2)
+> high
+
+Worker 𝑊 3                  
+
+> local state
+> 𝜏 (3)
+> low , 𝜏 (3)
+> high
+> 𝐵 (1)
+> 1, 𝐵 (1)
+> 2, . . . 𝐵 (2)
+> 1, 𝐵 (2)
+> 2, . . . 𝐵 (3)
+> 1, 𝐵 (3)
+> 2, . . .
+> predictions predictions predictions
+
+Figure 1: Streaming execution model. Each worker processes its data partition independently, maintaining local threshold estimates and updating them based on its own oracle obser-vations. Workers do not share samples or synchronize. 
+
+of batches 𝐵 (𝑤 ) 
+
+> 1
+
+, 𝐵 (𝑤 ) 
+
+> 2
+
+, . . . . The execution model imposes one funda-mental constraint: batches are processed incrementally and cannot be revisited . A worker’s state after processing batch 𝑡 may depend on its previous state and the current batch, but not on future batches or previously processed ones. Crucially, the constraint applies to raw data : a worker may not re-read records from earlier batches. However, lightweight de-rived quantities—such as accumulated oracle samples and threshold estimates—are retained in the worker’s state and remain available throughout execution. The algorithms presented in this paper satisfy a stronger property: each worker operates independently , without sharing samples, ex-changing threshold estimates, or synchronizing with other workers. Independence eliminates inter-worker communication overhead and enables straightforward deployment in production SQL engines where partitions are processed in isolation. It also precludes reliance on global statistics (e.g., importance sampling weights normalized over all records), which is the key architectural limitation of SUPG that our algorithms overcome. Since all workers execute the same procedure, we present both algorithms from the perspective of a single worker. Within each batch, both algorithms sample a subset of records for oracle evaluation. The per-batch sampling budget is 𝑘 𝑡 = ⌊𝜌 · | 𝐵 𝑡 |⌋ 
+
+oracle calls, where 𝜌 ∈ ( 0, 1] is the budget fraction . Sampled records receive oracle labels that serve dual purposes: they inform the algorithm’s estimates, and they provide correct classifications for the sampled records themselves. Per-worker quality guarantees compose to global guarantees: since global precision (recall) is a weighted average of per-worker pre-cisions (recalls), satisfying Pr [Precision ≥ 𝑡 𝑃 ] ≥ 1 − 𝛿 on every worker implies the same bound globally. When 𝑊 workers operate independently, a union bound yields a global failure probability of at most 𝑊 𝛿 ; setting 𝛿 = 𝛿 global /𝑊 recovers any desired global confi-dence level. Appendix D confirms empirically that quality remains stable as 𝑊 increases. 
+
+Algorithm 1 SUPG-IT: Iterative SUPG with Joint Targets 
+
+Require: Dataset D, proxy model 𝐴 , oracle 𝑂 , targets 𝑡 𝑃 , 𝑡 𝑅 , failure probability 𝛿 , budget fraction 𝜌 , importance weight 𝜂  
+
+> 1:
+
+S ← ∅ ⊲ Accumulated samples  
+
+> 2:
+
+𝜏 low ← 0, 𝜏 high ← 1 ⊲ Initial thresholds (wide uncertain region)  
+
+> 3:
+
+for each batch 𝐵 𝑡 ⊆ D do  
+
+> 4:
+
+Compute proxy scores {𝐴 (𝑥 𝑖 )} for 𝑥 𝑖 ∈ 𝐵 𝑡  
+
+> 5:
+
+𝑘 𝑡 ← ⌊ 𝜌 · | 𝐵 𝑡 |⌋ ⊲ Sampling budget  
+
+> 6:
+
+Compute weights 𝑤 𝑖 via Eq. 8  
+
+> 7:
+
+Sample 𝑆 𝑡 (𝑘 𝑡 records w/o replacement, probabilities ∝ 𝑤 ) 
+
+> 8:
+
+Query oracle: 𝑦 𝑖 ← 𝑂 (𝑥 𝑖 ) for 𝑥 𝑖 ∈ 𝑆 𝑡  
+
+> 9:
+
+S ← S ∪ {( 𝐴 (𝑥 𝑖 ), 𝑦 𝑖 , 𝑐 𝑖 ) : 𝑥 𝑖 ∈ 𝑆 𝑡 } 
+
+> 10:
+
+⊲ Update thresholds  
+
+> 11:
+
+Compute ˆ𝜏 low from weighted ROC curve  
+
+> 12:
+
+Compute corrected target 𝑡 ′′  
+
+> 𝑅
+
+via Eq. 18, 19  
+
+> 13:
+
+𝜏 low ← threshold achieving 𝑡 ′′  
+
+> 𝑅
+
+recall  
+
+> 14:
+
+𝜏 high ← min threshold with LB precision ≥ 𝑡 𝑃  
+
+> 15:
+
+if 𝜏 high < 𝜏 low then ⊲ Conflict resolution  
+
+> 16:
+
+𝜏 low ← 𝜏 high ← 𝜏 balanced via Eq. 21  
+
+> 17:
+
+end if  
+
+> 18:
+
+⊲ Classify non-sampled records in 𝐵 𝑡  
+
+> 19:
+
+ˆ𝑦 𝑖 ← 𝑦 𝑖 for 𝑥 𝑖 ∈ 𝑆 𝑡 ⊲ Sampled records use oracle labels  
+
+> 20:
+
+for each 𝑥 𝑖 ∈ 𝐵 𝑡 \ 𝑆 𝑡 do  
+
+> 21:
+
+if 𝐴 (𝑥 𝑖 ) < 𝜏 low then  
+
+> 22:
+
+ˆ𝑦 𝑖 ← 0 ⊲ Reject  
+
+> 23:
+
+else if 𝐴 (𝑥 𝑖 ) ≥ 𝜏 high then  
+
+> 24:
+
+ˆ𝑦 𝑖 ← 1 ⊲ Accept  
+
+> 25:
+
+else  
+
+> 26:
+
+ˆ𝑦 𝑖 ← 𝑂 (𝑥 𝑖 ) ⊲ Delegate to oracle  
+
+> 27:
+
+end if  
+
+> 28:
+
+end for  
+
+> 29:
+
+end for 
+
+## 4 SUPG-IT: Iterative SUPG with Joint Targets 
+
+SUPG-IT operates in the streaming execution model formalized in Section 3, replacing single-pass batch execution with iterative 
+
+threshold refinement where importance-sampled oracle labels ac-cumulate across batches and drive progressively tighter estimates (Section 4.1). Within SUPG’s statistical framework, SUPG-IT further introduces joint precision-recall targeting using the two-threshold decision framework of Section 3, refining 𝜏 high and 𝜏 low simulta-neously rather than optimizing a single metric in isolation (Sec-tion 4.2). The combination of iterative execution and joint targeting raises challenges absent from single-pass, single-metric designs: Sections 4.3–4.5 present mechanisms for bounding sampling uncer-tainty in the corrected recall target, resolving conflicting precision-recall constraints, and preventing feedback loops in iterative thresh-old estimation. Algorithm 1 presents the complete procedure. The algorithm main-tains two thresholds ( 𝜏 high for precision and 𝜏 low for recall) that are iteratively refined as evidence grows over successive batches. In the first batch, thresholds are estimated from only 𝑘 1 oracle samples. As samples accumulate across subsequent batches, estimates converge and the uncertain region narrows (Figure 2).         
+
+> 4Streaming Model Cascades for Semantic SQL , , 10 20 30 40 50 60 70 80
+
+Sampling iteration 𝑡    
+
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Proxy score threshold  Accept Uncertain Reject Uncertain region
+> 𝜏 high (precision)
+> 𝜏 low (recall)
+
+Figure 2: Threshold convergence on synthetic data with over-lapping bimodal class distributions ( 𝑚 = 5,000 records, 𝑘 𝑡 = 20 
+
+samples per iteration, 𝑡 𝑅 = 𝑡 𝑃 = 0.8). The recall threshold 𝜏 low 
+
+(orange) rises as oracle samples accumulate. The precision threshold 𝜏 high (red) descends as the confidence bound on precision tightens. The shaded uncertain region narrows ac-cordingly, reducing oracle delegation. 
+
+## 4.1 Importance Sampling with Defensive Mixing 
+
+Accurate threshold estimation requires oracle labels spanning the proxy-score distribution, not only near the decision boundary. We use importance sampling to concentrate labeling on high-impact records while preserving support over the full batch through de-fensive mixing. Given proxy scores {𝐴 (𝑥 𝑖 )} for the 𝑚 = |𝐵 𝑡 | records in the current batch, we compute sampling weights: 
+
+𝑤 𝑖 = 𝜂 ·√︁ 𝐴 (𝑥 𝑖 )
+
+Í𝑗 √︁ 𝐴 (𝑥 𝑗 ) + ( 1 − 𝜂 ) · 1
+
+𝑚 (8) where 𝜂 ∈ [ 0, 1] controls the importance–uniform tradeoff. Cru-cially, the normalization Í𝑗 √︁ 𝐴 (𝑥 𝑗 ) is computed over the current batch 𝐵 𝑡 , not the entire dataset: this is what enables streaming execution without the global coordination that SUPG requires. The first term follows SUPG’s importance sampling scheme where 
+
+𝑤 (𝑥 ) ∝ √︁ 𝐴 (𝑥 ), the variance-optimal choice for estimating 1
+
+> 𝑚
+
+Í𝑖 𝐴 (𝑥 𝑖 )𝑦 𝑖 [13 ,18 ]. The second term is a uniform component that serves as de-fensive mixing [20 ]. It guarantees a minimum per-record sampling probability of (1 − 𝜂 )/ 𝑚 and prevents a failure mode of pure impor-tance sampling: if the proxy systematically assigns low scores to a subpopulation of positives, those records are missed entirely and downstream recall estimates become biased. Unlike SUPG, which samples with replacement, SUPG-IT samples 
+
+without replacement from each batch, drawing 𝑘 𝑡 records with prob-abilities proportional to {𝑤 𝑖 }. Sampling without replacement re-duces estimator variance by the finite population correction factor 
+
+(1 −𝑘 𝑡 /𝑚 ), a substantial improvement when batch sizes are modest relative to the sample budget. To ensure that weighted statistics remain unbiased despite non-uniform sampling, each sampled record 𝑥 𝑖 receives a Horvitz– Thompson [10] inverse-probability correction: 
+
+𝑐 𝑖 = 1/𝑚 𝑤 𝑖 
+
+(9) 
+
+## 4.2 Iterative Threshold Refinement 
+
+The threshold refinement procedure uses the confidence bounds inherited from SUPG [ 13 ]. For a sample mean 𝜇 with standard deviation 𝜎 computed from 𝑠 samples, the upper and lower bounds at confidence level 1 − 𝛿 are: UB (𝜇, 𝜎, 𝑠, 𝛿 ) = 𝜇 + 𝜎 
+
+√𝑠 √︁ 2 ln (1/𝛿 ) (10) LB (𝜇, 𝜎, 𝑠, 𝛿 ) = 𝜇 − 𝜎 
+
+√𝑠 √︁ 2 ln (1/𝛿 ) (11) where √︁ 2 ln (1/𝛿 ) is a conservative upper bound on the Gaussian quantile Φ−1 (1 − 𝛿 ) [30]. SUPG-IT processes data in batches, refining thresholds after each batch. Let S (𝑡 ) = {( 𝐴 (𝑥 𝑖 ), 𝑦 𝑖 , 𝑐 𝑖 )} denote the accumulated sample after processing 𝑡 batches, where 𝑦 𝑖 is the oracle label and 𝑐 𝑖 is the correction factor from Eq. 9. 
+
+Recall threshold ( 𝜏 low ). We compute the threshold that achieves the target recall using the weighted ROC curve. Given samples sorted by descending proxy score, the weighted true positive rate at threshold 𝜏 is: TPR (𝜏 ) =
+
+Í𝑖 :𝐴 (𝑥 𝑖 ) ≥ 𝜏 𝑐 𝑖 · 𝑦 𝑖 
+
+Í𝑖 𝑐 𝑖 · 𝑦 𝑖 
+
+(12) Since TPR (𝜏 ) is monotonically non-increasing in 𝜏 , the recall thresh-old ˆ𝜏 low is the largest threshold satisfying TPR (𝜏 ) ≥ 𝑡 𝑅 , i.e., the most selective threshold that still achieves the user-specified recall target. 
+
+Precision threshold ( 𝜏 high ). For precision, we compute cumulative statistics over samples sorted by descending proxy score. At each candidate threshold 𝜏 , let: 
+
+𝜇 (𝜏 ) =
+
+Í𝑖 :𝐴 (𝑥 𝑖 ) ≥ 𝜏 𝑦 𝑖 
+
+|{ 𝑖 : 𝐴 (𝑥 𝑖 ) ≥ 𝜏 }| (13) 
+
+𝜎 (𝜏 ) =√︁ 𝜇 (𝜏 )( 1 − 𝜇 (𝜏 )) (14) Note that 𝜇 (𝜏 ) uses raw oracle labels 𝑦 𝑖 without correction factors 
+
+𝑐 𝑖 , unlike the recall computation. The omission follows the original SUPG design [ 13 ] because precision is a ratio where both numerator and denominator sum over the same subpopulation (records above 
+
+𝜏 ), so the Horvitz–Thompson corrections approximately cancel. The precision threshold 𝜏 high is the minimum threshold where the statistical lower bound exceeds the precision target: 
+
+𝜏 high = min {𝜏 : LB (𝜇 (𝜏 ), 𝜎 (𝜏 ), 𝑠 𝜏 , 𝛿 ′) ≥ 𝑡 𝑃 } (15) where 𝑠 𝜏 = |{ 𝑖 : 𝐴 (𝑥 𝑖 ) ≥ 𝜏 }| is the sample count above threshold 
+
+𝜏 and 𝛿 ′ = 𝛿 /|S (𝑡 ) | applies a Bonferroni correction, since each unique proxy score in the accumulated sample defines a candidate threshold.  
+
+> 5, , Liskowski et al.
+
+## 4.3 Statistical Correction with Target Clipping 
+
+The initial recall threshold ˆ𝜏 low is computed from a finite sample and may not achieve the target recall on the full dataset. Following SUPG [ 13 ], we apply a corrected recall target , inflated to account for sampling uncertainty. For each record 𝑥 𝑖 ∈ S (𝑡 ) , define indicator-weighted statistics over the full accumulated sample: 
+
+𝑍 1,𝑖 = 𝑐 𝑖 · 𝑦 𝑖 · 1[𝐴 (𝑥 𝑖 ) ≥ ˆ𝜏 low ] (16) 
+
+𝑍 2,𝑖 = 𝑐 𝑖 · 𝑦 𝑖 · 1[𝐴 (𝑥 𝑖 ) < ˆ𝜏 low ] (17) Both sequences have 𝑠 = |S (𝑡 ) | elements, with records on the op-posite side of the threshold contributing zero. Sample recall decom-poses as ¯𝑍 1/( ¯𝑍 1 + ¯𝑍 2), which is increasing in ¯𝑍 1 and decreasing in 
+
+¯𝑍 2. An upper bound on the sample recall at the true optimal thresh-old is therefore obtained by replacing these with their respective confidence bounds: 
+
+𝑡 ′ 
+
+> 𝑅
+
+= UB ( ¯𝑍 1, 𝜎 𝑍 1 , 𝑠, 𝛿 /2)
+
+UB ( ¯𝑍 1, 𝜎 𝑍 1 , 𝑠, 𝛿 /2) + LB ( ¯𝑍 2, 𝜎 𝑍 2 , 𝑠, 𝛿 /2) (18) Since 𝑡 ′ 
+
+> 𝑅
+
+≥ 𝑡 𝑅 in general, the corrected target requires a lower 
+
+(more inclusive) recall threshold, which is more conservative: fewer records are rejected outright, reducing the risk of missed positives. However, the correction in Equation 18 can produce extreme values when sample sizes are small or distributions are skewed. SUPG-IT extends SUPG by applying target clipping to bound the corrected target: 
+
+𝑡 ′′  
+
+> 𝑅
+
+= clip (𝑡 ′
+
+> 𝑅
+
+, 𝑡 𝑅 , 𝑡 𝑅 + Δ) (19) where Δ is a small constant. Clipping prevents over-correction that would unnecessarily increase the delegation rate, while still ensuring the corrected target remains at least as conservative as the original. The final recall threshold is computed using the clipped target: 
+
+𝜏 low = max {𝜏 : TPR (𝜏 ) ≥ 𝑡 ′′  
+
+> 𝑅
+
+} (20) 
+
+## 4.4 Threshold Conflict Resolution 
+
+Joint precision-recall targeting can produce conflicting constraints where 𝜏 high < 𝜏 low , creating an invalid configuration in which the accept region falls below the reject region. Such conflicts arise when the proxy is poorly calibrated or the targets are jointly difficult to achieve with the available sample. When a conflict is detected, SUPG-IT collapses to a single balanced threshold that best matches the user’s desired precision-recall ratio: 
+
+𝜏 low = 𝜏 high = 𝜏 balanced = arg min 
+
+> 𝜏
+
+Recall (𝜏 )
+
+Precision (𝜏 ) − 𝑡 𝑅 
+
+𝑡 𝑃 
+
+(21) where Recall and Precision are computed from the precision-recall curve over the accumulated sample. Note that collapsing to a single threshold eliminates the uncertain region entirely, so no further records are delegated to the oracle (the cascade reduces to a simple threshold classifier). 
+
+## 4.5 Expanded Sampling Scope 
+
+The two-threshold decision framework introduced in Section 3 partitions records into accept, reject, and uncertain regions, a struc-ture absent from SUPG, which uses a single threshold and samples from the entire dataset in one pass. In the iterative, streaming set-ting where thresholds evolve over successive batches, a natural approach would be to restrict sampling to the uncertain region, focusing the oracle budget on records that have not yet been confi-dently classified. However, restricting sampling creates a feedback loop: inaccurate initial thresholds narrow the uncertain region, con-fining sampling to a subset of the score distribution, which in turn prevents the algorithm from correcting its thresholds. SUPG-IT avoids this by sampling from all remaining records in each batch, regardless of whether they fall in the accept, reject, or uncertain region: Sampling pool = {𝑥 𝑖 : 𝑥 𝑖 ∈ 𝐵 𝑡 , 𝑥 𝑖 ∉ S (𝑡 −1) } (22) The expanded sampling scope enables estimation of the score dis-tribution across all three regions, helps detect proxy miscalibration through high-confidence errors, and provides more robust thresh-old refinement when initial estimates are poor. 
+
+## 4.6 Handling Uncertain Records 
+
+After the sampling budget is exhausted, records in the uncertain region ( 𝜏 low ≤ 𝐴 (𝑥 ) < 𝜏 high ) require a decision. SUPG-IT supports two strategies, chosen based on whether the application prioritizes quality or cost. 
+
+Oracle delegation. The default strategy (as shown in Algorithm 1) sends all remaining uncertain records to the oracle, guaranteeing correctness at the expense of additional oracle calls. In practice, the uncertain region typically shrinks as samples accumulate across batches, limiting the delegation rate. 
+
+Threshold-based fallback. When the oracle budget is constrained, an alternative strategy applies a single threshold to uncertain records, classifying them by proxy score alone: 
+
+𝜏 mid = arg max 
+
+> 𝜏
+
+𝐹 1 (𝜏 ) (23) computed over the accumulated sample. The fallback eliminates oracle delegation for uncertain records at the cost of potential quality degradation. 
+
+## 5 GAMCAL: Calibration-Based Cascade 
+
+GAMCAL takes a different approach from SUPG-IT by replacing sta-tistical threshold estimation with learned calibration . The key insight is that if we can learn a function 𝑔 : [0, 1] → [ 0, 1] mapping raw proxy scores to calibrated probabilities 𝑔 (𝐴 (𝑥 )) ≈ 𝑃 (𝑦 = 1 | 𝐴 (𝑥 )) ,then for any threshold pair (𝜏 low , 𝜏 high ) we can predict the expected precision, recall, and delegation rate in closed form, without addi-tional oracle calls. The resulting decoupling of threshold optimiza-tion from oracle evaluation enables direct numerical optimization of a cost-quality objective in the streaming setting, where past batches cannot be revisited.  
+
+> 6Streaming Model Cascades for Semantic SQL , ,
+
+Algorithm 2 GAMCAL: GAM-Calibrated Cascade 
+
+Require: Dataset D, proxy 𝐴 , oracle 𝑂 , tradeoff 𝛼 , 𝐹 𝛽 weight 𝛽 ,budget fraction 𝜌 , smoothing 𝜆 , min samples 𝑛 min  
+
+> 1:
+
+S ← ∅ , 𝑛 last ← 0, 𝑔 ← identity ⊲ Initialize  
+
+> 2:
+
+𝜏 low ← 0, 𝜏 high ← 1 ⊲ Initial thresholds (wide uncertain region)  
+
+> 3:
+
+Compute proxy scores {𝐴 (𝑥 𝑖 )} and sample 𝑞 𝑖 ∼ Uniform (0, 1)
+
+for all 𝑥 𝑖 ∈ D  
+
+> 4:
+
+for each batch 𝐵 𝑡 ⊆ D do  
+
+> 5:
+
+Compute ˜𝑔 (𝐴 (𝑥 𝑖 ), 𝑞 𝑖 ) via Eq. 26 for each 𝑥 𝑖 ∈ 𝐵 𝑡  
+
+> 6:
+
+𝑈 𝑡 ← { 𝑖 : 𝜏 low ≤ ˜𝑔 (𝐴 (𝑥 𝑖 ), 𝑞 𝑖 ) < 𝜏 high } ⊲ Uncertain  
+
+> 7:
+
+𝑘 𝑡 ← min (⌊ 𝜌 · | 𝐵 𝑡 |⌋ , |𝑈 𝑡 |)  
+
+> 8:
+
+Sample 𝑆 𝑡 ∼ Uniform (𝑈 𝑡 , 𝑘 𝑡 ) without replacement  
+
+> 9:
+
+Query oracle: 𝑦 𝑖 ← 𝑂 (𝑥 𝑖 ) for 𝑥 𝑖 ∈ 𝑆 𝑡  
+
+> 10:
+
+S ← S ∪ {( 𝐴 (𝑥 𝑖 ), 𝑦 𝑖 ) : 𝑥 𝑖 ∈ 𝑆 𝑡 } 
+
+> 11:
+
+if |S| ≥ 2 · 𝑛 last and min  |{ 𝑖 ∈ S : 𝑦 𝑖 = 1}| , |{ 𝑖 ∈ S : 𝑦 𝑖 =
+
+0}|  ≥ 𝑛 min then  
+
+> 12:
+
+Train GAM 𝑔 on S via Eq. 25  
+
+> 13:
+
+Recompute ˜𝑔 (𝐴 (𝑥 𝑖 ), 𝑞 𝑖 ) for all 𝑥 𝑖 ∈ D  
+
+> 14:
+
+Optimize (𝜏 low , 𝜏 high ) via Eq. 31  
+
+> 15:
+
+𝑛 last ← |S|  
+
+> 16:
+
+end if  
+
+> 17:
+
+⊲ Classify non-sampled records in 𝐵 𝑡  
+
+> 18:
+
+ˆ𝑦 𝑖 ← 𝑦 𝑖 for 𝑥 𝑖 ∈ 𝑆 𝑡 ⊲ Sampled records use oracle labels  
+
+> 19:
+
+for each 𝑥 𝑖 ∈ 𝐵 𝑡 \ 𝑆 𝑡 do  
+
+> 20:
+
+if ˜𝑔 (𝐴 (𝑥 𝑖 ), 𝑞 𝑖 ) < 𝜏 low then  
+
+> 21:
+
+ˆ𝑦 𝑖 ← 0 ⊲ Reject  
+
+> 22:
+
+else if ˜𝑔 (𝐴 (𝑥 𝑖 ), 𝑞 𝑖 ) ≥ 𝜏 high then  
+
+> 23:
+
+ˆ𝑦 𝑖 ← 1 ⊲ Accept  
+
+> 24:
+
+else  
+
+> 25:
+
+ˆ𝑦 𝑖 ← ˜𝑔 (𝐴 (𝑥 𝑖 ), 𝑞 𝑖 ) ≥ 0.5 ⊲ Fallback  
+
+> 26:
+
+end if  
+
+> 27:
+
+end for  
+
+> 28:
+
+end for 
+
+Like SUPG-IT, GAMCAL operates in the streaming execution model of Section 3: each worker processes batches independently, accu-mulates oracle samples, and refines its local thresholds. However, where SUPG-IT uses oracle labels to tighten confidence bounds on empirical metrics, GAMCAL uses them to train a Generalized Ad-ditive Model (GAM) that provides calibrated probability estimates with uncertainty quantification. Thresholds are then optimized against a continuous cost-quality tradeoff rather than fixed preci-sion/recall targets, eliminating the need for users to specify targets 
+
+a priori .Algorithm 2 presents the complete procedure. The remainder of this section motivates the approach (Section 5.1), describes GAM-based calibration (Section 5.2), explains uncertainty-aware routing via random quantiles (Section 5.3), presents the threshold optimiza-tion objective (Section 5.4), and discusses the adaptive retraining schedule (Section 5.5) and oracle sampling strategy (Section 5.6). 
+
+## 5.1 From Statistical Estimation to Learned Calibration 
+
+While SUPG-IT addresses SUPG’s limitations around streaming execution and joint precision-recall targeting, it inherits deeper assumptions from the SUPG framework that limit its effectiveness. Three observations motivate the shift to a calibration-based ap-proach. 
+
+Proxy miscalibration. Both SUPG and SUPG-IT assume that proxy scores are approximately calibrated, i.e., that 𝐴 (𝑥 ) ≈ 𝑃 (𝑦 =
+
+1 | 𝑥 ). The importance sampling weights 𝑤 (𝑥 ) ∝√︁ 𝐴 (𝑥 ) are variance-optimal only under calibration [ 13 ], and the confidence bounds on precision and recall depend on the proxy scores’ fidelity as probability estimates. In practice, proxy models, particularly small LLMs and embedding-based classifiers, are often poorly cal-ibrated [ 7]. A score of 0.7 may correspond to a true positive rate anywhere from 0.4 to 0.95 depending on the dataset and predicate. Poor calibration renders SUPG-IT’s confidence bounds unreliable and produces conservative thresholds with unnecessarily high del-egation rates. 
+
+Limited generalization from oracle labels. In SUPG-IT, each or-acle label contributes to threshold estimation only through running statistics (weighted means and variances) computed over the score region it falls in. No mechanism allows labels at one proxy score level to inform predictions at other levels. A smooth calibration model provides exactly such generalization: labels at scattered score levels jointly constrain a function that interpolates across the entire score range. In the streaming setting, where early batches yield few oracle labels, such interpolation extracts substantially more information per label than raw statistical estimation. 
+
+Continuous cost-quality tradeoff. Beyond these technical con-cerns, the target-based formulation creates practical challenges. Specifying precision and recall targets requires a priori knowledge of dataset difficulty; identical targets produce vastly different dele-gation rates across workloads; and target-based methods exhibit binary success/failure behavior with no graceful degradation. A single parameter 𝛼 ∈ [ 0, 1] governs the tradeoff between classifica-tion error and oracle cost (Eq. 7). Replacing fixed targets with this continuous objective allows the cascade to adapt automatically to the proxy’s intrinsic accuracy. Taken together, these observations motivate GAMCAL’s three-stage pipeline: calibrate proxy scores using a GAM trained on oracle samples, predict expected quality metrics for any threshold con-figuration from the calibrated model, and optimize thresholds by minimizing the cost-quality objective via numerical optimization. 
+
+## 5.2 GAM-Based Probability Calibration 
+
+At the calibrate stage, GAMCAL learns a monotone function 𝑔 :
+
+[0, 1] → [ 0, 1] mapping raw proxy scores 𝑠 = 𝐴 (𝑥 ) to calibrated probabilities 𝑔 (𝑠 ) ≈ 𝑃 (𝑦 = 1 | 𝐴 (𝑥 ) = 𝑠 ). Several calibration methods have been proposed: Platt scaling fits a logistic function to raw scores [ 22 ], isotonic regression fits a non-parametric monotone map [ 32 ], and temperature scaling adjusts a single parameter [ 7]. However, none of these methods fully satisfies the requirements of the cascade setting. Platt scaling assumes a linear relationship in log-odds space, which is too restrictive when the proxy model’s miscalibration is nonlinear. Isotonic regression makes no smoothness assumptions and tends to  
+
+> 7, , Liskowski et al.
+
+overfit when oracle labels are scarce (precisely the regime encoun-tered in early streaming batches). Neither method provides cali-brated uncertainty estimates, which are needed for the uncertainty-aware routing described in Section 5.3. Generalized Additive Models (GAMs) [ 8] occupy a favorable middle ground. A logistic GAM models the calibration function through a smooth spline in log-odds space: 
+
+log 𝑔 (𝑠 )
+
+1 − 𝑔 (𝑠 ) = 𝑓 (𝑠 ) (24) where 𝑠 = 𝐴 (𝑥 ) is the raw proxy score and 𝑓 is a smooth function represented by a cubic B-spline basis. The model is fit on accumu-lated oracle samples S = {( 𝐴 (𝑥 𝑖 ), 𝑦 𝑖 )} by maximizing the penalized log-likelihood: 
+
+L( 𝑓 ) =
+
+> | S |
+
+∑︁ 
+
+> 𝑖 =1
+
+[𝑦 𝑖 log 𝑔 (𝐴 (𝑥 𝑖 )) + ( 1 − 𝑦 𝑖 ) log (1 − 𝑔 (𝐴 (𝑥 𝑖 )))] − 𝜆 
+
+∫
+
+(𝑓 ′′ )2 𝑑𝑠 
+
+(25) The roughness penalty 𝜆 ∫ (𝑓 ′′ (𝑠 )) 2 𝑑𝑠 controls the bias-variance tradeoff: large 𝜆 produces smoother calibration curves that gener-alize from few samples (important in early batches), while small 
+
+𝜆 allows the model to capture fine-grained calibration structure as oracle labels accumulate. Monotonicity ( 𝑔 ′ (𝑠 ) ≥ 0) is enforced through linear inequality constraints on the spline coefficients dur-ing optimization and guarantees that higher proxy scores always map to higher calibrated probabilities. GAMs combine the strengths that the alternatives lack: the spline basis captures nonlinear miscalibration patterns that Platt scaling misses (Figure 3), while the smoothness penalty prevents overfitting when oracle samples are limited, unlike isotonic regression. Cru-cially for the cascade setting, the penalized likelihood framework yields a posterior approximation over 𝑓 : both a mean prediction 
+
+ˆ𝑓 (𝑠 ) and a standard error se (𝑠 ) at each score level. Given a quantile parameter 𝑞 ∈ [ 0, 1], the stochastic calibrated score is: 
+
+˜𝑔 (𝑠, 𝑞 ) = logit −1  ˆ𝑓 (𝑠 ) + Φ−1 (𝑞 ) · se (𝑠 )
+
+
+
+(26) where Φ−1 is the standard normal quantile function. Operating in log-odds space and applying the sigmoid ensures that ˜𝑔 (𝑠, 𝑞 ) ∈ ( 0, 1)
+
+for all 𝑞 .Our primary implementation uses constrained cubic splines via the pyGAM library. Appendix A describes two alternative imple-mentations (a regularized logistic regression variant with a Platt scaling prior and a bootstrap ensemble) that offer different trade-offs between monotonicity guarantees, computational cost, and uncertainty robustness. 
+
+## 5.3 Uncertainty-Aware Routing via Random Quantiles 
+
+A key design choice in GAMCAL is that routing decisions are sto-chastic rather than deterministic. The stochastic calibrated score 
+
+˜𝑔 (𝑠, 𝑞 ) (Eq. 26) incorporates a random quantile 𝑞 𝑖 ∼ Uniform (0, 1)
+
+sampled independently for each record 𝑥 𝑖 . The quantile 𝑞 𝑖 is drawn once and held fixed for the lifetime of the record, ensuring consis-tent routing across retraining events. Conceptually, the mechanism is a form of posterior sampling [ 23 ]applied to the calibration model: rather than routing each record based on the posterior mean ˆ𝑓 (𝑠 ), GAMCAL draws a sample from the approximate posterior over the calibrated log-odds and routes based on that draw. The standard error se (𝑠 ) from the GAM controls the spread: when calibration uncertainty is high, the sampled scores are dispersed. When calibration is confident, the samples cluster near the mean. Consequently, records whose proxy scores fall in poorly calibrated regions receive more dispersed calibrated scores and are more likely to land in the uncertain region [𝜏 low , 𝜏 high ),directing oracle budget toward the records where calibration is least reliable. 
+
+Soft decision boundaries. Deterministic thresholds create sharp bound-aries: records with calibrated scores just above 𝜏 high are always accepted, while those just below are always delegated. When many records cluster near a threshold, small estimation errors produce large swings in the delegation rate. Stochastic scoring replaces each sharp boundary with a smooth transition zone, where the proba-bility of delegation decreases continuously as the calibrated score moves away from the threshold. The width of the transition zone adapts automatically: it is wide where se (𝑠 ) is large (few oracle labels nearby) and narrow where se (𝑠 ) is small (many oracle labels provide precise calibration). 
+
+Exploration for calibration improvement. Stochastic routing ensures that records near decision boundaries are occasionally delegated to the oracle even when the current model would confidently classify them. The resulting oracle labels provide training data in score re-gions that deterministic routing would never query. The calibration model can then refine its estimates in subsequent retraining events (Section 5.5). The mechanism mirrors Thompson sampling [ 23 , 28 ], where actions (routing decisions) are randomized according to the posterior probability of being optimal. Exploration is therefore proportional to uncertainty and vanishes as the model converges. Unlike SUPG-IT, which achieves exploration through a separate design choice (expanded sampling scope, Section 4.5), GAMCAL obtains exploration as a natural byproduct of posterior sampling, requiring no additional mechanism or tuning. Uncertainty-directed delegation, soft boundaries, and exploration all arise from a single mechanism (per-record random quantile draws) with no additional parameters beyond the quantile dis-tribution itself. The implicit exploration is precisely what allows GAMCAL to use the simpler oracle sampling strategy described in Section 5.6: because stochastic routing already diversifies the records entering the uncertain region, there is no need for impor-tance sampling or expanded sampling scope. 
+
+## 5.4 Direct Threshold Optimization 
+
+Once the GAM provides calibrated probabilities, the cascade can 
+
+predict the expected quality of any threshold configuration without additional oracle queries. For each record 𝑥 𝑖 , let ˜𝑔 𝑖 = ˜𝑔 (𝐴 (𝑥 𝑖 ), 𝑞 𝑖 )
+
+denote the stochastic calibrated score from Eq. 26. Under the two-threshold framework of Section 3, thresholds (𝜏 low , 𝜏 high ) partition                      
+
+> 8Streaming Model Cascades for Semantic SQL , , 0.00.20.40.60.81.0
+> Raw proxy score 𝑠 =𝐴 (𝑥 )
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> 𝑃  (~ = 1 | 𝐴 (𝑥  ) =𝑠  )
+> 95% CI
+> 𝑔 (𝑠 )(GAM) Pla scaling
+> 0.00.20.40.60.81.0
+> Predicted probability
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Observed frequency
+> Raw 𝐴 (𝑥 )Pla GAM
+
+Figure 3: GAM-based calibration on synthetic data with nonlinear miscalibration ( 𝑛 = 3,000 , 𝜆 = 0.6). Left: The GAM calibration curve 𝑔 (𝑠 ) (blue) captures the S-shaped departure from the diagonal that Platt scaling (gray dashed) cannot represent. The shaded band shows the 95% confidence interval from the GAM posterior. Right: Reliability diagram comparing raw, Platt-calibrated, and GAM-calibrated scores. GAM calibration reduces expected calibration error from 0.140 (raw) to 0.005 , compared to 0.047 for Platt scaling. 
+
+records into reject, accept, and uncertain regions. Because ˜𝑔 𝑖 esti-mates the probability that record 𝑥 𝑖 is a true positive, each region’s expected contribution to the confusion matrix can be computed in closed form: 
+
+• Reject region ( ˜𝑔 𝑖 < 𝜏 low ): Each rejected record has probability 
+
+˜𝑔 𝑖 of being a true positive, yielding Í𝑖 : ˜ 𝑔 𝑖 <𝜏 low ˜𝑔 𝑖 expected false negatives. 
+
+• Accept region ( ˜𝑔 𝑖 ≥ 𝜏 high ): Accepted records contribute Í ˜𝑔 𝑖 
+
+expected true positives and Í(1 − ˜𝑔 𝑖 ) expected false positives. 
+
+• Uncertain region (𝜏 low ≤ ˜𝑔 𝑖 < 𝜏 high ): Oracle-delegated records are classified correctly, contributing Í ˜𝑔 𝑖 expected true posi-tives and zero classification error. Crucially, the uncertain region contributes no classification error: only oracle cost. Aggregating across regions: 
+
+E[TP ] =∑︁  
+
+> 𝑖 : ˜ 𝑔 𝑖 ≥𝜏 low
+
+˜𝑔 𝑖 (27) 
+
+E[FP ] =∑︁  
+
+> 𝑖 : ˜ 𝑔 𝑖 ≥𝜏 high
+
+(1 − ˜𝑔 𝑖 ) (28) 
+
+E[FN ] =∑︁  
+
+> 𝑖 : ˜ 𝑔 𝑖 <𝜏 low
+
+˜𝑔 𝑖 (29) where E[TP ] combines both the accept and uncertain regions (both contribute true positives, the former by proxy prediction, the latter by oracle evaluation). The expected 𝐹 𝛽 score follows directly: 
+
+E[𝐹 𝛽 ] = (1 + 𝛽 2) · E[TP ](1 + 𝛽 2) · E[TP ] + E[FN ] + 𝛽 2 · E[FP ] (30) with E[𝐹 𝛽 ] = 0 when E[TP ] = 0 (i.e., all records fall in the reject region). The objective from Eq. 7 is instantiated as: 
+
+min 
+
+> 𝜏 low ,𝜏 high
+
+𝛼 · 1 − E[𝐹 𝛽 (𝜏 low , 𝜏 high )] 
+
+1 − E[𝐹 𝛽 (0.5, 0.5)] 
+
+| {z }
+
+> normalized error
+
++( 1 − 𝛼 ) · |{ 𝑖 : 𝜏 low ≤ ˜𝑔 𝑖 < 𝜏 high }| 
+
+𝑛 
+
+| {z }
+
+> delegation rate
+
+(31) The error term is normalized by the error of a no-delegation base-line that classifies all records by proxy at threshold 0.5 (i.e., 𝜏 low =
+
+𝜏 high = 0.5). The delegation rate lies in [0, 1] and the normalized error equals 1 at the no-delegation baseline, so 𝛼 interpolates mean-ingfully between the two objectives. Concretely, higher 𝛼 places more weight on quality and widens the uncertain region, while lower 𝛼 narrows the region to minimize oracle calls. The 𝐹 𝛽 computation assumes full delegation of the uncertain region. In practice, the budget fraction 𝜌 limits oracle calls to ⌊𝜌 · | 𝐵 𝑡 |⌋ 
+
+per batch, and any excess uncertain records are classified using the calibrated score at threshold 0.5 (Algorithm 2). The objective thus models idealized quality, but as the calibration model improves and thresholds converge, the uncertain region typically shrinks below the budget, closing the gap between predicted and realized 𝐹 𝛽 .Optimization is complicated by the objective’s piecewise-constant structure: because the expected confusion matrix terms are discrete sums over threshold-defined sets, the objective jumps discontinu-ously whenever a threshold crosses an individual calibrated score and is flat between successive scores. Gradient-based methods are therefore inapplicable. We optimize using differential evolution [ 27 ], a gradient-free global optimizer well-suited to such landscapes. To enforce the constraint 𝜏 low ≤ 𝜏 high , we reparameterize the search space as (𝑦 1, 𝑦 2) ∈ [ 0, 1]2 with: 
+
+𝜏 low = 𝑦 1, 𝜏 high = 𝑦 1 + ( 1 − 𝑦 1) · 𝑦 2 (32) Here 𝑦 1 directly sets the lower threshold, while 𝑦 2 controls the gap as a fraction of the remaining range [𝑦 1, 1]: 𝑦 2 = 0 collapses the uncertain region (no delegation), while 𝑦 2 = 1 places 𝜏 high = 1 (all non-rejected records are delegated). 
+
+## 5.5 Adaptive Retraining Schedule 
+
+As oracle samples accumulate, GAMCAL must periodically update the calibration model and thresholds. Each update incurs a compu-tational cost, since it requires GAM fitting followed by threshold re-optimization via differential evolution (Section 5.4), so retraining at every batch is wasteful.      
+
+> 9, , Liskowski et al. 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Proxy score threshold
+> Accept Uncertain Reject
+> 𝜏 high
+> 𝜏 low
+> Retrain
+> 10 20 30 40 50
+
+Batch 𝑡 
+
+> 0
+> 1
+> Deleg. rate
+
+Figure 4: GAMCAL threshold convergence on synthetic bi-modal data ( 𝑚 = 10 ,000 , batch size 200 , 𝜌 = 0.03 , 𝛼 = 0.35 ). 
+
+Top: Thresholds 𝜏 low (orange) and 𝜏 high (red) narrow in dis-crete steps at retraining events (dotted lines) on the doubling schedule. The shaded region marks the uncertain interval. 
+
+Bottom: Delegation rate drops from 1.0 during the cold-start phase to approximately 0.15 as calibration improves. Each retraining event further reduces delegation. 
+
+GAMCAL adopts a doubling schedule [1 ], a standard technique in online learning: retrain when the accumulated sample size has at least doubled since the last training event, i.e., when |S| ≥ 2𝑛 last ,where 𝑛 last is the sample count at the previous training. For 𝑛 to-tal oracle samples, the doubling schedule bounds the number of retraining events to 𝑂 (log 𝑛 ), while ensuring that each successive model is trained on at least twice as much data as its predecessor. Each retraining event triggers two operations: fitting the GAM on the full accumulated sample S (updating both the calibrated probabilities ˆ𝑓 (𝑠 ) and the standard errors se (𝑠 )), and re-optimizing the thresholds (𝜏 low , 𝜏 high ) via Eq. 31 using the updated calibrated scores. To prevent overfitting during early execution, GAMCAL defers the first training until both classes have accumulated a minimum number of samples: 
+
+min (|{ 𝑖 ∈ S : 𝑦 𝑖 = 0}| , |{ 𝑖 ∈ S : 𝑦 𝑖 = 1}|) ≥ 𝑛 min (33) Before this condition is met, GAMCAL operates in a cold-start phase 
+
+with default thresholds 𝜏 low = 0, 𝜏 high = 1 and identity calibration 
+
+𝑔 = id . Under these defaults all records fall in the uncertain region, so GAMCAL delegates every sampled record to the oracle. The resulting full-delegation strategy is conservative but maximizes information gain for the calibration model. For balanced datasets the cold-start phase typically ends within the first few batches. For highly imbalanced predicates, reaching 𝑛 min samples of the minority class may require more batches, which can be mitigated by increasing the budget fraction 𝜌 . Figure 4 illustrates these dynamics on synthetic data. 
+
+## 5.6 Oracle Sampling Strategy 
+
+SUPG-IT uses importance sampling from all remaining records in each batch (Section 4.5) to avoid feedback loops where inaccurate thresholds restrict the sampling pool. GAMCAL takes a different approach: oracle labels are drawn by uniform random sampling without replacement from the uncertain region: 
+
+𝑆 𝑡 ∼ Uniform ({ 𝑖 ∈ 𝐵 𝑡 : 𝜏 low ≤ ˜𝑔 𝑖 < 𝜏 high }) ,
+
+|𝑆 𝑡 | = min (⌊ 𝜌 · | 𝐵 𝑡 |⌋ , |𝑈 𝑡 |) 
+
+where 𝜌 is the budget fraction and |𝑈 𝑡 | is the number of uncertain records in batch 𝐵 𝑡 .Expanded sampling is unnecessary because GAMCAL’s stochastic routing mechanism (Section 5.3) already ensures that records with high calibration uncertainty are drawn into the uncertain region, even if deterministic thresholds would place them in the accept or reject regions. The random quantiles provide implicit exploration across the score distribution. Moreover, the GAM’s smooth spline basis generalizes from oracle labels in the uncertain region to pre-dictions across the full score range (as argued in Section 5.1), so sampling from a restricted score interval still informs calibration globally. Uniform sampling also offers a practical advantage over importance sampling: all oracle labels contribute equally to the GAM training data and require no Horvitz–Thompson correction factors [ 10 ]. As thresholds converge and the uncertain region narrows, the sam-pling budget is naturally redirected: fewer records require oracle evaluation, reducing the effective delegation rate without explicit budget management. 
+
+## 6 Experimental Evaluation 
+
+We evaluate both algorithms against four baselines on six datasets spanning classification, filtering, and join operators. The experi-ments address three questions: Does learned calibration improve cost-efficiency over statistical threshold estimation (Section 6.2)? Does GAMCAL’s 𝛼 parameter provide predictable control across datasets (Section 6.3)? Does SUPG-IT reliably satisfy user-specified precision-recall targets (Section 6.4)? 
+
+## 6.1 Experimental Setup 
+
+Platform. All experiments run on Snowflake’s Cortex AISQL [ 14 ], a production SQL engine for semantic operators. The proxy model is Llama 3.1-8B and the oracle model is Llama 3.3-70B, deployed as Cortex LLM inference endpoints. Data is processed in the streaming execution model of Section 3.5 with a batch size of |𝐵 𝑡 | = 4,096 rows and a single worker ( 𝑊 = 1). Within each batch, oracle samples are acquired in sub-batches of 128 records, allowing both algorithms to refine thresholds multiple times per batch. Appendix D confirms that both algorithms are robust to parallelism ( 𝑊 up to 16). 
+
+Datasets. We select six datasets spanning different domains, task types, and proxy difficulty levels (Table 1). MMLU [ 9] (a multiple-choice QA benchmark reduced to a binary predicate: is the selected answer correct? ), BoolQ [ 4], and SST-2 [ 26 ] cover knowledge QA, reading comprehension, and sentiment analysis with moderate proxy quality ( 𝐹 1 > 0.8). In this regime, the proxy alone provides  
+
+> 10 Streaming Model Cascades for Semantic SQL , ,
+
+Table 1: Dataset characteristics. Six benchmarks spanning classification, filtering, and join operators with diverse proxy quality.                                    
+
+> Dataset Task Rows Pos% Proxy F1 ECE MMLU AI_CLASSIFY 5,000 71% 0.817 0.110 BoolQ AI_FILTER 12,697 79% 0.823 0.211 IMDB AI_FILTER 50,000 19% 0.382 0.452 ArXiv AI_FILTER 56,181 8.5% 0.528 0.050 SST-2 AI_FILTER 68,221 46% 0.819 0.095 NYT AI_JOIN 250,000 0.9% 0.209 0.067
+
+Table 2: Best 𝐹 1 operating point per algorithm. Each cascade cell shows 𝐹 1 score and delegation rate 𝑑 . Bold marks the best cascade algorithm per dataset.                                                      
+
+> Dataset Proxy-only SUPG SUPG-SP SUPG-IT GAMCAL ArXiv 0.528 0.541 0.979 (74%) 0.992 (86%) 0.973 (69%) BoolQ 0.823 0.899 0.980 (82%) 0.990 (86%) 0.997 (81%) IMDB 0.382 0.553 0.976 (80%) 0.990 (90%) 0.983 (84%) MMLU 0.817 0.863 0.981 (82%) 0.993 (87%) 0.996 (84%) NYT 0.209 0.278 0.990 (40%) 0.990 (44%) 0.967 (20%) SST-2 0.819 0.886 0.972 (37%) 0.980 (41%) 0.996 (56%)
+
+Table 3: 𝐹 1 at fixed delegation budgets. Each cell shows the best 𝐹 1 achievable with delegation rate 𝑑 ≤ budget. Bold marks the best algorithm per column and dataset.                                                
+
+> 𝑑 ≤20% 𝑑 ≤30%
+> Dataset SUPG-SP SUPG-IT GAMCAL SUPG-SP SUPG-IT GAMCAL ArXiv 0.784 0.798 0.851 0.867 0.873 0.890
+> BoolQ 0.880 0.893 0.931 0.900 0.922 0.951
+> IMDB ——0.685 0.770 0.764 0.771
+> MMLU 0.857 0.863 0.889 0.857 0.890 0.923
+> NYT 0.953 0.946 0.967 0.977 0.974 0.967
+> SST-2 0.934 0.923 0.954 0.954 0.964 0.977
+
+Table 4: Minimum delegation rate to achieve target 𝐹 1. Lower values indicate more cost-efficient algorithms. Bold marks the best algorithm per column.                                                
+
+> 𝐹 1≥0.9𝐹 1≥0.95
+> Dataset SUPG-SP SUPG-IT GAMCAL SUPG-SP SUPG-IT GAMCAL ArXiv 42 .5% 38 .9% 34 .5%55 .6%61 .9% 61 .6%
+> BoolQ 24 .0% 30 .2% 10 .1%69 .7% 58 .2% 29 .3%
+> IMDB 52 .6%52 .8% 54 .4% 69 .9% 69 .1% 68 .4%
+> MMLU 40 .8% 41 .8% 28 .6%67 .4% 62 .9% 43 .9%
+> NYT 16 .1% 16 .0% 9.4%21 .9% 22 .4% 17 .0%
+> SST-2 16 .1% 18 .3% 8.9%28 .6% 31 .6% 21 .2%
+
+reasonable accuracy. IMDB [ 17 ] and ArXiv [ 5] present harder cali-bration challenges: on IMDB, the proxy predicts nearly every review as positive, achieving high recall but low precision ( ECE = 0.452 ,the highest in the suite). ArXiv combines a highly imbalanced predicate with comparable proxy accuracy. NYT [ 24 ] is the largest benchmark in the suite: 250K candidate pairs from an AI_JOIN over article titles and excerpts, with the lowest positive rate and weakest proxy. The expected calibration error (ECE) reported in Table 1 quantifies the gap between proxy scores and true probabilities. High ECE motivates the learned calibration approach of GAMCAL. 
+
+Algorithms. We evaluate SUPG-IT (Section 4) and GAMCAL (Sec-tion 5) against four baselines. SUPG [13 ] is the original recall-only cascade, optimizing a single threshold with no precision control. 
+
+SUPG-SP adds joint precision-recall targeting and uncertain-region delegation to SUPG but estimates thresholds from a single oracle sample per batch, without the iterative refinement loop of Algo-rithm 1. SUPG-SP corresponds to the cascade algorithm imple-mented in LOTUS [ 21 ]. Comparing SUPG-SP to SUPG-IT thus iso-lates the contribution of iterative refinement. Two reference base-lines anchor the cost extremes: Proxy-only classifies all records using the proxy model alone ( 𝑑 = 0), and Oracle-only delegates every record to the oracle ( 𝑑 = 1.0). 
+
+Protocol. Each configuration is evaluated across 10 random seeds. To trace cost-quality tradeoff curves, we sweep each algorithm’s native control parameter: SUPG-IT and SUPG-SP sweep a shared target 𝑡 𝑃 = 𝑡 𝑅 ∈ [ 0.55 , 0.95 ]; SUPG sweeps 𝑡 𝑅 over the same range; and GAMCAL sweeps 𝛼 ∈ [ 0.10 , 0.80 ] with no budget cap ( 𝜌 = 1.0), so that 𝛼 alone controls the effective delegation rate. The SUPG variants use budget fraction 𝜌 = 0.1 and failure probability 𝛿 = 0.2;GAMCAL uses 𝛽 = 1 (𝐹 1 score) in the cost-quality objective. All quality metrics ( 𝐹 1, precision, recall) are measured against oracle labels, following the convention established in Section 3. We also report delegation rate 𝑑 . Error bars show mean ± standard deviation across seeds. 
+
+## 6.2 Cost-Quality Tradeoff 
+
+Figure 5 traces the cost-quality Pareto frontier for GAMCAL and SUPG-IT across all six datasets. At low-to-moderate delegation rates, GAMCAL’s frontier lies above or overlaps SUPG-IT’s on every dataset. Table 2 summarizes the best operating point per algorithm. Both algorithms exceed 𝐹 1 = 0.99 on most datasets, but GAMCAL peaks at lower delegation on BoolQ, MMLU, and SST-2, while SUPG-IT reaches a higher ceiling on ArXiv, IMDB, and NYT at the cost of 6–24 percentage points more delegation. Learned calibration confers a clear advantage at low delegation budgets. Table 3 reports the best 𝐹 1 achievable within delegation caps of 20% and 30% . At 𝑑 ≤ 20% , GAMCAL leads on all six datasets, outperforming both SUPG-IT and SUPG-SP (the LOTUS cascade). The widest gap is on ArXiv: 0.851 vs. 0.784 for SUPG-SP and 0.798 
+
+for SUPG-IT. On IMDB, the SUPG variants cannot operate within this budget at all because their minimum delegation includes both the 𝜌 = 10% sampling budget and mandatory uncertain-region delegation. Raising the cap to 𝑑 ≤ 30% narrows the gap: GAMCAL still leads on five of six datasets, while SUPG-SP edges ahead on NYT ( 0.977 vs. 0.967 ) where GAMCAL’s delegation ceiling limits further gains. Table 4 examines the same tradeoff from the opposite direction. GAMCAL requires less delegation than SUPG-IT to reach a target       
+
+> 11 , , Liskowski et al. 0.00.20.40.60.81.0
+> 0.6
+> 0.8
+> 1.0
+> 𝐹 1 Score
+
+ArXiv      
+
+> 0.00.20.40.60.81.0
+> 0.85
+> 0.90
+> 0.95
+> 1.00
+
+BoolQ      
+
+> 0.00.20.40.60.81.0
+> 0.6
+> 0.8
+> 1.0
+
+IMDB      
+
+> 0.00.20.40.60.81.0
+
+Delegation Rate 
+
+> 0.80
+> 0.85
+> 0.90
+> 0.95
+> 1.00
+> 𝐹 1 Score
+
+MMLU      
+
+> 0.00.20.40.60.81.0
+
+Delegation Rate 
+
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> 1.0
+
+NYT      
+
+> 0.00.20.40.60.81.0
+
+Delegation Rate 
+
+> 0.85
+> 0.90
+> 0.95
+> 1.00
+
+SST-2    
+
+> Proxy-only Oracle GAMCAL SUPG-IT
+
+Figure 5: 𝐹 1 vs. delegation rate for GAMCAL (sweeping 𝛼 ) and SUPG-IT (sweeping shared target 𝑡 𝑃 = 𝑡 𝑅 ) across six datasets. Each point is the mean over 10 seeds (error bars: one standard deviation). Dashed horizontal lines mark the proxy-only and oracle baselines. GAMCAL’s frontier lies above or overlaps SUPG-IT’s on every dataset. 
+
+𝐹 1 on all six datasets for 𝐹 1 ≥ 0.95 and on five for 𝐹 1 ≥ 0.90 . The advantage over SUPG-SP is larger still: on BoolQ, reaching 𝐹 1 ≥ 0.95 
+
+costs 𝑑 = 29 .3% with GAMCAL versus 69 .7% with SUPG-SP—a 58% 
+
+reduction in oracle calls. On MMLU, the savings are 35% (43 .9% vs. 
+
+67 .4% ). The GAM calibration model generalizes across the proxy score distribution: labels at one score level inform predictions at others. The sample-based bounds used by SUPG-IT and SUPG-SP extract less information from the same number of oracle labels. Among individual datasets, NYT best illustrates GAMCAL’s cost advantage. It crosses 𝐹 1 ≥ 0.90 at under 10% delegation, the lowest threshold in the suite. SUPG-IT reaches a higher ceiling ( 𝐹 1 =
+
+0.990 at 𝑑 = 44% ) because the GAM classifies most NYT records confidently in this extreme-imbalance setting and caps delegation at roughly 20% regardless of 𝛼 . IMDB presents the hardest calibration challenge. The proxy scores 𝐹 1 = 0.382 alone, predicting nearly every review as positive. Both algorithms nevertheless recover to near-oracle quality ( 𝐹 1 > 0.98 ) at high delegation. Both algorithms substantially outperform SUPG, which is limited to 
+
+𝐹 1 ≤ 0.90 and offers no precision control. This limitation is inherent rather than budget-related. SUPG optimizes a single threshold for recall only. Increasing the sampling budget 𝜌 therefore tightens the threshold estimate but cannot address the absence of precision control that causes low 𝐹 1 on datasets with high false-positive rates (e.g., NYT). Within the SUPG family, adding joint precision-recall targeting and uncertain-region delegation (the step from SUPG to SUPG-SP) produces the largest quality gain. SUPG-SP’s peak 𝐹 1 ranges from 
+
+0.972 (SST-2) to 0.990 (NYT), far above SUPG’s ceiling of 0.278 –
+
+0.899 . Iterative refinement (the step from SUPG-SP to SUPG-IT) adds 1–2 𝐹 1 points on all datasets except NYT, where the clean binary join signal makes single-pass estimation already optimal. Appendix Figure 8 provides the full comparison across all four cascade algorithms and all four metrics. In summary, the two proposed algorithms occupy complementary niches. GAMCAL achieves equal or higher 𝐹 1 per oracle call at cost-sensitive operating points, without requiring users to specify quality targets. Its calibration model is particularly effective when few oracle labels are available. SUPG-IT reaches a higher qual-ity ceiling on datasets with challenging calibration (ArXiv, IMDB, NYT) and provides explicit probabilistic guarantees on precision and recall. Sections 6.3 and 6.4 examine these distinct strengths, evaluating GAMCAL’s parameter predictability and SUPG-IT’s tar-get reliability. 
+
+## 6.3 Parameter Predictability 
+
+Section 5.1 argued that target-based control requires a priori knowl-edge of dataset difficulty, since the same target can yield unpre-dictable delegation rates across workloads. Figure 6 tests this claim                  
+
+> 12 Streaming Model Cascades for Semantic SQL , , 0.20.40.60.8
+> GAMCAL 𝛼
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Delegation Rate
+> GAMCAL
+> 0.60.70.80.9
+> SUPG-IT shared target (𝑡 𝑃 =𝑡 𝑅 )
+> SUPG-IT
+> ArXiv BoolQ IMDB MMLU NYT SST-2
+
+Figure 6: Delegation rate as a function of each algorithm’s native control parameter across all six datasets. Left: GAMCAL sweeps 𝛼 , where higher 𝛼 prioritizes classification quality over oracle cost. Right: SUPG-IT sweeps the shared target 𝑡 𝑃 = 𝑡 𝑅 .Each point is the mean over 10 seeds (error bars: one standard deviation). The 𝛼 parameter produces smooth monotonic curves across datasets. A target specifies desired quality, and the delegation required to achieve it varies with dataset difficulty. 
+
+by plotting each algorithm’s delegation rate against its native con-trol parameter. GAMCAL’s 𝛼 -to-delegation mapping (left panel) is smooth and monotonic for every dataset, so practitioners can treat 𝛼 as a pre-dictable cost dial. The spread across datasets at a given 𝛼 reflects automatic adaptation to proxy quality: at 𝛼 = 0.5, IMDB receives 
+
+34% delegation while NYT receives only 11% . Even at 𝛼 = 0.8,NYT’s delegation plateaus at roughly 20% . The GAM classifies most records confidently in this extreme-imbalance join setting, and further delegation cannot improve quality. SUPG-IT’s target-to-delegation mapping (right panel) reflects qual-itatively different parameter semantics. A target specifies desired quality , and the delegation required to achieve it depends on the proxy’s intrinsic accuracy: at 𝑡 𝑃 = 𝑡 𝑅 = 0.80 , delegation ranges from 0.6% on SST-2 to 60 .6% on IMDB. On easier datasets, the proxy alone satisfies low targets, so the flat regions in the right panel represent configurations where adjusting the target has no effect on cost. On SST-2, delegation stays below 1% for targets up to 0.75 
+
+before rising to 24% at 𝑡 𝑃 = 𝑡 𝑅 = 0.90 . Delegation rises sharply only when the target exceeds what the proxy can achieve alone. 
+
+## 6.4 Target Reliability 
+
+Section 6.3 examined GAMCAL’s parameter predictability. Here we evaluate whether SUPG-IT reliably delivers the joint precision-recall targets the user specifies. A 17 × 17 grid of target pairs (𝑡 𝑃 , 𝑡 𝑅 )
+
+from 0.55 to 0.95 in steps of 0.025 is swept across five datasets with 10 random seeds each, for a total of 14,450 runs. NYT is excluded due to the computational cost of the full grid on 250K rows. Table 5 summarizes the results. ArXiv and IMDB achieve perfect joint satisfaction across all 289 configurations. These are also the highest-delegation datasets. BoolQ and MMLU maintain per-run satisfaction of at least 98.7%, with failures confined to low-delegation configurations. SST-2 shows the most target misses (89.4% satisfaction), concentrated in regions where the proxy’s intrinsic quality nearly satisfies the target with minimal oracle involvement. Among failing configurations, mean 
+
+Table 5: SUPG-IT target reliability across 289 (𝑡 𝑃 , 𝑡 𝑅 ) pairs per dataset, 10 seeds each (2,890 runs). The 𝑡 𝑃 =𝑡 𝑅 column reports the 17 symmetric pairs only (170 runs). 
+
+Satisfaction (%) Dataset All 𝑡 𝑃 =𝑡 𝑅 Failures Deleg. (%) ArXiv 100.0 100.0 0 41.4 IMDB 100.0 100.0 0 54.6 MMLU 99.4 100.0 16 23.6 BoolQ 98.7 99.4 38 14.4 SST-2 89.4 99.4 305 4.7 delegation is only 1.4%. The mechanism is consistent: low delega-tion yields insufficient oracle data for tight statistical bounds, and seed-to-seed variation produces occasional misses. Every failure in the experiment violates exactly one metric (precision or recall), never both. Appendix C visualizes the spatial pattern of these fail-ures. The symmetric targets used in Sections 6.2–6.3 achieve near-perfect satisfaction on all five datasets (Table 5, 𝑡 𝑃 =𝑡 𝑅 column). Reliability degrades primarily in asymmetric configurations at low delegation levels, precisely where the cascade adds the least value. 
+
+## 7 Conclusion 
+
+We formalized the model cascade problem for semantic SQL in a streaming execution model with independent parallel workers and presented two complementary algorithms. SUPG-IT extends SUPG to streaming execution with iterative threshold refinement and joint precision-recall guarantees. Each worker processes its parti-tion independently, requiring no global synchronization. GAMCAL replaces user-specified targets with a learned calibration model that directly optimizes a cost-quality tradeoff and adapts automatically to dataset difficulty. Experiments on six datasets spanning different domains, task types, and proxy quality levels confirm that both algo-rithms outperform existing baselines, including the SUPG cascade 
+
+> 13
+
+, , Liskowski et al. 
+
+in LOTUS [ 21 ]. GAMCAL achieves higher 𝐹 1 per oracle call at cost-sensitive operating points, requiring up to 58% fewer oracle calls than LOTUS to reach 𝐹 1 ≥ 0.95 , while SUPG-IT reaches a higher quality ceiling with a mean peak 𝐹 1 of 0.989 and provides formal probabilistic guarantees on precision and recall. For practitioners, GAMCAL is the default choice for cost-sensitive workloads where no specific quality target is required, while SUPG-IT is preferred when formal guarantees on precision and recall are needed. The approach has two limitations. Our formulation treats oracle labels as ground truth, an assumption that holds when the oracle is considerably more accurate than the proxy but may degrade un-der noisy or adversarial oracle conditions. The current framework handles binary predicates only, whereas production semantic SQL engines also support multi-class operators that require extending the two-threshold decision framework. Generalizing the cascade to multi-class settings is a natural next step. The union-bound composition of per-worker guarantees (Sec-tion 3.5) is conservative. Tighter global bounds that exploit partition structure could reduce the per-worker failure probability budget. Cross-partition coordination mechanisms that preserve global qual-ity guarantees without inter-worker communication and richer calibration models that adapt to non-stationary data distributions are further promising directions. 
+
+## References 
+
+[1] N. Cesa-Bianchi and G. Lugosi. Prediction, Learning, and Games . Cambridge University Press, 2006. [2] L. Chen, M. Zaharia, and J. Zou. Frugalgpt: How to use large language models while reducing cost and improving performance. arXiv preprint arXiv:2305.05176 ,2023. [3] Y. Chung, R. Desai, J. He, Y. Xiao, T. Hottelier, Y.-L. Kom Samo, P. Kadilkar, X. Chen, S. Idicula, F. Özcan, A. Halevy, and Y. Papakonstantinou. 100x cost & latency reduction: Performance analysis of AI query approximation using lightweight proxy models. In Proceedings of the 2026 ACM SIGMOD International Conference on Management of Data , 2026. [4] C. Clark, K. Lee, M.-W. Chang, T. Kwiatkowski, M. Collins, and K. Toutanova. BoolQ: Exploring the surprising difficulty of natural yes/no questions. In Pro-ceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies . Association for Computational Linguistics, 2019. [5] A. Cohan, F. Dernoncourt, D. S. Kim, T. Bui, S. Kim, W. Chang, and N. Goharian. A discourse-aware attention model for abstractive summarization of long docu-ments. In Proceedings of the 2018 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 2 (Short Papers) , pages 615–621, New Orleans, Louisiana, June 2018. Association for Computational Linguistics. [6] H. Dai, B. Y. Wang, X. Wan, B. Dai, S. Yang, A. Nova, P. Yin, P. M. Phothilimthana, C. Sutton, and D. Schuurmans. UQE: A query engine for unstructured databases. In Advances in Neural Information Processing Systems , 2024. [7] C. Guo, G. Pleiss, Y. Sun, and K. Q. Weinberger. On calibration of modern neural networks. In International Conference on Machine Learning , 2017. [8] T. Hastie and R. Tibshirani. Generalized additive models. Statistical Science , 1986. [9] D. Hendrycks, C. Burns, S. Basart, A. Zou, M. Mazeika, D. Song, and J. Steinhardt. Measuring massive multitask language understanding. Sept. 2020. [10] D. G. Horvitz and D. J. Thompson. A generalization of sampling without re-placement from a finite universe. Journal of the American Statistical Association ,47(260):663–685, 1952. [11] W. Jitkrittum, N. Gupta, A. K. Menon, H. Narasimhan, A. S. Rawat, and S. Kumar. When does confidence-based cascade deferral suffice? In Advances in Neural Information Processing Systems , 2023. [12] D. Kang, J. Emmons, F. Abuzaid, P. Bailis, and M. Zaharia. Noscope: Optimizing neural network queries over video at scale. In Proceedings of the VLDB Endowment ,volume 10, 2017. [13] D. Kang, E. Gan, P. Bailis, T. Hashimoto, and M. Zaharia. Approximate selection with guarantees using proxies. Proceedings of the VLDB Endowment , 13(11), 2020. [14] P. Liskowski, B. Han, P. Aggarwal, B. Chen, B. Jiang, N. Jindal, Z. Li, A. Lin, K. Schmaus, J. Tayade, W. Zhao, A. Datta, N. Wiegand, and D. Tsirogiannis. Cortex aisql: A production sql engine for unstructured data. Proceedings of the ACM on Management of Data , 2025. [15] C. Liu, M. Russo, M. Cafarella, L. Cao, P. B. Chen, Z. Chen, M. Franklin, T. Kraska, S. Madden, and G. Vitagliano. Palimpzest: A declarative system for optimizing AI workloads. arXiv preprint arXiv:2405.14696 , 2025. [16] Y. Lu, A. Chowdhery, S. Kandula, and S. Chaudhuri. Accelerating machine learn-ing inference with probabilistic predicates. In Proceedings of the 2018 International Conference on Management of Data , 2018. [17] A. L. Maas, R. E. Daly, P. T. Pham, D. Huang, A. Y. Ng, and C. Potts. Learning word vectors for sentiment analysis. In Proceedings of the 49th Annual Meeting of the Association for Computational Linguistics: Human Language Technologies ,pages 142–150, Portland, Oregon, USA, June 2011. Association for Computational Linguistics. [18] J. Neyman. On the two different aspects of the representative method: the method of stratified sampling and the method of purposive selection. Journal of the Royal Statistical Society , 97(4):558–625, 1934. [19] L. Nie, Z. Ding, E. Hu, C. Jermaine, and S. Chaudhuri. Online cascade learning for efficient inference over streams. In International Conference on Machine Learning ,2024. [20] A. Owen and Y. Zhou. Safe and effective importance sampling. Journal of the American Statistical Association , 95(449):135–143, 2000. [21] L. Patel et al. Semantic operators: A declarative model for rich, ai-based analytics over text data. arXiv preprint , 2025. [22] J. C. Platt. Probabilistic outputs for support vector machines and comparisons to regularized likelihood methods. In Advances in Large Margin Classifiers , pages 61–74. MIT Press, 1999. [23] D. J. Russo, B. Van Roy, A. Kazerouni, I. Osband, and Z. Wen. A tutorial on thompson sampling. Foundations and Trends in Machine Learning , 11(1):1–96, 2018. [24] E. Sandhaus. The new york times annotated corpus. Linguistic Data Consortium, LDC2008T19, 2008. [25] D. Servén and C. Brummitt. pygam: Generalized additive models in python. https://github.com/dswah/pyGAM, 2018. Zenodo. DOI: 10.5281/zenodo.1208723. [26] R. Socher, A. Perelygin, J. Wu, J. Chuang, C. D. Manning, A. Ng, and C. Potts. Recursive deep models for semantic compositionality over a sentiment treebank. In Proceedings of the 2013 Conference on Empirical Methods in Natural Language Processing , pages 1631–1642, Seattle, Washington, USA, Oct. 2013. Association for Computational Linguistics. [27] R. Storn and K. Price. Differential evolution – a simple and efficient heuristic for global optimization over continuous spaces. Journal of Global Optimization ,11(4):341–359, 1997. [28] W. R. Thompson. On the likelihood that one unknown probability exceeds another in view of the evidence of two samples. Biometrika , 25(3/4):285–294, 1933. [29] C. Wang, S. Augenstein, K. Rush, W. Jitkrittum, H. Narasimhan, A. S. Rawat, A. K. Menon, and A. Go. Cascade-aware training of language models. In Advances in Neural Information Processing Systems , 2024. [30] L. Wasserman. All of Statistics: A Concise Course in Statistical Inference . Springer, 2004. [31] S. N. Wood. Generalized Additive Models: An Introduction with R . Chapman and Hall/CRC, 2nd edition, 2017. [32] B. Zadrozny and C. Elkan. Transforming classifier scores into accurate multiclass probability estimates. In Proceedings of the Eighth ACM SIGKDD International Conference on Knowledge Discovery and Data Mining , pages 694–699, 2002. [33] M. J. Zellinger and M. Thomson. Efficiently deploying LLMs with controlled risk. 
+
+arXiv preprint arXiv:2410.02173 , 2024. [34] M. J. Zellinger and M. Thomson. Rational tuning of LLM cascades via probabilistic modeling. Transactions on Machine Learning Research , 2025. 14 Streaming Model Cascades for Semantic SQL , , 
+
+## A Calibration Model Variants 
+
+Section 5.2 presents the GAM calibration framework and derives the stochastic calibrated score (Eq. 26). The framework admits three implementations, each offering different tradeoffs between monotonicity guarantees, computational cost, and uncertainty ro-bustness. 
+
+## A.1 Constrained GAM with Analytical Confidence Intervals 
+
+All experiments in Section 6 use this variant as the default calibra-tion model. The implementation represents 𝑓 as a cubic spline and fits the penalized log-likelihood (Eq. 25) subject to monotonicity constraints 𝑔 ′ (𝑠 ) ≥ 0, enforced as linear inequality constraints on the spline coefficients during iteratively reweighted least squares (IRLS) optimization. We use the pyGAM library [ 25 ], which imple-ments this procedure following Wood [31]. The fitted model provides a posterior approximation via the Bayesian interpretation of penalized splines [ 31 ]. Concretely, the roughness penalty 𝜆 ∫ (𝑓 ′′ )2 𝑑𝑠 corresponds to a Gaussian prior on the spline coefficients, and the penalized likelihood yields an approximate pos-terior. From this posterior, the mean ˆ𝑓 (𝑠 ) and standard error se (𝑠 )
+
+are extracted, and the stochastic calibrated score follows Eq. 26: 
+
+˜𝑔 (𝑠, 𝑞 ) = logit −1  ˆ𝑓 (𝑠 ) + Φ−1 (𝑞 ) · se (𝑠 )
+
+
+
+(34) 
+
+## A.2 Regularized Logistic Regression with Spline Basis 
+
+An alternative variant replaces the constrained GAM with logistic regression over an explicit spline basis expansion, offering tighter control over the optimization and a closed-form Laplace approxi-mation for uncertainty. Raw proxy scores are first transformed to log-odds space ℓ =
+
+logit (𝐴 (𝑥 )) , clipped to [ℓmin , ℓ max ] for numerical stability. A degree-3 B-spline basis with 𝑝 uniformly spaced knots is constructed via 
+
+scikit-learn ’s SplineTransformer , yielding 𝑑 basis functions 
+
+𝜙 1 (ℓ), . . . , 𝜙 𝑑 (ℓ). The calibration function is then: 
+
+𝑓 (𝑠 ) =
+
+> 𝑑
+
+∑︁ 
+
+> 𝑗 =1
+
+𝜃 𝑗 𝜙 𝑗 (logit (𝑠 )) (35) and the coefficients 𝜃 are fit by minimizing the regularized negative log-likelihood: 
+
+min  
+
+> 𝜃
+
+−
+
+> | S |
+
+∑︁ 
+
+> 𝑖 =1
+
+[𝑦 𝑖 log 𝑔 (𝐴 (𝑥 𝑖 )) + ( 1 − 𝑦 𝑖 ) log (1 − 𝑔 (𝐴 (𝑥 𝑖 )))]+ 𝜆 
+
+2 ∥𝜃 −𝜇 𝜃 ∥2
+
+(36) using L-BFGS-B optimization with analytically computed gradients. The prior mean 𝜇 𝜃 encodes an inductive bias toward the identity mapping in log-odds space (no calibration adjustment): the coeffi-cients are set to linearly spaced values 𝜇 𝑗 = ℓmin + ( ℓmax − ℓmin ) · 𝑗 /𝑑 .When oracle samples are scarce and 𝜆 is large, the regularization pulls 𝜃 toward 𝜇 𝜃 , effectively recovering Platt scaling as a default. As more samples accumulate and 𝜆 ’s relative influence diminishes, the model departs from this prior to capture nonlinear calibration structure. The regularized variant thus interpolates between Platt scaling (few samples) and a flexible spline model (many samples). Confidence intervals are obtained via the Laplace approximation. At the fitted optimum ˆ𝜃 , the Hessian of the regularized loss is: 
+
+𝐻 = 𝑋 ⊤diag ( ˆℎ ◦ ( 1 − ˆℎ)) 𝑋 + 𝜆𝐼 (37) where 𝑋 is the spline design matrix and ˆℎ = 𝜎 (𝑋 ˆ𝜃 ) are the fitted probabilities. The approximate posterior covariance is Σ = 𝐻 −1, and the standard error of 𝑓 (𝑠 ) at a new point is se (𝑠 ) =√︁ 𝜙 (𝑠 )⊤ Σ 𝜙 (𝑠 )
+
+where 𝜙 (𝑠 ) is the spline basis vector. The stochastic calibrated score is computed as in Eq. 26. Compared to the constrained GAM, this variant does not enforce monotonicity as a hard constraint. Instead, the monotonic prior 𝜇 𝜃 
+
+encourages (but does not guarantee) monotonicity. In practice, the smoothness of the spline basis and the regularization toward 𝜇 𝜃 
+
+produce approximately monotone calibration curves for reasonable values of 𝜆 .
+
+## A.3 Bootstrap Ensemble 
+
+The bootstrap variant quantifies calibration uncertainty empirically rather than analytically. A primary GAM 𝑔 is trained on the full oracle sample S as in Appendix A.1. Additionally, 𝐵 bootstrap GAMs 𝑔 1, . . . , 𝑔 𝐵 are trained on resamples S∗ 
+
+> 1
+
+, . . . , S∗ 
+
+> 𝐵
+
+drawn with replacement from S (we use 𝐵 = 100 ). Uncertainty is estimated from the ensemble spread in logit space. Let ¯ℓ (𝑠 ) denote the mean bootstrap logit and Δ𝑏 (𝑠 ) the deviation of the 𝑏 -th ensemble member: 
+
+¯ℓ (𝑠 ) = 1
+
+𝐵 
+
+> 𝐵
+
+∑︁ 
+
+> 𝑏 =1
+
+logit (𝑔 𝑏 (𝑠 )) (38) 
+
+Δ𝑏 (𝑠 ) = logit (𝑔 𝑏 (𝑠 )) − ¯ℓ (𝑠 ) (39) The centered deviations {Δ𝑏 (𝑠 )} 𝐵 𝑏 =1 form an empirical distribution of calibration uncertainty at score level 𝑠 . The stochastic calibrated score is: 
+
+˜𝑔 (𝑠, 𝑞 ) = logit −1 
+
+logit (𝜇 (𝑠 )) + 𝑄 𝑞 
+
+
+
+{Δ𝑏 (𝑠 )} 𝐵 𝑏 =1
+
+ 
+
+(40) where 𝜇 (𝑠 ) = 𝑔 (𝑠 ) is the primary model’s prediction and 𝑄 𝑞 denotes the 𝑞 -th quantile of the empirical distribution. Unlike the analytical CIs and Laplace approximation, the bootstrap makes no distributional assumptions about calibration uncertainty. However, it is computationally more expensive: each retraining event requires fitting 𝐵 + 1 GAMs, and each calibration query re-quires 𝐵 + 1 forward passes, roughly two orders of magnitude more than the primary variant. The bootstrap is most appropriate when the Gaussian approximation may be inadequate, e.g., with highly skewed class distributions or very few oracle samples, or when the calibration curve has sharp features that the analytical CIs may underestimate. All experiments in this paper use the constrained GAM (Appen-dix A.1) as the default because it combines monotonicity guarantees, analytical uncertainty estimates, and minimal computational over-head. The regularized variant (Appendix A.2) is preferable when oracle samples are scarce: its Platt scaling prior provides a principled  
+
+> 15 , , Liskowski et al. 0.55 0.65 0.75 0.85 0.95
+
+Target Recall ( 𝑡 𝑅 )
+
+> 0.55 0.65 0.75 0.85 0.95
+> Target Precision ( 𝑡 𝑃  )
+
+BoolQ 
+
+> 0.55 0.65 0.75 0.85 0.95
+
+Target Recall ( 𝑡 𝑅 )
+
+> 0.55 0.65 0.75 0.85 0.95
+
+MMLU 
+
+> 0.55 0.65 0.75 0.85 0.95
+
+Target Recall ( 𝑡 𝑅 )
+
+> 0.55 0.65 0.75 0.85 0.95
+
+SST-2 
+
+> 0.00.20.40.60.81.0
+> Joint Satisfaction Rate
+
+Figure 7: Joint target satisfaction rate for SUPG-IT across a 17 × 17 grid of (𝑡 𝑃 , 𝑡 𝑅 ) targets on BoolQ, MMLU, and SST-2 (10 seeds per configuration). White indicates 100% satisfaction. Yellow and red indicate partial or zero satisfaction. ArXiv and IMDB (not shown) achieve 100% on all 289 configurations. 
+
+fallback that prevents overfitting before sufficient data accumulates. The bootstrap (Appendix A.3) trades a roughly 100 × increase in computation for distribution-free uncertainty estimates, making it appropriate when the Gaussian posterior approximation may be inadequate. The GAMCAL framework is agnostic to the calibration backend: any implementation that provides calibrated probabilities with pointwise uncertainty can be substituted without modifying the cascade logic. 
+
+## B Extended Pareto Analysis 
+
+Figure 8 extends the main Pareto analysis (Figure 5) from 𝐹 1 to all four quality metrics and from two algorithms to all four. SUPG’s curves are vertical lines at 𝑑 = 𝜌 = 0.1 because the al-gorithm samples a fixed fraction 𝜌 of records for oracle labeling, regardless of the recall target. The oracle labels both estimate the recall threshold 𝜏 and provide final classifications for the sampled records. The proxy classifies the remainder using 𝜏 . Because 𝜏 de-pends on 𝑡 𝑅 but the sample size does not, sweeping 𝑡 𝑅 changes quality metrics but not cost. By contrast, SUPG-SP and SUPG-IT add a second stage that delegates all uncertain-region records to the oracle, creating a variable cost that grows with the target. The precision and recall columns together expose the asymmetry that motivates joint targeting. SUPG controls recall only: as 𝑡 𝑅 
+
+increases, the threshold drops to accept more records, and precision degrades in proportion. On NYT (positive rate 0.9% ), precision falls from 0.17 to 0.03 across the sweep, producing 𝐹 1 below 0.06 at the highest recall targets. ArXiv and IMDB show the same pattern, with precision dropping below 0.15 and 0.25 . Adding the upper threshold eliminates this failure mode: both SUPG-SP and SUPG-IT maintain precision above 0.99 on NYT while achieving the same recall range. The recall column confirms the complementary view: all SUPG variants achieve high recall at the strongest targets because recall is directly optimized through the lower threshold. The dashed baseline markers reveal how each algorithm positions relative to the proxy-only and oracle bounds. At high recall tar-gets, SUPG drops below the proxy-only accuracy baseline on most datasets. ArXiv is the most extreme case: all operating points fall be-low the proxy line. Lowering the threshold to capture more positive records admits enough false positives to degrade overall accuracy below what the unmodified proxy achieves. The three algorithms with precision control (GAMCAL, SUPG-IT, SUPG-SP) avoid this degradation and approach oracle quality at high delegation, reach-ing 𝐹 1 within a few percent of perfect on every dataset. 
+
+## C Target Satisfaction Patterns 
+
+Figure 7 visualizes the spatial distribution of target failures from the experiment described in Section 6.4. The failure patterns differ across datasets but share a common cause. On BoolQ, failures cluster at high precision targets ( 𝑡 𝑃 ≥ 0.75 ) with low recall targets, where the proxy’s intrinsic precision nearly meets the target and the cascade delegates few records to the oracle. The pattern on MMLU is milder: all 16 failures reach 90% satisfaction, again concentrated in low-delegation regions. About a third of configurations on SST-2 fall short of full satisfaction. The worst cases occur at high recall with low precision targets (e.g., 𝑡 𝑃 = 0.575 , 𝑡 𝑅 = 0.95 ), where delegation drops below 1% and precision is the metric that misses in every case. Across all three datasets, failures concentrate where the cascade is barely active: mean delegation in failing configurations is 1–8% .The proxy alone nearly satisfies the targets in these regions, and the few oracle samples collected are insufficient for tight statistical bounds. 
+
+## D Robustness to Parallelism 
+
+Both algorithms are designed for independent per-worker execu-tion. Increasing the number of workers 𝑊 (the degree of parallelism) splits the data into smaller partitions. Each worker therefore runs fewer iterative refinement steps and may face partition-level class imbalance. To quantify this effect, we evaluated GAMCAL and  
+
+> 16 Streaming Model Cascades for Semantic SQL , ,
+
+SUPG-IT at 𝑊 ∈ { 1, 2, 4, 8, 16 } on IMDB, MMLU, and SST-2 with batch size 4096 and 10 seeds per configuration. Quality is robust to parallelism. The mean best 𝐹 1 across datasets varies by less than 0.001 for GAMCAL and less than 0.004 for SUPG-IT as 𝑊 increases from 1 to 16. GAMCAL is the more stable of the two, with a maximum per-dataset shift of 0.002 𝐹 1. SUPG-IT shows a larger shift on SST-2 ( +0.012 𝐹 1 at 𝑊 =16 ), where fewer batches per worker leave thresholds less converged, widening the uncertain region and raising delegation from 41% to 56% . The additional oracle labels improve quality at higher cost. Seed-level variability does not increase with 𝑊 : for both algorithms, the standard deviation of 
+
+𝐹 1 across seeds remains stable or decreases as partitions shrink. 
+
+> 17
+
+, , Liskowski et al. 0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+> ArXiv
+
+F1 
+
+0.4
+
+0.5
+
+0.6
+
+0.7
+
+0.8
+
+0.9
+
+1.0
+
+Accuracy 
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+Precision 
+
+0.5
+
+0.6
+
+0.7
+
+0.8
+
+0.9
+
+1.0
+
+Recall 
+
+0.75 
+
+0.80 
+
+0.85 
+
+0.90 
+
+0.95 
+
+1.00 
+
+> BoolQ
+
+0.7
+
+0.8
+
+0.9
+
+1.0
+
+0.80 
+
+0.85 
+
+0.90 
+
+0.95 
+
+1.00 
+
+0.6
+
+0.7
+
+0.8
+
+0.9
+
+1.0
+
+0.4
+
+0.5
+
+0.6
+
+0.7
+
+0.8
+
+0.9
+
+1.0
+
+> IMDB
+
+0.4
+
+0.5
+
+0.6
+
+0.7
+
+0.8
+
+0.9
+
+1.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+0.6
+
+0.7
+
+0.8
+
+0.9
+
+1.0
+
+0.75 
+
+0.80 
+
+0.85 
+
+0.90 
+
+0.95 
+
+1.00 
+
+> MMLU
+
+0.70 
+
+0.75 
+
+0.80 
+
+0.85 
+
+0.90 
+
+0.95 
+
+1.00 
+
+0.75 
+
+0.80 
+
+0.85 
+
+0.90 
+
+0.95 
+
+1.00 
+
+0.7
+
+0.8
+
+0.9
+
+1.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+> NYT
+
+0.70 
+
+0.75 
+
+0.80 
+
+0.85 
+
+0.90 
+
+0.95 
+
+1.00 
+
+0.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+0.5
+
+0.6
+
+0.7
+
+0.8
+
+0.9
+
+1.0
+
+0.0 0.2 0.4 0.6 0.8 1.0
+
+Delegation Rate 
+
+0.75 
+
+0.80 
+
+0.85 
+
+0.90 
+
+0.95 
+
+1.00 
+
+> SST-2
+
+0.0 0.2 0.4 0.6 0.8 1.0
+
+Delegation Rate 
+
+0.80 
+
+0.85 
+
+0.90 
+
+0.95 
+
+1.00 
+
+0.0 0.2 0.4 0.6 0.8 1.0
+
+Delegation Rate 
+
+0.80 
+
+0.85 
+
+0.90 
+
+0.95 
+
+1.00 
+
+0.0 0.2 0.4 0.6 0.8 1.0
+
+Delegation Rate 
+
+0.7
+
+0.8
+
+0.9
+
+1.0     
+
+> Proxy-only Oracle GAMCAL SUPG-IT SUPG-SP SUPG
+
+Figure 8: Complete Pareto grid: all four cascade algorithms (GAMCAL, SUPG-IT, SUPG-SP, SUPG) across six datasets and four metrics ( 𝐹 1, accuracy, precision, recall). Dashed horizontal lines mark the proxy-only and oracle baselines. 
+
+18
