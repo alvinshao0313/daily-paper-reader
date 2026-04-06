@@ -1,0 +1,1355 @@
+Title: MI-Pruner: Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs
+
+URL Source: https://arxiv.org/pdf/2604.03072v1
+
+Published Time: Mon, 06 Apr 2026 00:51:30 GMT
+
+Number of Pages: 19
+
+Markdown Content:
+# MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs 
+
+Jiameng Li 1 Aleksei Tiulpin 2 3 Matthew B. Blaschko 1
+
+## Abstract 
+
+For multimodal large language models (MLLMs), visual information is relatively sparse compared with text. As a result, research on visual prun-ing emerges for efficient inference. Current approaches typically measure token importance based on the attention scores in the visual encoder or in the LLM decoder, then select visual tokens with high attention scores while pruning others. In this paper, we pursue a different and more sur-gical approach. Instead of relying on mechanism-specific signals, we directly compute Mutual In-formation (MI) between visual and textual fea-tures themselves, prior to their interaction. This allows us to explicitly measure crossmodal depen-dency at the feature levels. Our MI-Pruner is simple, efficient and non-intrusive, requiring no access to internal attention maps or architectural modifications. Experimental results demonstrate that our approach outperforms previous attention-based pruning methods with minimal latency. 
+
+## 1. Introduction 
+
+“Tell the whole story from just one clue.” — A principle 
+
+Modern multimodal models have rapidly grown in scale and capability (Bai et al., 2025; Chen et al., 2024c; Liu et al., 2024b), but this progress comes with a substantial computational cost. In particular, the quadratic complexity of self-attention makes inference increasingly expensive as the number of tokens grows, especially for high-resolution visual inputs (Li et al., 2024). Therefore, token pruning has emerged as a critical mechanism for efficient inference, aiming to retain only the most informative tokens while dis-carding redundant ones (Ye et al., 2025; Cao et al., 2024). By reducing sequence length in the forward pass, the pruning    
+
+> 1ESAT-PSI, KU Leuven, Belgium 2Faculty of Medicine, Uni-versity of Oulu, Finland 3Weill Cornell Medicine, USA. Corre-spondence to: Jiameng Li <jiameng.lu@kuleuven,be >.
+> Preprint. April 6, 2026.
+
+not only alleviates computation and memory consumption, but also enables scalable deployment of large multimodal models in latency- and resource-constrained settings. The token pruning task is grounded in information quan-tities (Iyer et al., 2021; Spadaro et al., 2023; Gao et al., 2020; Potkins et al., 2024), such as entropy and Mutual Information. Yet, most methods (Yang et al., 2025a; Zhao et al., 2025; Yin et al., 2025) merely consider the ”visual dilution” after shallow layers in the LLM decoder, and con-duct pruning according to internal salience, e.g. , attention scores. This design choice is not arbitrary, since studies on MLLM information flow (Zhang et al., 2025f;d) suggest a functional hierarchy across layers: shallow layers predom-inantly capture perceptual cues (the ”eye”), while deeper layers are responsible for high-level semantic reasoning and crossmodal fusion (the ”brain”). Consequently, attention in early decoder layers holds fine-grained perceptual saliency to be a reasonable proxy for identifying redundant tokens. Recent work (Zhang et al., 2025b; Yang et al., 2025a; Cai et al., 2025) points out that the entangled multimodal seman-tics in LLM bring noise into visual pruning, and proposes to leverage visual cues extracted by the vision encoder, at an even earlier stage before projection layers. Despite the progress, several issues remain in attention-based pruning. (i) Crude manipulation with less inter-pretability: Attention scores don’t equal information impor-tance due to the positional bias (Wen et al., 2025a), attention sinks (Xiao et al., 2024; Yang et al., 2025b) and multi-head diversity (Zhang et al., 2025d; Kang et al., 2025a). Sev-eral works (Darcet et al., 2024; Lauren c¸ on et al., 2024; Yan et al., 2025) indicate that attention maps have outliers in-congruous with local semantics, and the multi-head average obliterates the head-specific roles (Yang et al., 2025b; Kang et al., 2025a). (ii) Implementation bottlenecks: LLM inter-nal operations are incompatible with FlashAttention (Dao et al., 2022; Dao, 2024; Chen et al., 2024a), while extract-ing attention matrices from the encoder increases memory overhead, especially for high-resolution inputs. From a long-term perspective, prompt-adaptive pruning is desirable while not relying on the entangled cross-attention within LLMs. To address this, we move beyond heuristic attention collection and revisit the information-theoretic foundations of token importance. Instead of relying on attention salience 1
+
+> arXiv:2604.03072v1 [cs.CV] 3 Apr 2026
+
+MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs Full Image  MI -Pruner VisPruner   
+
+> Which color is the shirt?
+> White
+> What color are the pants?
+> Red
+> n446242.jpg
+> n488874.jpg
+> n71728.jpg
+> Is the happy man to the
+> left or to the right of the
+> woman in the center?
+> Left
+> Keep 64
+> SparseVLM
+> Keep 12 8
+> Keep 25 6
+
+Figure 1. Pruning visualization on LLaVA1.5-7B with different budgets. Our MI-Pruner consistently identifies and preserves the queried regions, whereas other methods partially miss relevant information. Tokens from top to bottom: 64, 128, 256. 
+
+in encoders or decoders, we propose to directly quantify token relevance through their Mutual Information. Built on this principle, we introduce MI-Pruner , a surgical token pruning approach in the projection space, enabling reliable and non-intrusive token pruning which preserves query-relevant information. As a model-agnostic method, it can be easily applied to a wide range of MLLMs following the Enc-MLP-Dec paradigm. Experiments across many bench-marks demonstrate that our method achieves state-of-the-art performance with minimal latency. Moreover, we present 
+
+MI-Attention , a unified approach integrating Mutual Infor-mation and attention for flexible usage. In summary, our contributions are: • We introduce a principled framework for visual token pruning. By maximizing crossmodal Mutual Information in the projection space, MI-Pruner efficiently captures visual cues aligned with the textual query. • As a model-agnostic module, MI-Pruner can be seam-lessly integrated into various off-the-shelf MLLMs and is compatible with existing attention-based methods to further refine the token selection. • Empirical results reveal that attention scores are not the only measure of semantic importance, establishing a new foundation for statistical analysis of black-box MLLMs. 
+
+## 2. Preliminaries 
+
+2.1. MLLM Architecture 
+
+The general architecture of MLLMs can be formulated as a vision encoder Ev with a projection module f , a tokenizer 
+
+ET, and an LLM decoder. Given an image I and a prompt 
+
+P , the encoders EV,T extract features into: 
+
+V := {vi}NV 
+
+> i=1
+
+= f (EV(I)) ∈ RNV ×d, vi ∈ Rd, (1) 
+
+T := {tj }NT 
+
+> j=1
+
+= ET(P ) ∈ RNT ×d, tj ∈ Rd. (2) The multimodal features are concatenated to input LLM: 
+
+X := V ⊕ T ∈ R(NV +NT )×d. (3) We omit the system instructions for simplification. The LLM generates response tokens Y := {yk}NG 
+
+> k=1
+
+in an au-toregressive manner: 
+
+p(Yk|X , Y<k ) = softmax(LLM( X , Y<k )) (4) 
+
+2.2. Token Importance Measure 
+
+To assess token importance, methods based on visual cues (Zhang et al., 2025b; Yang et al., 2025a) typically employ a two-step pruning strategy: (i) aggregate attention scores from [ CLS ] or other image tokens from V as Attn i, to deter-mine the initial pruning budget; (ii) recycle from remaining tokens Vre by their similarity Si. Assuming c as the [ CLS ]index of an averaged attention matrix A ∈ RNV ×NV and 
+
+˜vi ∈ Rd as the normalized visual embeddings before pro-jection, the two-step importance measures are formulated as: 
+
+Attn i = Aci or X 
+
+> j̸=i,j ∈V
+
+Aji , (5) 
+
+Si = X 
+
+> j̸=i,j ∈V re
+
+(˜ v⊤ 
+
+> i
+
+˜vj ). (6) Then the selected visual tokens Vkeep go through projection to be concatenated with T .2MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs 
+
+2.3. Information Theory 
+
+In this work, we study token pruning in MLLMs, aiming to identify and retain the most informative vision tokens. Infor-mation theory provides a rigorous mathematical framework for quantifying information transmission and representation. Within this framework, Mutual Information (MI) emerges as a natural metric for measuring the statistical dependence between tokens. Consequently, maximizing MI offers a principled objective for identifying tokens that encapsulate shared and semantically aligned information. 
+
+Definition 2.1 (Mutual Information (Kraskov et al., 2004; Gray, 2011)) . The Mutual Information MI( X; Y ) measures the gap between entropy H(X) and conditional entropy 
+
+H(X|Y ) (see definition in App. A.1), which quantifies the uncertainty reduction of a random variable X given the knowledge of another random variable Y :
+
+MI( X; Y ) = H(X) − H(X | Y ) (7) 
+
+= X 
+
+> x∈X , y ∈Y
+
+p(x, y ) log p(x | y)
+
+p(x)
+
+| {z }
+
+> PMI( x;y)
+
+. (8) 
+
+MI( X; Y ) can be interpreted as the weighted average of pointwise Mutual Information PMI( x, y ) under the joint distribution p(x, y ). Replacing x, y with embeddings vi, tj
+
+establishes a link to multimodal token relevance. In gen-eral, maximizing MI is computationally intractable. How-ever, under the assumption 1 of conditional independence (the components of X are independent given Y ), it be-comes a cardinality-constrained monotone submodular max-imization problem (Krause et al., 2008). This is a well-studied problem with a known approximation guarantee of 
+
+1 − 1/e . An important property of submodular functions is the marginal gain. 
+
+Definition 2.2 (Marginal Gain (Fujishige, 2005)) . Let X
+
+be a ground set, and let f : 2 X → R be a set function. The marginal gain of adding an element i ∈ X \ A to a selected set A ⊆ X is defined as: 
+
+∆f (i|A ) = f (A ∪ { i}) − f (A). (9) 
+
+Definition 2.3 (Submodularity and Diminishing Returns (Fujishige, 2005)) . A function f is submodular if and only if for all A ⊆ B ⊆ X and i ∈ X \ B :
+
+∆f (i|A ) ≥ ∆f (i|B ). (10) Then, we link the monotonicity with MI-guided visual se-lection. Let VS ⊆ V be a selected set belonging to a ground 
+
+> 1This assumption is necessary to make MI tractable, and has been implicitly adopted in prior studies employing greedy search (see Related Work).
+
+set of variables, and let T be a targeted set of variables, we define Mutual Information as a set function: 
+
+f (VS) = MI( VS; T ). (11) Following Eqn. (9), the marginal gain of adding a new vi
+
+into VS is expressed as: 
+
+∆f (vi | V S) = MI( VS ∪ { vi}; T ) − MI( VS; T ) (12) 
+
+= MI( vi; T | V S). (13) The definition of conditional MI is given in Def. A.3 (App. A.1), and the proof from Eqn. (12) to (13) is in App. A.2. The cardinality-constrained monotone submodular maxi-mization problem is typically addressed by a greedy search strategy, which selects elements that maximize the marginal gain at each step (Nemhauser et al., 1978): 
+
+vi = arg max 
+
+> vi∈V\V S
+
+∆f (vi|V S). (14) The greedy search holds a complexity of O(NV Nkeep ). In practice, greedy search is a common optimization strategy in token pruning (Alvar et al., 2025; Zhang et al., 2025c). In the sequel, we will develop a pruning strategy with even lower complexity. 
+
+## 3. Methods 
+
+3.1. Visual Pruning 
+
+Compared to text, the visual information is inherently sparser (Tang et al., 2025; Chen et al., 2024b), while the image tokens usually consume 10 ∼ 100 × tokens than their textual counterparts. The reasons are two-fold: (i) Intrinsic visual redundancy: A vast majority of image patches con-sist of uninformative backgrounds or repetitive textures. (ii) Functional asymmetry in MLLMs: In multimodal contexts, text typically serves as a concentrated prompt to trigger specific visual reasoning, whereas the raw visual input is exhaustive. As illustrated in Fig. 1, repetitive regions—such as stretches of beach, flooring, or walls—are ubiquitous in visual data. Processing these redundant patches provides diminishing returns in representational gain while signifi-cantly inducing computational latency during the forward pass. Furthermore, the relative region regarding a concrete query takes even less portion, e.g. , a shirt. Despite the progress on visual pruning methods (Farina et al., 2024; Jeddi et al., 2025; Wang et al., 2023), most of them were constrained by the attention collection, which introduces significant latency due to additional storage re-quirements. Furthermore, the divergence across multiple heads and the attention sink phenomenon become a per-formance bottleneck. In this work, we circumvent these pitfalls by proposing a surgical approach based on Mutual Information in the projection space (Fig. 2). 3MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs _What _is _hanging 
+
+_above _the _chalkboard ?
+
+> Vis.Enc
+> Projector
+> LLM
+
+_picture 
+
+Cross -Attn . 
+
+> FastV ,SparseVLM
+
+Mutual Info. 
+
+MI -Pruner (Ours)  _What 
+
+_is 
+
+_hanging 
+
+_above 
+
+_the 
+
+_chalkboard 
+
+?
+
+Mutual Information 
+
+70ms 110ms 
+
+> Tokenizer
+
+Vis ual Attn.  
+
+> VisionZip ,VisPruner
+
+Figure 2. Overview. Previous methods prune tokens by attention scores from vision encoder or LLM decoder. Our MI-Pruner calculates Mutual Information between visual and textual embeddings in the projection space, achieving optimal performance with minimal latency. 
+
+3.2. MI-Pruner 
+
+After the projection layer, we extract visual embeddings 
+
+V = {vi}NV
+
+> i=1
+
+, and textual embeddings T = {tj }NT
+
+> j=1
+
+, where 
+
+vi, tj ∈ Rd. Our objective is to prune visual patches that are weakly correlated with the textual semantics yet highly redundant among selected patches. We denote ˜x as the normalized x. To save space, we adopt a unified notation: 
+
+s ∈ { cross , self }, x ∈ { t, v}, N ∈ { NT , N V }.
+
+Normalization and similarity computation. We first nor-malize embeddings V, T onto a unit hypersphere, yielding 
+
+˜V, ˜T . Based on Boltzmann distributions, we compute sim-ilarity matrices for vision-text ( ρcross  
+
+> ij
+
+) and vision-vision (ρself  
+
+> ij
+
+) interactions: 
+
+ρcross  
+
+> ij
+
+= ˜v⊤ 
+
+> i
+
+˜tj
+
+τ , ρself  
+
+> ij
+
+= ˜v⊤ 
+
+> i
+
+˜vj
+
+τ . (15) The temperature τ controls the sharpness of the distribution, typically in 0.01 ∼0.1. For simplicity, we adopt a shared τ
+
+for both matrices, though it’s not mandatory. Treating these similarity scores {ρs 
+
+> ij
+
+}Nj=1 as logits, we define the energy-based crossmodal and internal conditional distribution. 
+
+Conditional distribution. Applying a softmax operation along the second dimension, we obtain conditional proba-bilities p(˜ tj | ˜vi), p (˜ vj | ˜vi) in a unified formula: 
+
+p(˜ xj | ˜vi) = softmax j (ρs 
+
+> ij
+
+) = exp( ρs 
+
+> ij
+
+)
+
+PNk=1 exp( ρs
+
+> ik
+
+) . (16) It quantifies the semantic alignment between (vi, tj ) and the structural diversity among (vi, vj ), as illustrated by the row operation in Fig. 3. 
+
+Marginal distribution. For the prior probability, we as-sume p(˜ vj ) = 1 
+
+> NV
+
+, where visual embeddings occur with equal probabilities to avoid spatial bias. According to the law of total probability, the marginal dis-tribution of text embeddings is expressed as: 
+
+p(˜ tj ) = 1
+
+NVNVX
+
+> i=1
+
+p(˜ tj | ˜vi), (17) as illustrated by the column operation in Fig. 3. See more details in App. A.4. 
+
+Pointwise Mutual Information. We adopt the Pointwise Mutual Information (PMI) to measure the token-level rele-vancy between embeddings: PMI (˜ vi; ˜ xj ) = log p(˜ xj | ˜vi)
+
+p(˜ xj ) . (18) Specifically, PMI (˜ vi; ˜ tj ) quantifies the crossmodal seman-tic alignment, while PMI (˜ vi; ˜ vj ) captures the intra-modal redundancy; both are measured at the token level. 𝑝 ( ǁ 𝐭 𝑗 )            
+
+> ෤𝐯 𝒊
+> ǁ
+> 𝐭 𝒋
+> 𝑝 (ǁ𝐭 𝑗 |෤𝐯 𝑖 )
+> Max
+> PMI (෤𝐯 𝒊 ;ǁ𝐭 𝒋 )
+> Greedy
+> 𝑆 𝑖
+> cross
+> 𝑝 (෤𝐯 𝑖 )
+> 𝝆 𝑖𝑗
+> cross
+> 𝑆 𝑖
+> self
+> 𝝆 𝑖𝑗
+> self PMI (෤𝐯 𝒊 ;෤𝐯 𝒋 )(෤𝐯 𝒊 ,෤𝐯 𝒋 )
+> 𝑉 𝑘𝑒𝑒𝑝
+> ෨𝑇
+> ෨𝑉
+
+Figure 3. A toy model of MI-based pruning. We construct similarity matrices to get conditional probability and marginal probability, then calculate crossmodal PMI (top) and internal PMI (bottom). All [ vis ] tokens are flattened for illustration. 
+
+Maximal aggregation. For each ˜vi, we aggregate the maxi-mal PMI over text tokens ˜T and over selected vision tokens 
+
+˜VS as the crossmodal and internal relevance scores: 
+
+Scross  
+
+> i
+
+= max   
+
+> ˜tj∈˜T
+
+PMI(˜ vi; ˜ tj ), (19) 
+
+Sself  
+
+> i
+
+= max   
+
+> ˜vj∈˜VS
+
+PMI(˜ vi; ˜ vj ). (20) 4MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs 
+
+Table 1. Performance comparison of different pruning methods on LLaVA1.5-7B. Methods before - - - are attention-based. We use color to distinguish best and second best .
+
+Methods GQA SQA TextVQA MMVet MME P POPE PF1 PYes 
+
+LLaVA1.5-7B 61.97 66.80 59.09 30 .46 ±7.58 1509.13 85.18 0.86 0.56 
+
+keep 64 
+
+FastV (Chen et al., 2024a) 50.80 51.10 47.80 24.99 ±7.01 1019.60 48.50 0.48 0.35 SparseVLM (Zhang et al., 2025e) 52.70 62.20 51.80 23.04 ±7.88 1221.10 75.45 0.75 0.37 VisionZip (Yang et al., 2025a) 55.10 69.00 55.50 31.04 ±7.08 1365.60 77.34 0.76 0.37 VisPruner (Zhang et al., 2025b) 55.40 69.10 55.80 32.09 ±7.11 1369.90 82.61 0.80 0.38 DART (Wen et al., 2025b) 55.90 68.86 54.40 26.01 ±6.78 1273.30 73.90 0.73 0.33 Random 55.45 67.34 49.54 23.60 ±6.91 1274.27 79.82 0.76 0.34 Similarity 54.63 68.47 50.30 24.04 ±6.88 1286.66 84.24 0.83 0.42 
+
+MI-Attention 57.01 69.20 55.90 31.16 ±8.33 1428.03 85.04 0.84 0.41 
+
+MI-Pruner 56.88 69.81 54.91 28.12 ±7.77 1381.35 84.91 0.83 0.43 
+
+keep 32 
+
+FastV (Chen et al., 2024a) 41.50 42.60 42.50 20.55 ±7.34 884.60 33.50 0.33 0.34 SparseVLM (Zhang et al., 2025e) 48.30 57.30 46.10 18.81 ±7.05 1046.70 68.90 0.68 0.36 VisionZip (Yang et al., 2025a) 51.80 68.80 53.10 25.43 ±7.65 1247.40 68.92 0.68 0.37 VisPruner (Zhang et al., 2025b) 52.20 69.20 53.90 28.77 ±7.55 1271.00 77.83 0.73 0.32 DART (Wen et al., 2025b) 52.77 68.76 52.20 24.91 ±7.23 1273.30 69.13 0.69 0.31 Random 52.58 67.33 47.20 21.72 ±6.34 1176.85 73.23 0.66 0.30 Similarity 51.46 67.48 47.78 20.05 ±6.41 1141.68 80.07 0.78 0.42 
+
+MI-Attention 54.19 69.11 54.07 28.91 ±7.85 1344.16 82.81 0.81 0.39 
+
+MI-Pruner 55.78 69.26 52.63 24.46 ±7.77 1307.72 83.18 0.81 0.41 The max aggregation forces Ss 
+
+> i
+
+to capture the strongest cross-modal relevance (”pivot word”) and intra-modal redundancy (”pivot patch”), leading to consistently better performance than the global average. See justification in App. A.3. 
+
+Global aggregation. Another way is to the full MI formu-lation, i.e. , averaging over all text tokens or selected image tokens (”consensus”), interpreted as global aggregation: 
+
+Ss 
+
+> i
+
+=
+
+> NX
+
+X
+
+> j=1
+
+p(˜ vi; ˜ xj )
+
+| {z } 
+
+> p(˜ xj|˜vi)
+
+·PMI(˜ vi; ˜ xj ). (21) Empirical comparisons of the two aggregation strategies are presented in Sec. 4.4. 
+
+Greedy search. For greedy search, we define a scoring function Si as the marginal gain of adding vi, where λ
+
+balances the relevance and redundancy: 
+
+Si = λS cross  
+
+> i
+
+− (1 − λ) · Sself  
+
+> i
+
+(22) 
+
+= λ · max   
+
+> ˜tj∈˜T
+
+PMI(˜ vi; ˜ tj )
+
+| {z }
+
+> relevance →sorting
+
+−(1 − λ) max   
+
+> ˜vj∈˜VS
+
+PMI(˜ vi; ˜ vj )
+
+| {z }
+
+> redundancy →greedy
+
+.
+
+(23) 
+
+λ = 1 considers only crossmodal relevance towards user prompts, and λ = 0 measures only internal redundancy. According to the budget Nkeep , we conduct a greedy search to find v⋆ that maximizes the marginal gain at each step: 
+
+v⋆ = arg max 
+
+> vi∈V\V S
+
+Si. (24) 
+
+3.3. Efficient Inference 
+
+Recall Sec. 2.1, MI-Pruner prunes vision tokens to a smaller set Vkeep . In the projection space, Eqn. (3) is updated to: 
+
+X = Vkeep ⊕ T ∈ R(Nkeep +NT )×d, N keep < N V . (25) Since MI-Pruner doesn’t require attention collection or in-teraction of LLM, the scoring calculation is very efficient with minimal latency, and the subset selection problem be-comes modular instead of just submodular. Our selection has a complexity of O(NV + Nkeep log NV ),2 while the classic greedy search holds O(NV Nkeep ). We expect that in settings of interest Nkeep log NV < N V , implying an overall complexity of O(NV ). See Algorithm 1 for our full pipeline. Then, we empirically verify that this faster infer-ence framework results in comparable or better performance to SOTA baselines. 
+
+> 2
+
+The computation requires O(NV ) evaluations of the PMI ,
+
+O(NV ) cost for building a heap, and Nkeep retrievals of the largest element in the heap, each of which costs O(log NV ).
+
+5MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs 
+
+Algorithm 1 MI-Pruner  
+
+> 1:
+
+Input: Visual and textual embeddings V = {vi}NV
+
+> i=1
+
+,
+
+T = {tj }NT
+
+> j=1
+
+, temperature τ , budget Nkeep  
+
+> 2:
+
+Output: The selected visual subset Vkeep  
+
+> 3:
+
+// Similarity matrices  
+
+> 4:
+
+˜vi ← vi/∥vi∥, ˜tj ← tj /∥tj ∥ 
+
+> 5:
+
+ρcross  
+
+> ij
+
+← ˜v⊤ 
+
+> i
+
+˜tj /τ, ρself  
+
+> ij
+
+← ˜v⊤ 
+
+> i
+
+˜vj /τ  
+
+> 6:
+
+// Derive distributions             
+
+> 7: p(˜ tj|˜vi)←softmax j(ρcross
+> ij ), p (˜ vj|˜vi)←softmax j(ρself
+> ij )
+> 8:
+
+p(˜ vj ) ← 1 
+
+> NV
+
+, p (˜ tj ) ← 1
+
+> NV
+
+PNV 
+
+> i=1
+
+p(˜ tj | ˜vi) 
+
+> 9:
+
+// Pointwise Mutual Information (PMI)  
+
+> 10:
+
+PMI(˜ vi; ˜ tj ) ← log p(˜ tj |˜vi)  
+
+> p(˜ tj)
+
+, PMI(˜ vi; ˜ vj ) ← log p(˜ vj |˜vi)  
+
+> p(˜ vj)
+> 11:
+
+// Greedy selection  
+
+> 12:
+
+while |V S| < N keep do  
+
+> 13:
+
+for each vi ∈ V \ V S do  
+
+> 14:
+
+Scross  
+
+> i
+
+← max ˜tj ∈ ˜T PMI(˜ vi; ˜ tj ) 
+
+> 15:
+
+Sself  
+
+> i
+
+← max ˜vj ∈ ˜VS PMI(˜ vi; ˜ vj ) 
+
+> 16:
+
+Si ← λS cross  
+
+> i
+
+− (1 − λ)Sself  
+
+> i
+> 17:
+
+end for  
+
+> 18:
+
+v⋆ ← arg max vi Si, and VS ← V S ∪ { v⋆} 
+
+> 19:
+
+end while  
+
+> 20:
+
+Vkeep ← V S 
+
+> 21:
+
+return Vkeep 
+
+## 4. Experiments 
+
+4.1. Experiments Setup Settings. We adopt λ = 0 .5 for open-ended QA datasets, involving GQA (Hudson & Manning, 2019) and MMVet (Yu et al., 2023), and λ = 1 for broader closed-form-type datasets, including SQA (Lu et al., 2022) (mutiple-choice), TextVQA (Singh et al., 2019) (reference answer provided), MME P (Fu et al., 2025) (Yes/No) and POPE (Li et al., 2025) (Yes/No). The inference and evaluation follow the default settings and metrics. Specifically, we conduct bootstrapping for MMVet since it includes only 218 samples, and report F1 score (P F1 ) and Yes-rate (P Yes ) for POPE as fine-grained measures. The MLLMs include LLaVA1.5-7B (Liu et al., 2024a), Qwen2VL (Wang et al., 2024) and latest Qwen3VL (Bai et al., 2025), all in greedy sampling and SDPA atten-tion, more details in App. B.3. For generalization, we also apply our method to Video-LLaVA-7B (Lin et al., 2024) with λ = 0 .5 and test on TGIF-QA (Jang et al., 2017), MSVD-QA (Xu et al., 2017) and MSRVTT-QA (Xu et al., 2017) datasets. All experiments are conducted on a single NVIDIA A100 GPU. 
+
+Comparison methods. Our comparison involves the base-line with full tokens, attention-based and non-attention-based methods. For LLaVA1.5, we compare with (i) attention-based methods FastV (Chen et al., 2024a), Sparse-VLM (Zhang et al., 2025e), VisionZip (Yang et al., 2025a) and VisPruner (Zhang et al., 2025b), and (ii) non-attention-based methods DART (Wen et al., 2025b), random and similarity. ”Random” denotes averaging three independent runs with randomly selected tokens, and ”Similarity” refers to cosine similarity between V/T tokens (Eqn. (15)). As a variation, MI-Attention combines attention from the vision encoder (round-1) and MI-guided pruning (round-2). Since existing methods haven’t released codes on Qwen3VL, we establish a general ”Attention” baseline from VisionZip. 
+
+4.2. Main Results LLaVA1.5. Following the well-established benchmark in (Yang et al., 2025a; Zhang et al., 2025b), we report the pruning effects on LLaVA1.5-7B in Tab. 1. As observed, 
+
+MI-Pruner and MI-Attention achieve SOTA performance among listed benchmarks. Specifically, other pruning meth-ods significantly reduce the proportion of “Yes” responses to around 0.35, likely due to mistakenly pruning image to-kens corresponding to the queried objects. In contrast, our method better preserves queried information in image to-kens and maintains a more balanced Yes/No distribution. Surprisingly, not all pruning methods outperform ”Random” (Wang et al., 2025b; Wen et al., 2025b;a), underscoring the necessity of a solid theoretical grounding. In Fig. 1, we visu-alize the pruning effects of representative methods working in the projection space (ours), LLM (SparseVLM) and the vision encoder (VisPruner) respectively. The visualization shows that MI-Pruner consistently catches the queried re-gion. Notably, our approach does not rely on collecting attention maps; this non-intrusive characteristic makes it more suitable for practical deployment.  
+
+> Figure 4. Performance on Qwen2VL series (GQA).
+
+Qwen2VL and Qwen3VL series. Despite the model-agnostic nature, we further evaluate our method on models with dynamic resolutions, both of instruction-tuned versions. For Qwen2VL series, we show performance on different generations ”-2VL” and ”-2.5VL” in Fig. 4. The visual cues in VisionZip depend on specific vision encoders, which limit its generalization capacity. In comparison, our method out-performs both diversity-based DART and attention-based VisionZip and FastV. For the latest Qwen3VL series, we illustrate two scales ”-2B” and ”-8B” in Tab. 2, where ”At-tention” is implemented as the attention sum-up from other 6MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs 
+
+Table 2. Performance comparison of different pruning methods on Qwen3VL-2B and -8B. ”Attention” refers to the sum of attention scores from other image tokens. MI-Pruner and MI-Attention achieve SOTA performance for both scales. 
+
+Methods GQA MME P POPE PF1 PYes Methods GQA MME P POPE PF1 PYes 
+
+Qwen3VL-2B 59.55 1494.98 89.89 0.90 0.47 Qwen3VL-8B 61.53 1730.47 88.84 0.88 0.44 
+
+keep 50% 
+
+Random 49.96 1438.19 88.76 0.88 0.46 Random 53.02 1422.31 88.25 0.87 0.43 Similarity 50.87 1454.34 89.26 0.89 0.48 Similarity 53.17 1461.25 88.95 0.88 0.45 Attention 50.09 1462.74 89.54 0.89 0.47 Attention 52.93 1462.84 88.85 0.88 0.44 
+
+MI-Pruner 51.30 1478.26 89.78 0.90 0.48 MI-Pruner 53.48 1493.04 89.22 0.89 0.45 
+
+MI-Attention 51.11 1493.20 89.73 0.89 0.48 MI-Attention 53.23 1482.10 89.00 0.88 0.44 
+
+keep 25% 
+
+Random 47.15 1398.52 85.59 0.85 0.42 Random 49.47 1256.18 85.64 0.84 0.41 Similarity 48.43 1372.50 88.28 0.88 0.47 Similarity 50.61 1338.28 87.98 0.88 0.45 Attention 46.59 1158.90 86.39 0.85 0.41 Attention 49.00 1293.91 87.74 0.87 0.43 
+
+MI-Pruner 49.63 1447.14 89.51 0.89 0.48 MI-Pruner 51.42 1369.58 88.82 0.88 0.45 
+
+MI-Attention 48.53 1459.36 89.38 0.89 0.46 MI-Attention 50.72 1415.71 88.82 0.88 0.44 MI -Pruner Attention -based 
+
+> How do the cars look
+> like, dense or sparse?
+> Dense
+> Full Image
+> Keep 25%
+> Keep 50%
+
+(a) Qwen3VL-2B MI -Pruner Attention -based  
+
+> What gender is the
+> swimsuit?
+> Male
+> Full Image
+> Keep 25%
+> Keep 50%
+
+(b) Qwen3VL-8B 
+
+Figure 5. Pruning visualization on Qwen3VL series. Our method retains the semantic-relative patches regarding prompts adaptively. 
+
+image tokens, to avoid the specific design of [ CLS ] or hyper-parameters of existing methods (Yang et al., 2025a; Zhang et al., 2025b). Meanwhile, the visualization of pruning effects can be found in Fig. 5. By design, high-attention tokens produced by the vision encoder are biased toward generic salient features, such as faces or logos, which are pivotal for classification. However, such prompt-agnostic pruning exhibits reduced robustness when the query lies in non-salient or fine-grained regions that fall outside these pre-defined regions of interest. For instance, the ”Attention” method keeps the facial landmark in Fig. 5a while pruning the queried cars. The scattered patches among the swimmer and the swimming pool in Fig. 5b increase the difficulty of multimodal reasoning. In comparison, MI-Pruner provides semantically complete patches aligned with the query. 
+
+Efficiency analysis. The MI derivative exhibits a complex-ity of O(NV ·max( NT , N keep )) , yet this overhead becomes 
+
+O(NV NT ) for crossmodal priority ( λ = 1 ). Later, our se-lection complexity is O(NV + Nkeep log NV ) due to the independence assumption. We report the GPU memory and latency in Tab. 3. Since SparseVLM operates in LLMs, its efficiency benefits are suboptimal. Despite the early stage in vision encoder, VisPruner is still held back by its attention collection. As a diversity-based method, CDPruner compro-mises the efficiency due to MAP inference. Despite a slight latency increase when intra-model redundancy is considered (λ̸ = 1 ), MI-Pruner delivers the best inference efficiency under both configurations. 
+
+Table 3. Efficiency comparison on POPE (LLaVA1.5-7B).                              
+
+> Methods Mem (GB) Latency (ms) Mem (GB) Latency (ms)
+> keep 128 keep 64
+> SparseVLM 18.08 96.36 ±0.35 18.11 93.67 ±0.31
+> VisPruner 14.35 92.04 ±0.44 14.35 89.48 ±0.32
+> CDPruner 14.73 111.12 ±0.65 14.65 91.41 ±0.41
+> DART 14.05 92.62 ±0.39 13.96 88.41 ±0.37
+> MI-Pruner λ=1 14.01 82.08 ±0.32 13.93 77.06 ±0.36
+> MI-Pruner λ=0 .514.01 98.92 ±0.40 13.93 84.95 ±0.34
+
+4.3. Video Understanding Results 
+
+Following previous work (Yang et al., 2025a), we report our video-QA results on Video-LLaVA (Lin et al., 2024), which includes 8 frames with 256 × 8 = 2048 visual tokens. As shown in Tab. 4, MI-Pruner achieves average 93.19% accuracy across three datasets with merely 114 visual tokens (5.57% retained). 7MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs                                                    
+
+> Table 4. Video-QA performance on Video-LLaVA-7B.
+> Methods TGIF MSVD MSRVTT
+> Acc Score Acc Score Acc Score
+> Video-LLaVA 18.90 2.54 72.00 3.95 57.50 3.50
+> keep 227
+> FastV 14.30 2.42 68.90 3.90 53.00 3.40 VisPruner 15.90 2.41 69.30 3.92 55.60 3.45
+> MI-Pruner 15.70 2.44 70.60 3.94 56.40 3.46
+> keep 114
+> FastV 10.60 2.29 64.10 3.78 52.40 3.39 VisPruner 14.10 2.35 65.40 3.79 54.10 3.41
+> MI-Pruner 13.10 2.40 69.90 3.92 55.30 3.49
+
+4.4. Ablation Study Aggregation strategies. We adopt max PMI (Eqn. (19)-(20)) as the MI proxy. In Fig. 6a, we compare max with average aggregation. Empirically, the mean value among all text embeddings exhibits less distinguishing sensitivity to the queried object. 
+
+Balancing factor λ. Fig. 6b reveals a dichotomy between open-ended (e.g., GQA) and closed-form datasets (e.g., SQA). The highest metrics are annotated for distinguish-ing. The prompts query about high-level semantics in open-ended questions ( ”What is ...” ), where a non-zero λ is es-sential to prevent selecting highly similar visual elements. While for the multiple-choice dataset SQA, setting λ = 1 
+
+consistently yields the best performance, as the prompt ex-plicitly encodes the ground-truth cue in choices. 
+
+Temperature τ . The temperature τ is used to sharpen the similarity scores, especially for open-ended questions. We evaluate 3 groups of τ in Tab. 5 with 64 and 32 retained tokens, where τ = 0 .1 yields the best performance.       
+
+> (a) Aggregation (b) Factor λ
+> Figure 6. Ablation study on scoring functions (LLaVA1.5-7B).
+> Table 5. Ablation study on temperature (LLaVA1.5-7B).
+
+τ GQA 64 GQA 32 SQA 64 SQA 32 
+
+0.01 55.26 55.39 69.06 69.02 0.1 56.88 55.78 69.81 69.26 
+
+0.5 54.32 52.23 68.56 68.99 
+
+## 5. Related Work 
+
+Attention-based pruning. Many works (Chen et al., 2024a; Fan et al., 2025; Lin et al., 2025) observed that image tokens receive less attention in LLM after shallow layers, which boosts two main branches of attention-based visual compression methods: (i) in LLM decoder, (ii) in vision encoder. FastV (Chen et al., 2024a) first discards low attention [ vis ] after layer 2 in LLM guided by cross-attention. The following work SparseVLM (Zhang et al., 2025e) selects a few [ text ] as raters, then calculates the rank of attention matrices for dynamically pruning in LLM. Another branch argues that purely visual cues directly indi-cate the informative patches. VisionZip (Yang et al., 2025a) selects image tokens with high [ CLS ] attention in the last layer of the vision encoder in round-1 and merges the re-maining tokens by semantic similarity in round-2 as the final input of LLM. Later, VisPruner (Zhang et al., 2025b) progressively removes duplicates by similarity in round-2. Despite working in various stages, attention-based methods often suffer from heuristics and implementation bottlenecks. 
+
+Diversity-based pruning. Diversity-based methods prune tokens by similarity or conditional diversity measures. DART (Wen et al., 2025b) introduces pivot tokens in LLM after layer 2 to emphasize the (dis-)similarity over impor-tance. In the projection space, Divprune (Alvar et al., 2025) introduces Min-Max diversity, while CDPruner (Zhang et al., 2025c) maximizes the pairwise similarity conditioned on their prompt relevance using greedy MAP inference. MMToK (Dong et al., 2026) constructs an energy-based similarity matrix akin to ours, yet their analysis ends at em-pirical coverage. In comparison, our MI-based pruning is efficient and theoretically sound. 
+
+## 6. Conclusion 
+
+We propose MI-Pruner , a plug-in visual pruner for MLLMs. By formulating token pruning as a subset selection problem, we leverage both crossmodal and intra-modal Mutual Infor-mation to quantify the marginal gain of visual tokens. Un-like attention-based heuristics, MI-Pruner works surgically in the projection space, providing a principled approach for token reduction. Experiments and visualization verified our robustness and interpretability. The surgical manner enables our method to be applied to any off-the-shelf MLLMs with the most favorable efficiency. 
+
+Limitations. We assume equal visual probability and condi-tional independence. Future work involving an appropriate visual prior is expected to refine our results. Moreover, our pruning is conducted only for visual tokens, yet prompts also contain low-information tokens, e.g. , ” a” and ” please ”. The textual token pruning plays a significant role in “needle in a haystack” and ”conflict detection” tasks. 8MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs 
+
+## Impact Statement 
+
+This paper aims to prune visual tokens in MLLMs for ef-ficient inference. We believe that our work will contribute to significant social benefits, particularly on latency- and resource-constrained scenarios. To the best of our knowl-edge, we don’t identify any negative effects associated with our research that need to be highlighted here. 
+
+## References 
+
+Alvar, S. R., Singh, G., Akbari, M., and Zhang, Y. Divprune: Diversity-based visual token pruning for large multimodal models. In CVPR , 2025. Bai, S., Cai, Y., Chen, R., Chen, K., Chen, X., Cheng, Z., Deng, L., Ding, W., Gao, C., Ge, C., Ge, W., Guo, Z., Huang, Q., Huang, J., Huang, F., Hui, B., Jiang, S., Li, Z., Li, M., Li, M., Li, K., Lin, Z., Lin, J., Liu, X., Liu, J., Liu, C., Liu, Y., Liu, D., Liu, S., Lu, D., Luo, R., Lv, C., Men, R., Meng, L., Ren, X., Ren, X., Song, S., Sun, Y., Tang, J., Tu, J., Wan, J., Wang, P., Wang, P., Wang, Q., Wang, Y., Xie, T., Xu, Y., Xu, H., Xu, J., Yang, Z., Yang, M., Yang, J., Yang, A., Yu, B., Zhang, F., Zhang, H., Zhang, X., Zheng, B., Zhong, H., Zhou, J., Zhou, F., Zhou, J., Zhu, Y., and Zhu, K. Qwen3-vl technical report. 
+
+arXiv preprint arXiv:2511.21631 , 2025. Bai, Z., Wang, P., Xiao, T., He, T., Han, Z., Zhang, Z., and Shou, M. Z. Hallucination of multimodal large language models: A survey. arXiv preprint arXiv:2404.18930 ,2024. Cai, K., Zhang, J., Yang, J., Fan, Y., Xie, P., Wang, J., and Wang, K. Flashvlm: Text-guided visual token se-lection for large multimodal models. arXiv preprint arXiv:2512.20561 , 2025. Cao, J., Ye, P., Li, S., Yu, C., Tang, Y., Lu, J., and Chen, T. Madtp: Multimodal alignment-guided dynamic token pruning for accelerating vision-language transformer. In 
+
+CVPR , 2024. Che, L., Liu, T. Q., Jia, J., Qin, W., Tang, R., and Pavlovic, V. Hallucinatory image tokens: A training-free eazy approach to detecting and mitigating object hallucinations in lvlms. In ICCV , 2025. Chen, D. and Dolan, W. B. Collecting highly parallel data for paraphrase evaluation. In Proceedings of the 49th annual meeting of the association for computational lin-guistics: human language technologies , pp. 190–200, 2011. Chen, L., Zhao, H., Liu, T., Bai, S., Lin, J., Zhou, C., and Chang, B. An image is worth 1/2 tokens after layer 2: Plug-and-play inference acceleration for large vision-language models. In ECCV , pp. 19–35, 2024a. Chen, Z., Wang, W., Cao, Y., Liu, Y., Gao, Z., Cui, E., Zhu, J., Ye, S., Tian, H., Liu, Z., et al. Expanding per-formance boundaries of open-source multimodal models with model, data, and test-time scaling. arXiv preprint arXiv:2412.05271 , 2024b. Chen, Z., Wu, J., Wang, W., Su, W., Chen, G., Xing, S., Zhong, M., Zhang, Q., Zhu, X., Lu, L., et al. Internvl: Scaling up vision foundation models and aligning for generic visual-linguistic tasks. In CVPR , pp. 24185– 24198, 2024c. Dao, T. FlashAttention-2: Faster attention with better paral-lelism and work partitioning. In ICLR , 2024. Dao, T., Fu, D. Y., Ermon, S., Rudra, A., and R ´e, C. FlashAt-tention: Fast and memory-efficient exact attention with IO-awareness. In NeurIPS , 2022. Darcet, T., Oquab, M., Mairal, J., and Bojanowski, P. Vision transformers need registers. In ICLR , 2024. Dong, S., Hu, J., Zhang, M., Yin, M., Fu, Y., and Qian, Q. Mmtok: Multimodal coverage maximization for efficient inference of vlms. In ICLR , 2026. Fan, C., Li, J., Zhang, T., Ao, X., Wu, F., Meng, Y., and Sun, X. Layer-wise model pruning based on mutual information. In EMNLP , pp. 3079–3090, 2021. Fan, Y., Zhao, A., Fu, J., Tong, J., Su, H., Pan, Y., Zhang, W., and Shen, X. Visipruner: Decoding discontinuous cross-modal dynamics for efficient multimodal llms. In 
+
+EMNLP , pp. 18896–18913, 2025. Farina, M., Mancini, M., Cunegatti, E., Liu, G., Iacca, G., and Ricci, E. Multiflow: Shifting towards task-agnostic vision-language pruning. In CVPR , 2024. Favero, A., Zancato, L., Trager, M., Choudhary, S., Perera, P., Achille, A., Swaminathan, A., and Soatto, S. Multi-modal hallucination control by visual information ground-ing. In CVPR , pp. 14303–14312, 2024. Fu, C., Chen, P., Shen, Y., Qin, Y., Zhang, M., Lin, X., Yang, J., Zheng, X., Li, K., Sun, X., et al. Mme: A com-prehensive evaluation benchmark for multimodal large language models. In The Thirty-ninth Annual Conference on Neural Information Processing Systems Datasets and Benchmarks Track , 2025. Fujishige, S. Submodular functions and optimization , vol-ume 58. Elsevier, 2005. Gallager, R. G. Information theory and reliable communi-cation , volume 588. Springer, 1968. 9MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs 
+
+Gao, D., He, X., Zhou, Z., Tong, Y., Xu, K., and Thiele, L. Rethinking pruning for accelerating deep inference at the edge. In ACM SIGKDD , pp. 155–164, 2020. Gray, R. M. Entropy and information theory . Springer Science & Business Media, 2011. Gunjal, A., Yin, J., and Bas, E. Detecting and preventing hallucinations in large vision language models. In AAAI ,pp. 18135–18143, 2024. Hudson, D. A. and Manning, C. D. Gqa: A new dataset for real-world visual reasoning and compositional question answering. In CVPR , pp. 6700–6709, 2019. Iyer, R., Khargoankar, N., Bilmes, J., and Asanani, H. Sub-modular combinatorial information measures with appli-cations in machine learning. In Algorithmic Learning Theory , pp. 722–754. PMLR, 2021. Jang, Y., Song, Y., Yu, Y., Kim, Y., and Kim, G. Tgif-qa: Toward spatio-temporal reasoning in visual question answering. In CVPR , 2017. Jaynes, E. T. Information theory and statistical mechanics. ii. Physical review , 108(2):171, 1957. Jeddi, A., Baghbanzadeh, N., Dolatabadi, E., and Taati, B. Similarity-aware token pruning: Your vlm but faster. 
+
+arXiv preprint arXiv:2503.11549 , 2025. Kang, S., Kim, J., Kim, J., and Hwang, S. J. See what you are told: Visual attention sink in large multimodal models. In ICLR , 2025a. Kang, S., Kim, J., Kim, J., and Hwang, S. J. Your large vision-language model only needs a few attention heads for visual grounding. In CVPR , 2025b. Kim, J.-H., Kim, Y., Lee, J., Yoo, K. M., and Lee, S.-W. Mutual information divergence: A unified metric for mul-timodal generative models. In NeurIPS , 2022. Krasin, I., Duerig, T., Alldrin, N., Ferrari, V., Abu-El-Haija, S., Kuznetsova, A., Rom, H., Uijlings, J., Popov, S., Veit, A., Belongie, S., Gomes, V., Gupta, A., Sun, C., Chechik, G., Cai, D., Feng, Z., Narayanan, D., and Murphy, K. Openimages: A public dataset for large-scale multi-label and multi-class image classification. Dataset available from https://github.com/openimages , 2017. Kraskov, A., St ¨ogbauer, H., and Grassberger, P. Estimat-ing mutual information. Physical Review E—Statistical, Nonlinear, and Soft Matter Physics , 69(6):066138, 2004. Krause, A., Singh, A., and Guestrin, C. Near-optimal sen-sor placements in gaussian processes: Theory, efficient algorithms and empirical studies. Journal of Machine Learning Research , 9(2), 2008. Lauren c¸ on, H., Tronchon, L., Cord, M., and Sanh, V. What matters when building vision-language models? In 
+
+NeurIPS , 2024. Leng, S., Zhang, H., Chen, G., Li, X., Lu, S., Miao, C., and Bing, L. Mitigating object hallucinations in large vision-language models through visual contrastive decoding. In 
+
+CVPR , 2024. Li, B., Zhang, Y., Guo, D., Zhang, R., Li, F., Zhang, H., Zhang, K., Zhang, P., Li, Y., Liu, Z., et al. Llava-onevision: Easy visual task transfer. arXiv preprint arXiv:2408.03326 , 2024. Li, J., Li, D., Savarese, S., and Hoi, S. Blip-2: Bootstrapping language-image pre-training with frozen image encoders and large language models. In International conference on machine learning , pp. 19730–19742. PMLR, 2023. Li, Y., Song, Y., Cao, L., Tetreault, J., Goldberg, L., Jaimes, A., and Luo, J. Tgif: A new dataset and benchmark on animated gif description. In CVPR , pp. 4641–4650, 2016. Li, Y., Du, Y., Zhou, K., Wang, J., Zhao, W. X., and Wen, J.-R. Evaluating object hallucination in large vision-language models. In EMNLP , 2025. Lin, B., Ye, Y., Zhu, B., Cui, J., Ning, M., Jin, P., and Yuan, L. Video-llava: Learning united visual representation by alignment before projection. In EMNLP , pp. 5971–5984, 2024. Lin, T.-Y., Maire, M., Belongie, S., Hays, J., Perona, P., Ramanan, D., Doll ´ar, P., and Zitnick, C. L. Microsoft coco: Common objects in context. In ECCV , 2014. Lin, Z., Lin, M., Lin, L., and Ji, R. Boosting multimodal large language models with visual tokens withdrawal for rapid inference. In AAAI , 2025. Liu, H., Li, C., Li, Y., and Lee, Y. J. Improved baselines with visual instruction tuning. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , pp. 26296–26306, 2024a. Liu, H., Li, C., Li, Y., Li, B., Zhang, Y., Shen, S., and Lee, Y. J. Llavanext: Improved reasoning, ocr, and world knowledge, 2024b. Lu, P., Mishra, S., Xia, T., Qiu, L., Chang, K.-W., Zhu, S.-C., Tafjord, O., Clark, P., and Kalyan, A. Learn to explain: Multimodal reasoning via thought chains for science question answering. In Advances in Neural Infor-mation Processing Systems , 2022. Nemhauser, G. L., Wolsey, L. A., and Fisher, M. L. An analysis of approximations for maximizing submodular set functions. Mathematical Programming , 14(1):265– 294, 1978. 10 MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs 
+
+OpenAI. Gpt-3.5 turbo. https://platform.openai. com/docs/models/gpt-3-5 , 2023. OpenAI. Gpt-4.1. https://platform.openai. com/docs/models/gpt-4-1 , 2024. Potkins, F., Langton, O., Smirnov, V., Gallacher, C., and Abernathy, R. Improve the accuracy and efficiency of large language models via dynamic token compression and adaptive layer pruning. Authorea Preprints , 2024. Singh, A., Natarajan, V., Shah, M., Jiang, Y., Chen, X., Batra, D., Parikh, D., and Rohrbach, M. Towards vqa models that can read. In CVPR , pp. 8317–8326, 2019. Spadaro, G., Renzulli, R., Bragagnolo, A., Giraldo, J. H., Fiandrotti, A., Grangetto, M., and Tartaglione, E. Shan-non strikes again! entropy-based pruning in deep neural networks for transfer learning under extreme memory and computation budgets. In ICCVW , 2023. Tang, L., Zhuang, X., Yang, B., Hu, Z., Li, H., Ma, L., Ru, J., and Zou, Y. Not all tokens and heads are equally impor-tant: Dual-level attention intervention for hallucination mitigation. arXiv preprint arXiv:2506.12609 , 2025. Voita, E., Talbot, D., Moiseev, F., Sennrich, R., and Titov, I. Analyzing multi-head self-attention: Specialized heads do the heavy lifting, the rest can be pruned. arXiv preprint arXiv:1905.09418 , 2019. Wang, H., Zhang, Z., and Han, S. Spatten: Efficient sparse attention architecture with cascade token and head prun-ing. In 2021 IEEE International Symposium on High-Performance Computer Architecture (HPCA) , pp. 97–110. IEEE, 2021. Wang, H., Xu, Y., Xu, Z., Gao, J., Liu, Y., Hu, W., Wang, K., and Zhang, Z. Autoprune: Each complexity deserves a pruning policy. In NeurIPS , 2025a. Wang, P., Bai, S., Tan, S., Wang, S., Fan, Z., Bai, J., Chen, K., Liu, X., Wang, J., Ge, W., et al. Qwen2-vl: Enhancing vision-language model’s perception of the world at any resolution. arXiv preprint arXiv:2409.12191 , 2024. Wang, T., Zhou, W., Zeng, Y., and Zhang, X. Efficientvlm: Fast and accurate vision-language models via knowledge distillation and modal-adaptive pruning. In Findings of the association for computational linguistics: ACL 2023 ,pp. 13899–13913, 2023. Wang, Y., Wu, J., Ni, Z., Yang, L., Liu, Y., Yang, C., Wen, Y., Tang, X., Liu, H., Zhou, Y., et al. All you need are random visual tokens? demystifying token pruning in vllms. arXiv preprint arXiv:2512.07580 , 2025b. Wen, Z., Gao, Y., Li, W., He, C., and Zhang, L. Token prun-ing in multimodal large language models: Are we solving the right problem? arXiv preprint arXiv:2502.11501 ,2025a. URL https://arxiv.org/abs/2502. 11501 .Wen, Z., Gao, Y., Wang, S., Zhang, J., Zhang, Q., Li, W., He, C., and Zhang, L. Stop looking for important tokens in multimodal language models: Duplication matters more. In EMNLP , 2025b. Xiao, G., Tian, Y., Chen, B., Han, S., and Lewis, M. Effi-cient streaming language models with attention sinks. In 
+
+ICLR , 2024. Xu, D., Zhao, Z., Xiao, J., Wu, F., Zhang, H., He, X., and Zhuang, Y. Video question answering via gradually refined attention over appearance and motion. In ACM MM , 2017. Xu, J., Mei, T., Yao, T., and Rui, Y. Msr-vtt: A large video description dataset for bridging video and language. In 
+
+CVPR , pp. 5288–5296, 2016. Yan, Z., Chen, Y., Zhou, C., Dai, B., and Luo, A. Vision transformers with self-distilled registers. In NeurIPS ,2025. Yang, S., Chen, Y., Tian, Z., Wang, C., Li, J., Yu, B., and Jia, J. Visionzip: Longer is better but not necessary in vision language models. In CVPR , 2025a. Yang, T., Li, Z., Cao, J., and Xu, C. Understanding and mitigating hallucination in large vision-language models via modular attribution and intervention. In ICLR , 2025b. Yang, T., Zhang, L., Lin, J., Hu, G., Wang, D., and Hu, L. D-leaf: Localizing and correcting hallucinations in multimodal llms via layer-to-head attention diagnostics. 
+
+arXiv preprint arXiv:2509.07864 , 2025c. Ye, X., Gan, Y., Ge, Y., Zhang, X.-P., and Tang, Y. Atp-llava: Adaptive token pruning for large vision language models. In CVPR , 2025. Yin, H., Si, G., and Wang, Z. Lifting the veil on visual information flow in mllms: Unlocking pathways to faster inference. In CVPR , 2025. Yu, W., Yang, Z., Li, L., Wang, J., Lin, K., Liu, Z., Wang, X., and Wang, L. Mm-vet: Evaluating large multi-modal models for integrated capabilities. arXiv preprint arXiv:2308.02490 , 2023. Zhang, H., Lyu, M., He, C., Ao, Y., and Lin, Y. Trimtoke-nator: Towards adaptive visual token pruning for large multimodal models. arXiv preprint arXiv:2509.00320 ,2025a. 11 MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs 
+
+Zhang, Q., Cheng, A., Lu, M., Zhang, R., Zhuo, Z., Cao, J., Guo, S., She, Q., and Zhang, S. Beyond text-visual atten-tion: Exploiting visual cues for effective token pruning in vlms. In ICCV , 2025b. Zhang, Q., Liu, M., Li, L., Lu, M., Zhang, Y., Pan, J., She, Q., and Zhang, S. Beyond attention or similarity: Maximizing conditional diversity for token pruning in mllms. In NeurIPS , 2025c. Zhang, X., Quan, Y., Shen, C., Gu, C., Yuan, X., Yan, S., Cao, J., Cheng, H., Wu, K., and Ye, J. Shallow focus, deep fixes: Enhancing shallow layers vision attention sinks to alleviate hallucination in lvlms. In EMNLP , 2025d. Zhang, Y., Fan, C.-K., Ma, J., Zheng, W., Huang, T., Cheng, K., Gudovskiy, D., Okuno, T., Nakata, Y., Keutzer, K., et al. Sparsevlm: Visual token sparsification for efficient vision-language model inference. In ICML , 2025e. Zhang, Z., Yadav, S., Han, F., and Shutova, E. Cross-modal information flow in multimodal large language models. In CVPR , 2025f. Zhao, S., Wang, Z., Juefei-Xu, F., Xia, X., Liu, M., Wang, X., Liang, M., Zhang, N., Metaxas, D. N., and Yu, L. Ac-celerating multimodal large language models by search-ing optimal vision token reduction. In CVPR , 2025. 12 MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs 
+
+# Appendix 
+
+## A. Theory 
+
+A.1. Definition Definition A.1 (Shannon Entropy (Kraskov et al., 2004; Gray, 2011; Gallager, 1968)) . The Shannon entropy H(X)
+
+of a random variable X measures the average uncertainty or information content associated with X:
+
+H(X) = − X
+
+> x∈X
+
+p(x) log p(x). (26) 
+
+Definition A.2 (Conditional Entropy (Kraskov et al., 2004; Gray, 2011; Gallager, 1968)) . Given two random variables 
+
+X and Y , the conditional entropy H(X|Y ) quantifies the amount of information needed to describe X given that known Y :
+
+H(X|Y ) = − X 
+
+> u∈X ,y ∈Y
+
+p(x, y ) log p(x|y). (27) 
+
+Definition A.3 (Conditional Mutual Information (Gallager, 1968)) . The Conditional Mutual Information MI( X; Y | Z)
+
+measures the reduction in uncertainty of a random variable 
+
+X given Z when additionally knowing Y :
+
+MI( X;Y | Z) = H(X | Z) − H(X | Y, Z ) (28) 
+
+= X 
+
+> x∈X , y ∈Y , z ∈Z
+
+p(x, y, z ) log p(x | y, z )
+
+p(x | z) . (29) 
+
+Definition A.4 (Submodular Function (Fujishige, 2005)) .
+
+Let X be a finite set. A set function f : 2 X → R is called submodular if for every A, B ⊆ X, we have: 
+
+f (A ∪ B) + f (A ∩ B) ≤ f (A) + f (B). (30) An equivalent and often more intuitive definition is based on the marginal gain , as shown in the main paper. 
+
+A.2. Conditional Independence Assumption: The candidate vi is independent of the selected set VS conditioned on T .
+
+This assumption helps to maintain submodularity and derive tractable marginal gains. 
+
+Mutual Information is widely recognized for exhibiting sub-modularity (the property of diminishing returns) (Iyer et al., 2021; Krause et al., 2008), providing a principled foundation for efficient subset selection. To rigorously adapt MI-based submodular optimization to the token selection task, we bring the Naive Bayes assump-tion as the conditional independence between vi and VS
+
+based on T . From the view of probability and mutual infor-mation, it holds: 
+
+p(vi, VS | T ) = p(vi | T )p(VS | T ), (31) 
+
+MI( vi; VS | T ) = 0 . (32) This assumption has two immediate consequences: (i) sub-modular guarantees for the property of diminishing returns; (ii) a tractable derivation of the marginal gain .
+
+Submodularity. The conditional independence assumes that a single patch is sufficiently representative of a seman-tic unit. A counterexample is that, if a semantic concept strictly requires the joint presence of multiple patches (e.g., both a left and a right part), then adding the remaining patch at a later stage could violate the diminishing-returns prop-erty. Nevertheless, the assumption of semantic sufficiency is well justified in practice. For example, a single patch depict-ing a “wheel” or a “grille” is often sufficient to convey the semantic concept of “ car ”. Based on this assumption, we can robustly treat the visual token selection process as a sub-modular maximization problem, ensuring both theoretical consistency and computational efficiency. 
+
+Marginal gains. Since accurately estimating the joint distribution involving VS is high-dimensional infeasible, we approximate the conditional mutual information by the marginal mutual information. According to Def. 2.1, Mutual information can be expressed in terms of entropy: 
+
+MI( X; Y ) = H(Y ) − H(Y | X). (33) Here, we give the proof from Eqn. (12) to Eqn. (13): 
+
+MI( VS ∪ { vi}; T ) − MI( VS; T ) (34) 
+
+=
+
+h
+
+H(T ) − H(T | V S ∪ { vi})
+
+i
+
+−
+
+h
+
+H(T ) − H(T | V S)
+
+i
+
+(35) 
+
+= H(T | V S) − H(T | V S ∪ { vi}) (36) 
+
+= MI( vi; T | V S). (37) Further, this conditional MI can be written as: 
+
+MI( vi; T | V S) = MI( vi; T , VS)
+
+| {z }
+
+> MI cross
+
+− MI( vi; VS)
+
+| {z }
+
+> MI self
+
+(38) 
+
+= MI( vi; VS | T ) + MI( vi; T ) − MI( vi; VS). (39) However, the crossmodal term is intractable, which causes trouble in deriving the marginal gain ∆f . Again, we lever-age the conditional independence assumption, and substitute Eqn. (32) into Eqn. (39). Since (((((( (
+
+MI( vi; VS | T ) = 0 , we obtain an estimator: 
+
+cMI( vi; T | V S) = MI( vi; T ) − MI( vi; VS). (40) The assumption MI( vi; VS | T ) = 0 implies that the cross-modal relevance is much stronger than the internal one, 13 MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs 
+
+i.e. , MI cross → MI( vi, T ). It is empirically justified under high pruning rates (less than 50% retained), where sparse selection leads to trivial intra-modal overlap. For practical implementation, we allow balancing the cross-modal term and the intra-model term with a factor λ. As shown in Eqn. (22), we derive two scoring functions respec-tively and combine them with λ.
+
+A.3. Maximal Aggregation 
+
+Our max aggregation over T and Vselect is motivated by the LogSumExp (LSE) operator, defined as 
+
+LSE( z1, . . . , z N ) := log 
+
+
+
+> N
+
+X
+
+> j=1
+
+exp( zj )
+
+ . (41) As a smooth upper approximation to the maximum, the LSE operator satisfies the following bounds: 
+
+max  
+
+> j
+
+zj ≤ LSE( z1, . . . , z N ) ≤ max  
+
+> j
+
+zj + log N. (42) Here, we justify the maximal aggregation as a robust proxy for the overall crossmodal relevance. For simplification, we omit ˜· of vi, tj Theoretically, let zj = PMI (vi; tj ) be the log-likelihood ratio for each token pair: 
+
+zj = log p(tj | vi)
+
+p(tj ) . (43) The relationship between the peak signal and the total likeli-hood ratio can be characterized by the LSE operator: 
+
+LSE( zj ) = log 
+
+
+
+> NT
+
+X
+
+> j=1
+
+exp(log p(tj | vi)
+
+p(tj ) )
+
+ (44) 
+
+= log 
+
+
+
+> NT
+
+X
+
+> j=1
+
+p(tj | vi)
+
+p(tj )
+
+ . (45) Substitute Eqn. (45) into Eqn. (42), we obtain the lower bound of LSE, and exponentiate both sides: 
+
+max  
+
+> j
+
+(log p(tj | vi)
+
+p(tj ) ) ≤ log 
+
+
+
+> NT
+
+X
+
+> j=1
+
+p(tj | vi)
+
+p(tj )
+
+ , (46) 
+
+max  
+
+> j
+
+( p(tj | vi)
+
+p(tj ) ) ≤
+
+> NT
+
+X
+
+> j=1
+
+p(tj | vi)
+
+p(tj ) . (47) It’s also expressed as: 
+
+max  
+
+> j
+
+(PMI( vi; tj )) ≤
+
+> NT
+
+X
+
+> j=1
+
+PMI( vi; tj ). (48) Maximal aggregation serves as a tight lower bound for the sum of PMI, which has the same optimization direction as the global aggregation (Eqn. (21)). In practice, crossmodal correspondence exhibits inherent sparsity: within a sentence, typically only a few core tokens are semantically grounded in a specific visual region. Therefore, averaging these sparse, high-intensity signals with numerous irrelevant tokens leads to a noisy dilution of the relevance signal. In contrast, the max aggregation, analogous to an L∞-type norm of the association scores, captures the most salient semantic tokens and preserves the alignment measure from noise. 
+
+A.4. Marginal Distribution Assumption: Each image patch occurs with equal probability p(˜ vi) = 1 
+
+> NV
+
+.
+
+This assumption helps to derive the marginal text probability p(˜ tj ).
+
+In this section, we recap the Law of Total Probability (Jaynes, 1957) and then derive p(˜ tj ) in Eqn. (17). 
+
+Proposition A.5 (Law of Total Probability (Jaynes, 1957)) .
+
+Let A be an event and let {Bi}Ni=1 be a set of mutually ex-clusive and exhaustive events. The Law of Total Probability indicates: 
+
+p(A) = 
+
+> N
+
+X
+
+> i=1
+
+p(A | Bi) p(Bi). (49) Since the mapping between a patch and a token is determin-istic, {˜vi}NV 
+
+> i=0
+
+are exclusive and exhaustive. We derive the marginal probability by substituting A, B i with ˜tj , ˜vi:
+
+p(˜ tj ) = 
+
+> NV
+
+X
+
+> i=1
+
+p(˜ tj | ˜vi) p(˜ vi). (50) Assuming that NV patches are equally probable, i.e. , the prior probability p(˜ vi) = 1 
+
+> NV
+
+, Eqn. (17) is formulated as: 
+
+p(˜ tj ) = 
+
+> NV
+
+X
+
+> i=1
+
+p(˜ tj | ˜vi) 1
+
+NV
+
+|{z} 
+
+> p(˜ vi)
+
+. (51) According to the Principle of Maximum Entropy (Gray, 2011), our uniformity is the most unbiased assumption, ensuring that the selection process is driven solely by the observed mutual information rather than predefined spatial heuristics. It is non-trivial to obtain the appropriate prior for vision tokens. We admit potential solutions of constructing an estimator from the validation set, or linking with the patch position based on photography composition techniques ( e.g. ,Rule of Thirds and Golden Ratio). The estimation of the prior probability is set as our future work. 14 MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs 
+
+## B. More Experiments 
+
+B.1. POPE Results 
+
+Tab. 1 and 2 show the average results of POPE. In the ap-pendix, we report detailed performance under random/pop-ular/adversarial settings, see Tab. 10 and 11. The latest Qwen3VL outperforms LLaVA1.5 across three settings, while both fall short of adversarial settings. The results after pruning hold the same tendency. Nevertheless, our method demonstrates remarkable resilience in adversarial settings, outperforming the baselines by a significant mar-gin under different budgets. This success highlights our approach’s acute sensitivity in capturing essential visual features regarding the prompt. 
+
+B.2. MinMax Normalizarion 
+
+Based on Boltzmann distributions, we compute similarity matrices and apply softmax in Eqn. (16). In the appendix, we conduct an ablation study to investigate the impact of linear normalization. Specifically, we implement a two-stage MinMax normalization as follows: 
+
+ˆρs 
+
+> ij
+
+= MinMax j (ρs 
+
+> ij
+
+) = ρs 
+
+> ij
+
+− Min j (ρs 
+
+> ij
+
+)Max j (ρs 
+
+> ij
+
+) − Min j (ρs 
+
+> ij
+
+) , (52) 
+
+p(˜ xj | ˜vi) = Normalize j ( ˆ ρs 
+
+> ij
+
+) = ˆρs
+
+> ij
+
+PNk=1 ˆρs
+
+> ij
+
+. (53) Here, ˆρs 
+
+> ij
+
+first maps the raw similarity scores to the [0 , 1] 
+
+range, then Eqn. (53) ensures a valid probability distribution across the dimension j. As illustrated in Tab. 6, our softmax normalization outperforms MinMax and maintains its over-all robust performance. We attribute this performance gap to the non-linear saliency of softmax and its robustness to outliers.  
+
+> Table 6. Ablation study on Normalization (LLaVA1.5-7B).
+
+GQA 64 GQA 32 SQA 64 SQA 32 
+
+MinMax 55.37 52.95 67.56 67.01 Softmax 56.88 55.78 69.81 69.26 B.3. Large-scale Models and Diverse Settings 
+
+To further demonstrate the robustness of our method, we report results on larger-scale models, including LLaVA-1.5-13B and Qwen3VL-30B (Mixture-of-Experts). In Tab. 7, our method consistently outperforms random sampling and similarity-based pruning. Yet, we acknowledge that for the latest models (Bai et al., 2025), model-specific tailoring is in-dispensable. Qwen3VL employs deep-stack integration and adaptive padding mechanisms, which demand dedicated designs to maintain structural integrity and performance during pruning. By providing a principled foundation, our method facilitates future research and remains highly adapt-able to next-generation multimodal architectures. Finally, our use cases on Qwen3VL with the thinking mode and the hybrid sampling setting are shown in Tab. 8. The hybrid sampling refers to top p = 0 .8, top k = 20 for ”instruc-tion” version and top p = 0 .95 , top k = 20 for ”thinking” mode, both from the official release. The advantages of sampling and thinking modes lie in their ability to produce diverse responses. However, the thinking mode tends to gen-erate extremely long outputs, which conflicts with the de-fault instruction "Answer the question using asingle word or phrase" from most datasets. Al-though our method exhibits lower performance than the simple instruction-tuned baseline under these settings, it can be readily extended to other inference modes.  
+
+> Table 7. Results on large-scale models, LLaVA1.5-13B and Qwen3VL-30B.
+
+Methods GQA SQA TextVQA MME P
+
+LLaVA1.5-13B 61.97 72.73 61.24 1524.19 
+
+keep 64 
+
+Random 53.45 70.85 50.74 1257.35 Similarity 53.63 71.64 51.58 1338.78 FastV 53.70 56.80 47.10 1275.41 SparseVLM 50.60 69.00 22.70 1289.92 
+
+MI-Pruner 55.64 71.79 53.19 1378.49 
+
+Qwen3VL-30B 62.51 95.29 83.20 1815.29 
+
+keep 50% 
+
+Random 55.22 91.18 34.89 1755.03 Similarity 56.47 88.65 29.96 1791.04 Attention 56.02 88.98 30.02 1799.54 
+
+MI-Pruner 56.66 92.27 37.65 1822.19  
+
+> Table 8. GQA results on hybrid sampling (Qwen3VL-8B).
+
+Methods Instruct+Sampl. Thinking+Sampl. 
+
+keep 50% 
+
+Random 52.79 32.93 Similarity 53.11 34.13 
+
+MI-Pruner 53.20 34.97 B.4. Efficiency Analysis 
+
+We evaluate the end-to-end efficiency by tracking GPU memory usage and latency throughout the process, includ-ing visual encoding, LLM prefilling, and subsequent de-coding. To ensure stable results, we conduct 10 warm-up runs and report the average GPU memory usage and latency over 30 repetitions. We extend Tab. 3 in the main paper to Nkeep = 32 in Tab. 9. Due to the attention collection, 
+
+MI-Attention achieves the same GPU memory usage as Vis-Pruner while exhibiting lower latency. As diversity-based methods, DART (Wen et al., 2025b) and CDPruner (Zhang et al., 2025c) are faster than attention-based methods, but 15 MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs 
+
+less efficient than MI-Pruner . As analyzed in the original paper (Zhang et al., 2025c), the computational bottleneck of CDPruner lies in its DPP MAP inference, which incurs a complexity of O(NV N 2keep ). In comparison, MI-Pruner ’s complexity is O(NV · max( NT , N keep )) for full scoring and O(NV NT ) for relevance-based sorting. Given that the instruction length NT is typically much smaller than the budget Nkeep in practice, our method offers superior compu-tational efficiency.  
+
+> Table 9. Efficiency comparison on POPE (LLaVA1.5-7B).
+
+Methods Mem (GB) Latency (ms) 
+
+keep 32 
+
+SparseVLM 18.12 93.33 ±0.44 
+
+VisPruner 14.35 89.98 ±0.39 
+
+DART 13.94 87.56 ±0.47 
+
+CDPruner 14.61 83.22 ±0.38 
+
+MI-Attention 14.35 77.36 ±0.40 
+
+MI-Pruner λ=1 13.90 77.07 ±0.32 
+
+MI-Pruner λ=0 .5 13.90 78.71 ±0.34 
+
+B.5. Generalization 
+
+Our method is applicable to any Enc-MLP-Dec architec-tures, while previous methods rely on specific vision en-coders. For instance, VisPruner (Zhang et al., 2025b) neces-sitates [ CLS ] as attention measures, therefore, fails to adapt to the latest QwenVL series. Although VisionZip (Yang et al., 2025a) provides implementation for Qwen2.5VL, it suffers from a significant decline in instruction-following capacity at high pruning rates, as shown in Fig. 7. Due to its limited generalization and lack of theoretical guarantees, the model becomes increasingly prone to hallucinations under aggressive compression, e.g. , keeping 25% vision tokens. 
+
+## C. Further Discussions 
+
+C.1. Related Work Architectures of MLLMs. Multimodal Large Language Models typically adopt a unified architecture comprising a vision encoder with a projector, a text tokenizer, and an LLM decoder. This paradigm serves as the foundational framework for subsequent optimization and analysis, such as hallucination mitigation (Leng et al., 2024; Wang et al., 2024; Bai et al., 2024; Gunjal et al., 2024; Yang et al., 2025c) and token pruning (Chen et al., 2024a; Yang et al., 2025a; Zhang et al., 2025b). For instance, LLaVA-NEXT (Liu et al., 2024b) increases the image tokens up to 4 × for better perception and QwenVL series (Wang et al., 2024; Bai et al., 2025) take dynamic input resolutions for efficiency. 
+
+Mutual Information As a classic tool in information pro-cessing, Mutual Information was first introduced as a metric in multimodal tasks, e.g. MID (Kim et al., 2022) proposes an MI-based metric to assess the diversity in text-to-image generation. Among decoding strategies, M3ID (Favero et al., 2024) controls the visual hallucination by favoring the gen-eration of tokens having higher Mutual Information with visual inputs. Assuming conditional Gaussian distributions, TrimTokenator (Zhang et al., 2025a) adopts the L2-norm proxy for visual pruning. Moreover, AutoPrune (Wang et al., 2025a) assumes equal text probability and takes attention scores as a probability proxy for MI scores. In comparison, 
+
+MI-Pruner adopts softmax scores for a probabilistic MI proxy, achieving robust performance with best efficiency. 
+
+C.2. Interpretation of MI-guided Pruning 
+
+We study the Mutual Information between an event vi and all events tj ∈ T . The normalization notation ˜· is omitted. This local MI measures the relevance between an image token vi and all tokens tj ∈ T in prompts, which is also formulated as the KL-divergence from the marginal distri-bution p(T ) to the conditional distribution p(T | vi):
+
+MI( T ; vi) = 
+
+> NT
+
+X
+
+> j=1
+
+p(tj |vi) log p(tj |vi)
+
+p(tj ) (54) 
+
+= DKL (p(T | vi)∥p(T )) (55) However, estimating these two probabilities p(tj |vi) and 
+
+p(tj ) is non-trivial in high-dimensional projection spaces. Previous approaches often resort to the matrix rank, deter-minant or kernel-based diversity measures (Zhang et al., 2025c), which suffer from computational expense for ma-trix inversion or decomposition, and are highly sensitive to numerical instability. In contrast, we adopt the cosine-based Boltzmann distribution with a softmax operation, maintain-ing a balance between theoretical soundness and computa-tional tractability. 
+
+C.3. Pruning Stages 
+
+The data processing inequality (Jaynes, 1957), indicates ”processing cannot increase information”. Building on this principle, we perform pruning in the projection space, where visual and textual features are semantically aligned but have not yet undergone crossmodal interaction, thereby mini-mizing the risk of introducing noisy dependencies. Our motivation is similar to the Q-Former (Li et al., 2023), while theoretically grounded without extra training. It’s also pos-sible to conduct MI-guided pruning merely on the image features, i.e. , after the vision encoder like VisPruner (Zhang et al., 2025b). However, the prompt-agnostic pruning falls short of a truly multimodal setting, since it overlooks the text information. 16 MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs Who is wearing the dress?   
+
+> Answer the question using a
+> single word or phrase.
+> Keep 75%
+> The image shows two people, a man and
+> awoman , sitting closely together in what
+> appears to be a social setting, possibly a
+> restaurant or bar.
+> Keep 50%
+> Keep 25%
+> The image shows two people sitting closely
+> together, smiling and enjoying each other's
+> company. It appears to be a casual social
+> setting, possibly in a restaurant or bar,
+> given the presence of glasses that might
+> contain beverages..
+> VisionZip
+> Woman
+> Keep 75%
+> Keep 50%
+> Keep 25%
+> MI -Pruner
+> Woman
+> Woman
+> Woman
+> Woman
+> Keep 10 0%
+
+(a) Object Are the plates on top of an   
+
+> ottoman?
+> Answer the question using
+> a single word or phrase.
+> The image shows a cake on a plate.
+> Keep 75%
+> The image shows a kitchen where a cake
+> with marshmallows and strawberries, is
+> being served. A hand is reaching it, and
+> there a woman and a child seated. The
+> plates appear to be empty, so they might be
+> waiting for the dessert to be served.
+> Keep 50%
+> The image shows a dessert plate with a
+> cake or dessert topped with strawberries
+> and marshmallows, placed on a table in
+> what appears to be a kitchen setting.
+> VisionZip
+> No
+> Keep 75%
+> Keep 50%
+> Keep 25%
+> MI -Pruner
+> No
+> No
+> No
+> Keep 25%
+> Keep 10 0%
+
+(b) Spatial relationship 
+
+Figure 7. Dialogue examples on Qwen2.5VL-7B (GQA). 
+
+Table 10. POPE performance comparison under 3 settings on LLaVA1.5-7B. We report accuracy (Acc), F1 scores and Yes-rate. 
+
+Methods Random Popular Adversarial Average 
+
+Acc ↑ F1 ↑ Yes Acc ↑ F1 ↑ Yes Acc ↑ F1 ↑ Yes Acc ↑ F1 ↑ Yes 
+
+LLaVA1.5-7B 89.60 0.90 0.51 86.20 0.87 0.55 79.73 0.82 0.61 85.18 0.86 0.56 
+
+keep 128 
+
+Random 85.23 0.83 0.37 84.07 0.82 0.38 80.80 0.79 0.41 83.37 0.81 0.39 Similarity 87.43 0.86 0.42 86.30 0.85 0.43 82.60 0.82 0.46 85.44 0.84 0.44 
+
+MI-Attention 88.31 0.87 0.41 86.63 0.86 0.42 84.11 0.83 0.44 86.35 0.85 0.42 
+
+MI-Pruner 88.43 0.87 0.42 86.90 0.86 0.43 84.07 0.83 0.46 86.47 0.85 0.44 
+
+keep 64 
+
+Random 80.53 0.76 0.33 80.57 0.77 0.33 78.37 0.75 0.36 79.82 0.76 0.34 Similarity 85.80 0.84 0.40 85.03 0.84 0.41 81.90 0.81 0.44 84.24 0.83 0.42 
+
+MI-Attention 86.53 0.85 0.40 85.60 0.84 0.40 83.00 0.82 0.43 85.04 0.84 0.41 
+
+MI-Pruner 86.83 0.85 0.41 85.63 0.84 0.42 82.27 0.81 0.45 84.91 0.83 0.43 
+
+keep 32 
+
+Random 74.93 0.67 0.26 75.43 0.68 0.28 73.23 0.66 0.30 73.23 0.66 0.30 Similarity 83.87 0.82 0.38 83.20 0.81 0.39 80.07 0.78 0.42 80.07 0.78 0.42 
+
+MI-Attention 84.37 0.82 0.37 83.23 0.81 0.39 80.83 0.79 0.41 82.81 0.81 0.39 
+
+MI-Pruner 85.07 0.83 0.39 83.87 0.82 0.40 80.60 0.79 0.43 83.18 0.81 0.41 
+
+C.4. Pruning Levels 
+
+Model pruning can be applied at different levels, including weights, architecture and tokens (features). The weight compression tends to be connected with special hardware for acceleration, and the architecture pruning includes layer-level and head-level. Similar to our work, Fan et al. (2021) leverages Mutual Information to prune layers in a top-to-bottom manner. Recent work (Voita et al., 2019; Wang et al., 2021; Kang et al., 2025b) points out that only a few attention heads are necessary in transformer blocks. 
+
+C.5. Settings and Influences 
+
+Following existing benchmarks (Zhang et al., 2025e; Chen et al., 2024a), we test our method under a given token bud-get ( e.g. Nkeep = 50% means keeping 50% visual tokens). However, a more practical and challenging setup would be, 
+
+given a minimum performance threshold and a maximum computation limit, the pruning algorithm automatically de-cides the trade-off between accuracy and efficiency. We consider this ”dynamic budget” setting as our future work, 
+
+i.e. , to determine the optimal number of tokens for each input adaptively. In addition, pruning holds the potential to mitigate hallucination (Che et al., 2025). Our experi-ments on LLaVA-1.5 (Liu et al., 2024a) demonstrate that heavy pruning on POPE (Li et al., 2025) doesn’t degrade performance compared to the full-budget setting, and on Qwen3-VL (Bai et al., 2025), MI-Pruner even leads to im-proved POPE performance. We attribute these gains to the reduced reasoning difficulty, where less visual information attends to LLM decoding. However, inappropriate pruning can exacerbate hallucinations, as illustrated in Fig. 7. These findings suggest that strategic token pruning represents a promising direction for mitigating hallucination in MLLMs. 17 MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs   
+
+> Table 11. POPE performance comparison under 3 settings on Qwen3VL. We report accuracy (Acc), F1 scores and Yes-rate.
+
+Methods Random Popular Adversarial Average 
+
+Acc ↑ F1 ↑ Yes Acc ↑ F1 ↑ Yes Acc ↑ F1 ↑ Yes Acc ↑ F1 ↑ Yes 
+
+Qwen3VL-2B 92.37 0.92 0.44 89.53 0.89 0.47 87.77 0.88 0.49 89.89 0.90 0.47 
+
+keep 50% 
+
+Random 91.67 0.91 0.44 88.47 0.88 0.46 86.13 0.86 0.48 88.76 0.88 0.46 Attention 92.33 0.92 0.44 89.40 0.89 0.47 86.90 0.87 0.50 89.54 0.89 0.47 Similarity 92.63 0.92 0.45 88.77 0.89 0.49 86.37 0.87 0.51 89.26 0.89 0.48 
+
+MI-Pruner 92.94 0.93 0.45 89.33 0.89 0.48 87.07 0.87 0.50 89.78 0.90 0.48 
+
+MI-Attention 92.77 0.92 0.45 89.40 0.89 0.48 87.03 0.87 0.50 89.73 0.89 0.48 
+
+keep 25% 
+
+Random 88.10 0.87 0.40 84.97 0.84 0.42 83.70 0.83 0.45 85.59 0.85 0.42 Attention 88.20 0.87 0.40 86.43 0.85 0.41 84.53 0.83 0.43 86.39 0.85 0.41 Similarity 91.33 0.91 0.44 88.13 0.88 0.47 85.37 0.85 0.49 88.28 0.88 0.47 
+
+MI-Pruner 92.73 0.92 0.45 89.13 0.89 0.48 86.67 0.87 0.51 89.51 0.89 0.48 
+
+MI-Attention 92.07 0.92 0.4 88.93 0.89 0.47 87.13 0.87 0.50 89.38 0.89 0.46 
+
+Qwen3VL-8B 90.77 0.90 0.42 88.67 0.88 0.44 87.07 0.87 0.46 88.84 0.88 0.44 
+
+keep 50% 
+
+Random 89.93 0.89 0.41 88.20 0.87 0.44 86.63 0.86 0.45 88.25 0.87 0.43 Attention 90.70 0.90 0.42 88.73 0.88 0.44 87.13 0.87 0.46 88.85 0.88 0.44 Similarity 91.07 0.90 0.43 88.67 0.88 0.45 87.10 0.87 0.47 88.95 0.88 0.45 
+
+MI-Pruner 91.43 0.91 0.45 89.00 0.89 0.43 87.23 0.87 0.47 89.22 0.89 0.45 
+
+MI-Attention 90.97 0.90 0.42 88.93 0.88 0.45 87.10 0.87 0.46 89.00 0.88 0.44 
+
+keep 25% 
+
+Random 87.20 0.86 0.39 85.10 0.84 0.41 84.63 0.83 0.42 85.64 0.84 0.41 Attention 89.60 0.89 0.41 87.70 0.87 0.43 85.93 0.85 0.44 87.74 0.87 0.43 Similarity 90.43 0.90 0.43 87.40 0.87 0.46 86.10 0.86 0.47 87.98 0.88 0.45 
+
+MI-Pruner 90.70 0.90 0.43 88.77 0.88 0.45 87.00 0.87 0.46 88.82 0.88 0.45 
+
+MI-Attention 90.93 0.90 0.42 88.55 0.88 0.45 87.00 0.86 0.46 88.82 0.88 0.44 
+
+## D. Datasets 
+
+GQA (Hudson & Manning, 2019). The GQA benchmark is designed to evaluate structured spatial understanding and reasoning within visual scenes. Beyond images and ques-tions, it provides comprehensive scene graph annotations, offering structured representations of objects, attributes, and their inter-relationships. For evaluation, we report the accu-racy on the test-dev split, which comprises 12,578 image-question pairs. 
+
+SQA (Lu et al., 2022). The ScienceQA benchmark em-ploys multiple-choice questions to assess a model’s perfor-mance in the scientific domains. The dataset spans three primary subjects—natural science, language science, and social science—and features a hierarchical structure orga-nized by topic, category, and skill. This hierarchy comprises 26 topics, 127 categories, and 379 skills. While the ques-tions are accompanied by relevant illustrations, a portion of the dataset is text-only. For our evaluation, we focus on the SQA-IMG subset, which consists of 2,017 multimodal pairs where both images and questions are present. 
+
+TextVQA (Singh et al., 2019). The TextVQA benchmark works to assess a model’s proficiency in reading and reason-ing over visual text. It emphasizes the integration of Optical Character Recognition (OCR) with natural language under-standing. The images, primarily sourced from OpenImages-v3 (Krasin et al., 2017), feature diverse real-world scenar-ios—such as street signs, billboards, and product packag-ing—that are rich in textual content. Alongside the raw images, ground-truth OCR tokens are provided as auxiliary input. To arrive at the correct answer, models must either extract text directly from the image or perform contextual reasoning based on the identified characters. We report eval-uation results on the validation set, which comprises 5,000 image-question pairs. 
+
+MMVet (Yu et al., 2023). The MM-Vet benchmark in-cludes 6 core capabilities, including recognition, OCR, knowledge, language generation, spatial awareness, and mathematics, which are combined into 16 specific tasks. In-stead of given annotations, this benchmark utilizes GPT-4.1 (OpenAI, 2024) to evaluate its 218 image-question pairs. 18 MI-Pruner : Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs 
+
+MME P (Fu et al., 2025). The MME benchmark encom-passes 14 subtasks, including perception and cognition cat-egories. We focus on the perception part (MME P), which includes OCR, coarse-grained recognition (presence, count, position and color) and fine-grained recognition (posters, celebrities, scenes, landmarks and artworks). All of the 2,374 questions belong to binary judgment tasks. 
+
+POPE (Li et al., 2025). The POPE benchmark evalu-ates the object hallucination in large vision-language mod-els with ”Yes-or-No” questions. The images are from MSCOCO dataset (Lin et al., 2014), and the questions are about whether a specific object is present in the im-age. We report the average Accuracy, F1 score and Yes-rate across three different sampling strategies in the main paper. Notably, we use the latest version, where three strategies include random (3,000), popular (3,000) and adversarial (3,000), leading to overall 9,000 image-question pairs. 
+
+Video datasets. Video benchmarks extend the image-based VQA into video domain. The GIFs in TGIF-QA (Jang et al., 2017) are based on Tumblr GIF dataset (Li et al., 2016), while MSVD-QA (Xu et al., 2017), MSRVTT-QA (Xu et al., 2017) incorporate Microsoft Research Video Description Corpus (Chen & Dolan, 2011) and Microsoft Research Video to Text (Xu et al., 2016) dataset respectively. Following previous work (Yang et al., 2025a), we test on the first 1,000 samples of all three datasets. All of them are scored by GPT-3.5-Turbo (OpenAI, 2023). 19

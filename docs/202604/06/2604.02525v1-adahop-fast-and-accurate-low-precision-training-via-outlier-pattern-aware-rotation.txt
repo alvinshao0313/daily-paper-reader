@@ -1,0 +1,487 @@
+Title: AdaHOP: Fast and Accurate Low-Precision Training via Outlier-Pattern-Aware Rotation
+
+URL Source: https://arxiv.org/pdf/2604.02525v1
+
+Published Time: Mon, 06 Apr 2026 00:14:45 GMT
+
+Number of Pages: 21
+
+Markdown Content:
+# AdaHOP: Fast and Accurate Low-Precision Training via Outlier-Pattern-Aware Rotation 
+
+Seonggon Kim 1,2∗ Alireza Khodamoradi 1 Kristof Denolf 1 Eunhyeok Park 21Advanced Micro Devices, Inc. 2POSTECH 
+
+{sungonuni, eh.park}@postech.ac.kr {alireza.khodamoradi, kristof.denolf}@amd.com 
+
+# Abstract 
+
+Low-precision training (LPT) commonly employs Hadamard transforms to sup-press outliers and mitigate quantization error in large language models (LLMs). However, prior methods apply a fixed transform uniformly, despite substantial variation in outlier structures across tensors. Through the first systematic study of outlier patterns across weights, activations, and gradients of LLMs, we show that this strategy is fundamentally flawed: the effectiveness of Hadamard-based suppression depends on how the transform’s smoothing direction aligns with the outlier structure of each operand — a property that varies substantially across layers and computation paths. We characterize these patterns into three types: Row-wise, Column-wise, and None. Each pair requires a tailored transform direction or outlier handling strategy to minimize quantization error. Based on this insight, we propose AdaHOP (Ada ptive Hadamard transform with Outlier-Pattern-aware strategy), which assigns each matrix multiplication its optimal strategy: Inner Hadamard Transform (IHT) where inner-dimension smoothing is effective, or IHT combined with selective Outlier Extraction (OE)—routing dominant outliers to a high-precision path—where it is not. Combined with hardware-aware Triton kernels, AdaHOP achieves BF16 training quality at MXFP4 precision while deliv-ering up to 3.6 × memory compression and 1.8 × kernel acceleration over BF16 full-precision training. 
+
+# 1 Introduction 
+
+Low-Precision Training (LPT) has emerged as a promising approach to improve the efficiency of training large language models (LLMs). By reducing precision from BF16 to hardware-supported formats such as FP8 or MXFP4 [ 8], LPT significantly lowers memory consumption and increases training throughput. However, stable LPT remains challenging due to outliers—rare but extreme values that amplify quantization error and can significantly degrade model quality [37, 13]. To mitigate this issue, recent methods employ Hadamard transforms to redistribute outlier energy prior to quantization [ 2, 23 , 3 ]. Yet, these approaches apply a fixed transform uniformly across all layers, ignoring the underlying structure of outliers in each tensor. We show that this one-size-fits-all strategy is suboptimal and can even increase quantization error (Figure 3). Through a systematic study on widely used LLMs, including Llama-family models [ 15 ], we identify three distinct outlier patterns— Row-wise , Column-wise , and None —and demonstrate that the optimal transform depends on the pattern pair formed by the two operands in each matrix multiplication. Motivated by this observation, we propose AdaHOP (Ada ptive Hadamard transform with Outlier-
+
+Pattern-aware strategy), which selects the optimal low-precision acceleration strategy for each 
+
+> ∗Work done during internship at Advanced Micro Devices, Inc. Preprint.
+> arXiv:2604.02525v1 [cs.LG] 2 Apr 2026
+
+Figure 1: Training loss curves and loss difference relative to BF16 for (Left) Llama3.2-1B and (Right) Instella-3B. AdaHOP consistently achieves the lowest loss gap relative to BF16 among all MXFP4-based methods. matrix multiplication. AdaHOP assigns each matrix multiplication its optimal strategy—applying IHT where inner-dimension smoothing suffices, and augmenting it with OE where it does not. This selective mixed-precision design leverages hardware-friendly primitives, enabling minimal overhead on modern accelerators such as AMD CDNA4 2 architectures. Combined with fused Triton kernels, AdaHOP efficiently integrates pattern detection and selective computation, enabling robust LPT without sacrificing throughput. As a result, AdaHOP consistently reduces quantization error, preserves training stability, and achieves a favorable trade-off between accuracy and efficiency. Our contributions are summarized as follows: 
+
+Analytical : We present the first systematic analysis of outlier patterns in weights, activations, and gradients of LLMs across layers. We identify three structured outlier patterns and show that they vary across positions even within identical operations, yet once formed, they remain stable throughout training. 
+
+Methodological : We derive the optimal Hadamard transform strategy for all nine outlier pattern pairs and propose AdaHOP , a calibration-guided adaptive algorithm that combines IHT with selective OE to minimize quantization error across computation paths. 
+
+Practical : We implement AdaHOP with hardware-aware fused kernels on AMD CDNA4, achieving BF16 training quality at MXFP4 precision, while delivering substantial memory savings and up to 1.8 × kernel speedup. 
+
+# 2 Related Work 
+
+2.1 Quantization and LPT 
+
+Reducing numerical precision is a primary strategy for improving LLM training efficiency, with increasingly aggressive formats spanning from FP8 [ 29 , 38 , 39 , 27 ] to more aggressive sub-8-bit formats such as INT4 [ 36 , 9, 10 , 31 ] and MXFP4 [ 35 , 14 , 11 , 5]. While these advances offer substantial gains in memory and throughput, they also exacerbate quantization error at lower bit-widths. In particular, outliers—rare but extreme values—pose a fundamental challenge: they dominate the quantization range of the entire tensor, inflating the quantization step size and compressing the 
+
+> 2The CDNA4 architecture is utilized on AMD Instinct™ MI350 Series GPUs.
+
+2representable range for non-outlier values, which leads to large rounding errors, loss spikes, and degraded convergence [13, 40]. Complementary techniques such as mixed-precision training [ 26 ], loss scaling [ 26 ], and stochastic rounding [ 16 , 10 ] help stabilize low-precision arithmetic. While these techniques improve numerical stability, they do not directly address the structural cause of quantization error—the presence of outliers that distort the dynamic range. To tackle outliers more directly, prior work has explored channel-wise or group-wise scaling [ 40 , 21 ] and, more recently, rotation-based transforms that redistribute outlier energy before quantization — an approach we survey in 2.2. However, these approaches apply a fixed transform uniformly across all layers, ignoring the variation in outlier structures across tensors and computation paths. As we show in this work, the effectiveness of a transform depends critically on its alignment with the outlier pattern of each operand pair, motivating AdaHOP’s adaptive, pattern-aware strategy. 
+
+2.2 Outlier Suppression via Rotation 
+
+Outliers in LLM tensors, particularly activations, are a well-documented obstacle to effective quanti-zation [ 40 , 13 , 21 ]. To address this issue, prior work in inference [ 2, 23 , 7 , 34 , 32 ] employs Hadamard or learned rotation matrices to redistribute outlier energy across channels, thereby improving post-training quantization quality. Extending this idea to training is considerably harder, as gradients introduce a third tensor type with its own distinct outlier structure, and quantization must remain stable across all three computation paths (forward, ∇W , ∇X). Recent approaches apply Hadamard transforms during training to suppress outliers: HOT [ 20 ] applies Hadamard quantization selectively to gradient paths based on path-level heuristics, without analyzing per-tensor outlier patterns. Tseng et al. [ 35 ] use stochastic rounding with random Hadamard to compute unbiased gradient estimates for theoretically bounding the variance, enabling near-lossless MXFP4 backward passes. Quartet [ 5] extends this to fully native MXFP4 training across all three matrix multiplications, combining fixed Hadamard transforms in the forward pass with randomized Hadamard transforms in the backward pass. HALO [ 3] observes that gradient tensors exhibit row-wise outliers while activations exhibit column-wise outliers, and strategically places left- and right-sided Hadamard rotations in both forward and backward passes accordingly. However, while HALO’s identification of row-wise gradients and column-wise activations is correct for some paths, it still applies these rotations uniformly regardless of the actual pattern pair at each matrix multiplication, which can lead to suboptimal error reduction. In contrast, our work provides a fine-grained analysis of outlier patterns and introduces an adaptive strategy that selects between IHT and OE based on the detected outlier pattern pair of each matrix multiplication, achieving stronger error reduction across the computation paths where fixed transforms are suboptimal. 
+
+# 3 Preliminary 
+
+3.1 LPT 
+
+In a standard LLM, each linear layer computes Y = XW ⊤, where X ∈ Rb×din denotes the input activation and W ∈ Rdout ×din is the weight matrix. Where, b, din and dout denote the number of tokens, the input dimension and the output dimension, respectively. During training, each linear layer involves three matrix multiplications: Forward: Y = XW ⊤ (1) Backward ( ∇W ): GW = G⊤ 
+
+> Y
+
+X (2) Backward ( ∇X): GX = GY W (3) where GY ∈ Rb×dout denotes the gradient of the loss with respect to Y . In LPT, these matrix multiplications are performed using quantized operands to improve efficiency. Specifically, each operand is quantized using a quantization function Q(·) prior to multiplication: 
+
+C ≈ Q(A) · Q(B) (4) 3Figure 2: (Left) 3D visualization of Weight, Activation, and Gradient tensors from Llama3.2-1B’s 
+
+block.2.self_attn_o after 100 training steps on C4. The Weight tensor shows no pronounced out-lier structure, while the Activation exhibits column-wise outliers and the Gradient exhibits row-wise outliers. (Right) 3D visualization of a column-wise outlier tensor after applying different Hadamard transform directions. Right Hadamard (which mixes values within each row, across columns) effec-tively suppresses column-wise outliers, while Left Hadamard leaves the outlier structure intact. where A and B are the two input tensors of the matrix multiplication. Each multiplication involves a different pair of operands (A, B ) drawn from activations, weights, and gradients, leading to distinct outlier structures and quantization challenges for each computation path. 
+
+3.2 Hadamard Transform for Quantization 
+
+To reduce quantization error, Hadamard transforms can be applied to the operands before quantization. We consider two strategies, IHT and Outer Hadamard Transform (OHT), which differ in the dimension along which the transform is applied. The IHT operates along the shared dimension k of the matrix multiplication C = AB , where 
+
+A ∈ Rm×k and B ∈ Rk×n. Using the normalized Walsh-Hadamard matrix Hk ∈ Rk×k satisfying 
+
+H⊤ 
+
+> k
+
+Hk = Ik:
+
+CIHT = Q(AH k) · Q(H⊤ 
+
+> k
+
+B). (5) This transformation preserves the exact product in infinite precision, since AH k · H⊤ 
+
+> k
+
+B =
+
+A(HkH⊤ 
+
+> k
+
+)B = AB . It effectively maps A and B from the value domain to the frequency do-main by mixing values along the shared dimension [ 20 , 42 ], thereby smoothing the columns of A
+
+and the rows of B and mitigating the impact of outliers. In contrast, OHT operates along the outer dimensions m and n:
+
+COHT = H⊤ 
+
+> m
+
+(Q(HmA) · Q(BH n)) Hn (6) Here, the transforms redistribute values across rows of A and columns of B, effectively smoothing along the outer dimensions. The inverse transforms H⊤ 
+
+> m
+
+and Hn restore the original coordinate. OHT also preserves the original multiplication in infinite precision, i.e., H⊤
+
+> m
+
+(HmA · BH n)Hn = AB .Although OHT provides a complementary smoothing direction to IHT, it requires additional full-size Hadamard transforms and inverse transforms on the outer dimensions, incurring extra data movement and computational cost. In AdaHOP, we therefore do not select OHT as an operational strategy; instead, we use OHT solely as a theoretical reference point for analyzing transform effectiveness across different outlier pattern pairs (Section D). In practice, AdaHOP relies exclusively on IHT combined with selective OE to handle pattern pairs where IHT alone is insufficient, achieving strong error reduction with lower overhead. 
+
+# 4 Analysis of Outlier Patterns 
+
+In this section, we analyze outlier structures in LLM tensors and their impact on Hadamard-based transformations. Outliers exhibit diverse spatial structures across tensors and computation paths, interacting differently with transformation strategies and motivating a pattern-aware treatment. We first define three outlier pattern types (Section 4.1), then analyze their impact on Hadamard transforms (Section 4.2), and finally characterize which patterns arise in practice across LLM computation paths (Section 4.3). 4Figure 3: Improvement in quantization error when applying IHT for each outlier pattern pair. (Left) Synthetic outlier tensors (Row/Col kurtosis = 225.95, None kurtosis = 0). (Right) Real tensors from Llama3.2-3B’s layers.23.feed_forward.out_proj (Row/Col kurtosis = 197.81, None kurtosis = 6.29). IHT effectively reduces error for CR pairs but is ineffective or harmful for RC, RN, RR, NC, and CC pairs. 
+
+4.1 Definition of Outlier Patterns 
+
+Outliers in LLM tensors exhibit distinct spatial patterns that vary across tensors and computation paths. We categorize these patterns into three types, formally detected via the normalized Coefficient of Variation (CV) metric described in Section A: • Row-wise (R) : Outliers are concentrated in a small number of specific rows, i.e., certain rows have significantly larger magnitudes than others. • Column-wise (C) : Outliers are concentrated in a small number of specific columns, i.e., certain columns have significantly larger magnitudes than others. • None (N) : The magnitude distribution is relatively uniform across all rows and columns, with no pronounced outlier concentration. Figure 2 (Left) visualizes these patterns using tensors extracted from Llama3.2-1B after 100 training steps on the C4 dataset. The Weight tensor exhibits a relatively uniform distribution (None pattern), while the Activation tensor exhibits column-wise outliers, the dominant pattern across models and layers (see Section 4.3 and Table 1 for the full distribution), indicating that a subset of feature dimen-sions exhibits consistently larger magnitudes across token positions. In contrast, the Gradient tensor exhibits row-wise outliers, indicating that certain token positions exhibit consistently larger gradient magnitudes across feature dimensions. We note that these patterns are not exclusive—Activation and Gradient tensors can also exhibit None or other outlier structures depending on the layer and computation path. Nevertheless, these examples illustrate that outliers in LLMs follow structured, non-random patterns, a finding that is further corroborated by the comprehensive multi-model analysis in Section 4.3. 
+
+4.2 Why Outlier Patterns Matter 
+
+MXFP4+Hadamard applies IHT uniformly across all computation paths, while HALO applies OHT uniformly across gradient paths. Both implicitly assume that a single transform is universally effective — an assumption we show is flawed (see Figure 3): the effectiveness of a Hadamard transform is determined by how its smoothing directions align with the outlier directions of the operands. For example, IHT smooths the column dimension of A and the row dimension of B, making it effective for the CR pair. In contrast, for the RC pair, the outlier directions remain unaffected, rendering IHT ineffective. To systematically study this effect, we enumerate all possible outlier pattern pairs into nine combina-tions: RR, RN, RC, NR, NN, NC, CR, CN, and CC. Figure 3 reports the MSE improvement of IHT for each pair, measured as Imp. = ( Ebase − EIHT ) × 100 / E base , where Ebase = MSE (Q(A)Q(B), AB )
+
+and EIHT = MSE (Q(AH k)Q(H⊤ 
+
+> k
+
+B), AB ). The results in the figure reveal a systematic dependency on the pattern pair: IHT is highly effective for the CR pair, provides partial gains for CN and NN 
+
+(see Figure 3 for the exact improvement percentages per pair), but is ineffective or even detrimental for RC , RN , NC , CC , and RR .5Table 1: Distribution of outlier pattern pairs across computation paths for three LLM architectures, measured after 30 training steps on C4. Each cell shows the count of linear layers exhibiting the corresponding pattern pair. Patterns RR, NR, and CR do not appear because Weight tensors consistently exhibit the None pattern and Activation tensors exhibit either Column-wise or None patterns.                                                                                       
+
+> Llama3.2-1B Instella-3B Llama3.1-8B Pattern Pair Total Fwd ∇W∇XTotal Fwd ∇W∇XTotal Fwd ∇W∇X
+> RN 23 015 879 033 46 65 027 38 RC 69 069 0111 0111 092 092 0NN 35 15 020 100 36 262 103 32 467 NC 20 020 060 060 063 063 0CN 181 97 084 361 216 1144 312 192 1119 CC 808045 045 037 037 0
+
+Figure 4: Outlier patterns of Weight ( W ), Activation ( X), and Gradient ( GY ) tensors across 300 training steps for Llama3.2-3B. Each row represents a tensor from a specific layer, and the color indicates the detected outlier pattern at each step. The patterns remain stable throughout training, enabling one-time calibration. Outlier patterns of the other layers are provided in Section B. Figure 2 (Right) further provides an intuitive explanation. For tensors with column-wise outliers, right-sided Hadamard (i.e., right multiplication XH , which mixes values within each row across columns) suppresses the outliers by mixing across columns, whereas left-sided Hadamard (i.e., left multiplication HX , which mixes values within each column across rows) leaves the structure largely unchanged. This illustrates that effective outlier suppression depends on aligning the transform direction orthogonally to the outlier structure. 
+
+4.3 Outlier Patterns in LLM Layers 
+
+Having established that outlier patterns determine transform effectiveness, we next examine which pattern pairs actually arise in the three computation paths (Forward, ∇W , ∇X) of LLM linear layers. Using the CV-based detection method described in Section A, we measure the frequency of each pattern pair across three Llama-family models (Llama3.2-1B, Instella-3B, Llama3.1-8B) after 30 training steps. Table 1 summarizes the results, from which several key observations emerge: • Absent patterns : The pattern pairs RR, NR, and CR never appear across any model or path. This follows from the fact that Weight tensors consistently exhibit the None pattern, while Activation tensors exhibit either Column-wise or None patterns. • Forward path : The forward pass ( Y = XW ⊤) produces only CN and NN pairs. Since IHT effectively handles both cases—suppressing column-wise outliers in X and introducing no harm for NN pairs—uniform IHT is sufficient for this path. • Backward ∇W path : The ∇W computation ( GW = G⊤ 
+
+> Y
+
+X) predominantly yields RC, RN, NC, and CC pairs. Uniform IHT is ineffective for RC and RN, while OHT is suboptimal for CC because it can only smooth one of the two column-wise operands, leaving the other’s outlier structure intact (see Section D for the theoretical analysis). This indicates that no single transform can handle all cases, and this path therefore requires a pattern-aware strategy. • Backward ∇X path : The ∇X computation ( GX = GY W ) exhibits a mixture of RN, NN, and CN pairs, again requiring adaptive handling due to the diversity of patterns. CN pairs are 6Figure 5: The pipeline of AdaHOP. For each linear layer’s three matrix multiplications, AdaHOP selectively applies IHT, OE (Left or Right), or high-precision computation based on the detected outlier pattern pair ( Pn). Here n ∈ { 1, 3, 5} indexes the input tensors. handled well by IHT, while RN pairs require OE-Left, making adaptive per-pair assignment necessary. These results highlight that a uniform transform cannot minimize quantization error across all computation paths, necessitating an adaptive, pattern-aware strategy. A key question for pattern-aware methods is whether outlier patterns vary during training, neces-sitating dynamic adaptation. To examine this, we track the patterns of all Weight, Activation, and Gradient tensors in Llama3.2-3B over 300 training steps, as shown in Figure 4 (see Section B for the other layers). The patterns remain highly stable, with each layer exhibiting consistent structures from early training. This stability enables reliable identification via a short calibration phase, eliminating the need for per-step detection and allowing a lightweight, static pattern-aware strategy. 
+
+# 5 Methodology 
+
+Based on the analysis in Section 4, we propose AdaHOP, an adaptive framework that selects the optimal transform strategy—choosing among IHT, OE+IHT, or full BF16 computation based on the detected outlier pattern pair—for each matrix multiplication, as illustrated in Figure 5. Ada-HOP consists of four components: (1) calibration-based pattern detection, (2) adaptive Hadamard strategy selection, supported by (3) theoretical justification of the design choices, and (4) hardware-aware kernel implementation. The strategy selection yields two method variants, AdaHOP-Lv1 and AdaHOP-Lv2, which differ in how attention-critical CC pattern pairs are handled (Section 5.2). 
+
+5.1 Calibration Training for Outlier Pattern Detection 
+
+Leveraging the temporal stability of outlier patterns (Section 4.3), AdaHOP identifies a fixed pattern for each tensor via a short BF16 calibration phase before switching to LPT: 1. Run full-precision (BF16) training for 30 steps. 2. At each step, compute dimension-normalized CV along row and column dimensions for each tensor. 3. Classify each tensor as Row, Column, or None based on the normalized CV values and a threshold τ = 2 .0 (see Section A for details; the method is robust to moderate variations of this threshold). 4. Assign each tensor a fixed pattern by majority vote over the patterns observed across calibration steps. Majority voting is preferred over alternatives such as the last observed pattern or averaged CV because it is robust to transient fluctuations in early training steps; in practice, the patterns are sufficiently stable that ties do not arise. The pattern pair for each matrix multiplication is then determined from the fixed patterns of its input tensors. This calibration incurs minimal overhead—30 BF16 steps constitutes less than 0.01% of the total training budget (20B–160B tokens)—and is negligible in practice. Importantly, because patterns are fixed at calibration time, AdaHOP requires no runtime pattern detection, eliminating per-step overhead entirely and enabling a lightweight, static pattern-aware strategy. Further details of the CV-based detection are provided in Section A. 75.2 Adaptive Hadamard Strategy Selection 
+
+Given the detected outlier pattern pair for each matrix multiplication, AdaHOP assigns each pair its own strategy by selecting among IHT alone, IHT combined with OE, or full BF16 computation. The summary of selection is illustrated in Figure 5. We apply IHT alone when the pattern pair is already amenable to inner-dimension smoothing, specifically for CN and NN pairs (and also CR, though this does not arise in practice). IHT directly mitigates outliers by smoothing column-wise outliers in the left operand and row-wise outliers in the right operand via Equation (5). For pattern pairs where IHT is ineffective (RN, RC, NC, CC), AdaHOP augments the computation with OE. In this case, OE first removes the dominant outliers into a high-precision path, and IHT is subsequently applied to the remaining residual tensor, ensuring that both extreme and moderate outliers are effectively handled. • OE-Left : Applies when the left operand has row-wise outliers ( RN ; the RR pair is also covered by this strategy for completeness, though it does not arise in practice per Table 1). We decompose A = Ares + Aout , where Aout contains the top-k outlier rows ( k = 64 ; see Section 5.4 for the hardware-motivated choice of this value): 
+
+C = Q(Ares Hk) · Q(H⊤ 
+
+> k
+
+B)
+
+| {z }
+
+> MXFP4 matmul
+
++ Aout · B
+
+| {z }
+
+> BF16 matmul
+
+(7) The extracted outliers are computed in high precision, while IHT is applied to Ares to smooth the remaining moderate outliers. • OE-Right : Applies when the right operand has column-wise outliers ( NC , CC ). We decom-pose B = Bres + Bout , where Bout contains the top-k outlier columns: 
+
+C = Q(AH k) · Q(H⊤ 
+
+> k
+
+Bres )
+
+| {z }
+
+> MXFP4 matmul
+
++ A · Bout 
+
+| {z }
+
+> BF16 matmul
+
+(8) As in OE-Left, IHT is applied to the residual tensor to suppress the remaining outlier structure. In both cases, OE and IHT play complementary roles: OE isolates the most extreme outliers into a high-precision path, while IHT smooths the residual tensor to reduce quantization error in the low-precision computation. The RC pair presents a challenging case where both operands contain outliers along directions that are not effectively smoothed by IHT. In practice, RC predominantly arises in the ∇W path with 
+
+A = G⊤ 
+
+> Y
+
+and B = X. To minimize quantization error, we prioritize extracting outliers from the operand that contributes most to the error. Empirically, activations tend to exhibit higher kurtosis than gradients (as shown in Figure 3, where kurtosis values of real tensors confirm this disparity), indicating more concentrated and dominant outliers. Therefore, we apply OE-Right to remove the activation’s column-wise outliers, which yields the largest reduction in quantization error under a fixed extraction budget. The CC pair accounts for less than 6% of all computation paths but appears primarily in the Key and Value projection layers, which are particularly sensitive to quantization noise in attention mechanisms [ 24 , 19 , 6 ]. Given this combination of low frequency and high sensitivity, we adopt a targeted strategy that trades off efficiency and accuracy: • AdaHOP-Lv1 : Applies OE-Right with IHT on the residual, maintaining low-precision computation while mitigating dominant outliers. • AdaHOP-Lv2 : Computes CC pairs entirely in BF16, fully preserving numerical fidelity in these attention-critical layers and achieving the highest training quality. Table 2 summarizes the complete strategy assignment for all pattern pairs, providing a concise reference for AdaHOP’s decision logic. 8Table 2: AdaHOP strategy selection based on outlier pattern pairs. Patterns RR, NR, CR do not occur in practice (marked with †).                     
+
+> Left ( A)Right ( B)Strategy
+> CNIHT NNIHT RNOE-Left + IHT RCOE-Right + IHT NCOE-Right + IHT CCOE-Right (Lv1) / BF16 (Lv2) CR†IHT RR†OE-Left + IHT NR†IHT
+
+5.3 Theoretical Justification of AdaHOP 
+
+We now provide a theoretical basis for the design choices in AdaHOP. The key principle is that a Hadamard transform is effective only when applied orthogonally to the outlier direction (Proposi-tion 1), explaining the need for pattern-aware treatment. HALO [ 3 ] reduces error via outer-dimension transforms (e.g., OHT), achieving an O(√mn ) improve-ment over IHT in the Row-Column case (Theorem 1), but at the cost of additional transformations and data movement. Our analysis shows that when outliers are highly concentrated, explicitly isolating them is more effective: OE eliminates the dominant pγ(A) amplification factor from the error bound (Theorem 2), reducing the quantization error from O(ϵquant · ∥ A∥F ∥B∥F · pγ(A) · γ(B)) to 
+
+O(ϵquant · ∥ Aclean ∥F ∥B∥F ·
+
+q
+
+γ(H⊤ 
+
+> k
+
+B)) by separating a low-precision residual path from a sparse high-precision path, directly removing the dominant error source. This insight motivates AdaHOP: instead of additional global transforms that require full-size Hadamard multiplications along both outer dimensions, we adopt a selective OE + IHT design that achieves strong error reduction with high efficiency. When combined with our hardware-aware implementation, this selective design further enables low-cost execution by minimizing data move-ment and amortizing the overhead of high-precision computation. To summarize the key theoretical results and their implications for AdaHOP’s design: Proposition 1 establishes that a Hadamard transform reduces the outlier factor by O(1 /d ) only when applied orthogonally to the outlier direction, justifying the need for pattern-aware strategy selection. Theo-rem 1 shows that OHT achieves an O(√mn ) improvement over IHT for the RC pair, but requires costly outer-dimension transforms. Theorem 2 demonstrates that OE eliminates the dominant outlier amplification factor entirely, motivating the OE+IHT combination as a more efficient alternative. Complete proofs and details are provided in Section D. 
+
+5.4 Hardware-Aware Implementation 
+
+To fully leverage mixed-precision compute capabilities of AMD CDNA4 [ 1 ], we implement the entire AdaHOP pipeline as fused Triton kernels, enabling concurrent low- and high-precision com-putation with minimal data movement. We set k = 64 for the number of extracted outlier rows or columns. This choice is hardware-motivated: AMD CDNA4’s block-scaled MFMA instruction (mfma_scale_f32_32x32x64_f8f6f4 ) consumes a 32 × 64 input tile per operand. Setting k = 64 
+
+allows the BF16 outlier sub-matrix to be covered by a minimal 2×1 arrangement of MFMA input tiles along the extraction dimension, providing a practical balance between preserving most computation in low precision and capturing dominant outlier features. The pipeline consists of four stages, each designed to minimize data movement and exploit mixed-precision parallelism: (1) Fast Outlier Index Detection (FOID), which identifies the top-k outlier rows or columns by row-wise or column-wise variance; (2) IHT with MXFP4 quantization, which fuses the transform and quantization into a single kernel to avoid intermediate memory writes; (3) Fused MXFP4+BF16 GEMM, which executes the low-precision residual and high-precision outlier multiplications concurrently by leveraging the mixed-precision parallel computation capabilities of 9Table 3: Zero-shot accuracy (%) on four downstream benchmarks after training on C4. Best MXFP4-based result is in bold ; second best is underlined.                                                                                                                     
+
+> Model Method PIQA HellaSwag ARC-E LAMBADA Average
+> Llama3.2-1B BF16 72.69 52.33 47.85 38.17 52.76 MXFP4 64.69 37.94 37.29 11.93 37.96 MXFP4+Hadamard 71.85 51.37 45.91 37.68 51.70 Tseng et al. 72.14 50.95 46.17 36.81 51.52 HALO 72.09 51.89 46.72 39.03 52.43 AdaHOP-Lv1 73.04 52.24 46.91 38.21 52.60 AdaHOP-Lv2 73.01 52.32 47.05 38.55 52.73
+> Instella-3B BF16 73.52 54.31 48.91 46.26 55.75 MXFP4 68.17 42.07 40.91 27.71 44.72 MXFP4+Hadamard 72.69 53.54 48.61 43.39 54.56 Tseng et al. 73.45 53.19 48.86 45.12 55.16 HALO 72.20 53.54 47.81 45.90 54.86 AdaHOP-Lv1 73.23 53.32 49.41 45.02 55.25 AdaHOP-Lv2 73.83 54.26 50.67 45.42 56.05
+> Llama3.2-3B BF16 73.72 57.75 48.53 47.53 56.88 MXFP4 55.88 26.30 29.25 6.09 29.38 HALO 73.45 57.34 47.98 47.95 56.68 AdaHOP-Lv1 73.67 57.18 48.44 47.41 56.68 AdaHOP-Lv2 73.67 57.14 49.12 47.28 56.80
+> Llama3.1-8B BF16 75.79 64.19 57.11 49.64 61.68 HALO 74.98 63.17 55.31 48.04 60.37 AdaHOP-Lv2 76.28 64.98 55.89 48.57 61.43
+
+AMD CDNA4’s compute unit architecture (see Section E for details); and (4) Fused Scatter-Add, which scatters and accumulates the outlier results in-place. Overall, this design amortizes the overhead of OE and maintains high throughput despite selective BF16 computation, as demonstrated in Table 5, achieving 1.59–1.80 × kernel-level speedup over BF16 GEMM. Detailed implementation is provided in Section E. 
+
+# 6 Experimental Results 
+
+We evaluate AdaHOP across four LLM models: Llama3.2-1B, Llama3.2-3B, Llama3.1-8B [ 15 ], and Instella-3B [ 22 ]. All models are trained on the C4 dataset [ 30 ]. We compare AdaHOP against BF16 full-precision training as an upper bound, and four MXFP4-based methods: naive MXFP4 quantization, MXFP4+Hadamard, Tseng et al. [ 35 ], and HALO [ 3]. We report training loss, zero-shot accuracy on downstream benchmarks (PIQA [ 4], HellaSwag [ 43 ], ARC-Easy [ 12 ], LAMBADA [ 28 ]), memory consumption, and training throughput. Section 6.1 reports training quality, Section 6.2 evaluates downstream task accuracy, and Section 6.3 analyzes memory and throughput. Further details are provided in Section C. 
+
+6.1 Main Results: Training Quality 
+
+Figure 1 shows the training loss and its gap to BF16 for Llama3.2-1B and Instella-3B; the remain-ing two models (Llama3.2-3B and Llama3.1-8B) exhibit consistent trends and are evaluated via downstream accuracy in Section 6.2. AdaHOP consistently achieves the smallest loss gap among all MXFP4-based baselines, maintaining a loss difference within 0.01 of BF16 throughout training for both models. While naive MXFP4 suffers severe degradation and prior methods (MXFP4+Hadamard, HALO) partially mitigate this gap, their uniform transforms fail to account for pattern-pair diversity, leaving substantial quantization error. Tseng et al. [ 35 ] achieves competitive performance compared to MXFP4+Hadamard, but its uniform randomized Hadamard strategy likewise falls short of Ada-HOP’s pattern-aware approach. In contrast, AdaHOP’s pattern-aware strategy effectively reduces quantization error across computation paths, yielding BF16 training quality. 10 Table 4: Memory consumption of linear layer, training throughput, and training quality comparison during Llama3.1-8B training. Training quality is rated as ⃝ (BF16), △ (moderate degradation), or 
+
+× (severe degradation) based on average downstream task accuracy across all evaluated models in Table 3: methods within 1 point of BF16 average are rated ⃝, those within 3 points are rated △, and the rest are rated ×. AdaHOP achieves meaningful memory reduction and higher throughput than Tseng et al. and HALO.                         
+
+> Method Memory (GB) Throughput (tok/s) Quality
+> BF16 76.00 12945.51 ⃝
+> MXFP4 20.19 14323.01 ×
+> MXFP4+Hadamard 20.60 14312.19 △
+> Tseng et al. 20.60 12997.90 △
+> HALO 20.60 10482.19 △
+> AdaHOP-Lv1 20.94 13246.88 ⃝
+> AdaHOP-Lv2 28.04 13134.02 ⃝
+
+Table 5: Latency breakdown of AdaHOP’s OE pipeline for two representative matrix sizes corre-sponding to actual linear layer dimensions in the models ( 2048 × 14336 from the MLP projection and 4096 × 4096 from the attention projection of Llama3.1-8B), compared to BF16 GEMM baseline.                     
+
+> Module Latency (ms)
+> 2048 ×14336 4096 ×4096
+> BF16 GEMM 0.473 0.347 FOID 0.035 0.044 IHT and Quant 0.052 0.045 Fused MXFP4+BF16 GEMM 0.192 0.088 Fused Scatter-Add 0.017 0.016
+> AdaHOP Total 0.297 0.193 Speedup vs. BF16 1.59 ×1.80 ×
+
+6.2 Downstream Task Performance 
+
+Table 3 reports zero-shot accuracy on four benchmarks. AdaHOP achieves the best average perfor-mance among MXFP4-based methods across all four models, though individual task-level exceptions exist—for example, on LAMBADA for Llama3.2-1B, HALO (39.03) outperforms AdaHOP-Lv2 (38.55). On Instella-3B, AdaHOP-Lv2 achieves an average accuracy of 56.05%, surpassing the next-best method (AdaHOP-Lv1, 55.25%) by 0.80 percentage points and surpassing BF16 by 0.30 percentage points of BF16 (55.75%); notably, AdaHOP-Lv2 exceeds BF16 on PIQA (73.83 vs. 73.52) and ARC-Easy (50.67 vs. 48.91) for this model. The improvement from Lv1 to Lv2 further highlights the importance of selectively preserving high precision for attention-critical CC patterns (see §5.2): on Instella-3B, upgrading from Lv1 to Lv2 increases average accuracy from 55.25% to 56.05%, a gain of 0.80 percentage points driven primarily by the ARC-Easy and HellaSwag benchmarks. Examining per-model trends, AdaHOP demonstrates consistent improvements across all four model scales. For the smaller Llama3.2-1B, AdaHOP-Lv2 achieves 52.73% average accuracy, nearly match-ing the BF16 upper bound of 52.76%. For the larger Llama3.1-8B, where only HALO is available as a baseline due to computational constraints, AdaHOP-Lv2 (61.43%) substantially outperforms HALO (60.37%) and closely approaches BF16 (61.68%), suggesting that AdaHOP’s benefits scale effectively with model size. The reduction in available baselines for Llama3.2-3B and Llama3.1-8B reflects the computational cost of training at larger scales; nonetheless, AdaHOP consistently achieves the best MXFP4 accuracy in all settings where comparisons are available. 
+
+6.3 Efficiency Analysis 
+
+Table 4 compares memory consumption, training throughput, and training quality across methods. AdaHOP-Lv1 achieves BF16 quality at 20.94 GB memory and 13,247 tok/s throughput, while AdaHOP-Lv2 provides even higher fidelity at 28.04 GB and 13,134 tok/s. 11 Although OE introduces additional BF16 computation, the overall memory footprint remains well below BF16, as most computation still benefits from MXFP4 quantization. In contrast, naive MXFP4 and MXFP4+Hadamard achieve higher throughput but suffer severe ( ×) or moderate ( △) quality degradation, limiting their practical utility. AdaHOP, on the other hand, attains BF16 quality ( ⃝)while outperforming Tseng et al. and HALO in throughput, demonstrating the effectiveness of its adaptive design. Notably, HALO’s throughput (10,482 tok/s) is dramatically lower than all other methods, even below BF16. This is attributable to the cost of HALO’s OHT, which requires two additional Fast Walsh-Hadamard Transform (FWHT) kernel invocations after quantization and matrix multiplication for every activation gradient path; OHT introduces order dependency and substantial data movement overhead that offsets the gains from low-precision arithmetic. A detailed latency breakdown is provided in Table 5. We measure latency breakdown for two representative matrix multiplications, multiplying 2048 × 14336 and its transposed matrix for the MLP projection and 4096 × 4096 and its transposed matrix for the attention projection of Llama3.1-8B. At the kernel level, AdaHOP achieves a 1.59–1.80 × speedup over BF16 GEMM despite the additional steps of outlier detection and extraction, indicating that the overhead of the adaptive pipeline is effectively amortized by low-precision computation. We note that this kernel-level speedup does not directly translate to proportional end-to-end training speedup: as shown in Table 4, AdaHOP-Lv1’s overall training throughput (13,247 tok/s) is approximately 2% faster than BF16 (12,946 tok/s), because non-GEMM operations (e.g., attention, normalization, optimizer steps) constitute a significant fraction of total training time and are not accelerated by low-precision quantization. Furthermore, compared to BF16’s 76.00 GB memory footprint, AdaHOP-Lv1 reduces linear-layer memory to 20.94 GB, achieving 3.6 × memory compression while maintaining BF16 quality; AdaHOP-Lv2 reaches 28.04 GB (2.7 × compression) by additionally preserving full precision for attention-critical CC pairs. 
+
+# 7 Conclusion 
+
+LPT has long treated outlier suppression as a global problem, applying uniform transforms across all layers and computation paths. AdaHOP challenges this assumption by demonstrating that outliers in LLMs are not random: they follow three structured, stable patterns—Row-wise, Column-wise, and None—that vary across tensors and computation paths but remain consistent throughout training. This predictability is the key insight that makes a pattern-aware approach both practical and effective. Building on this finding, AdaHOP assigns each matrix multiplication its optimal strategy—IHT for pattern pairs amenable to inner-dimension smoothing, or IHT augmented with selective OE for pairs where it is not—identified via lightweight one-time calibration. With a hardware-aware Triton implementation on AMD CDNA4, AdaHOP achieves BF16 training quality at MXFP4 precision, delivering up to 3.6 × memory compression and up to 1.80 × kernel-level GEMM speedup over BF16. These results show that accounting for outlier structure, rather than suppressing it uniformly, is a more effective and efficient path to stable LPT. 
+
+# 8 Limitations and Future Work 
+
+AdaHOP has several limitations that point to directions for future work. First, AdaHOP currently uses fixed Walsh-Hadamard matrices; combining it with learned rotation matrices [ 23 ] could yield lower quantization errors by learning data-dependent rotations aligned with each layer’s outlier structure. Second, the outlier pattern analysis spans Llama-family and Instella models across scales from 1B to 8B parameters, providing a strong empirical foundation; extending this analysis to model architectures with different attention mechanisms or normalization schemes (e.g., Mixtral [ 18 ], Gemma [ 33 ]) is a promising direction that we expect to further validate the generality of the identified patterns. Third, this work establishes AdaHOP on MXFP4, an emerging hardware-supported format with strong industry momentum; extending the framework to other low-precision numerical formats is a natural and planned direction, as the pattern-aware design is not specific to any particular format. Finally, the number of extracted outlier rows or columns is fixed at k = 64 throughout; an ablation study on this hyperparameter and an adaptive per-layer selection strategy based on per-layer outlier severity could further improve the accuracy-efficiency trade-off. 12 References 
+
+[1] AMD. CDNA4 Instruction Set Architecture Reference Guide , Au-gust 2025. URL https://www.amd.com/content/dam/amd/en/ documents/instinct-tech-docs/instruction-set-architectures/ amd-instinct-cdna4-instruction-set-architecture.pdf . Revision 5-August-2025. [2] Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. Quarot: Outlier-free 4-bit inference in rotated llms. Advances in Neural Information Processing Systems , 37:100213– 100240, 2024. [3] Saleh Ashkboos, Mahdi Nikdan, Soroush Tabesh, Roberto L Castro, Torsten Hoefler, and Dan Alistarh. Halo: Hadamard-assisted lower-precision optimization for llms. arXiv preprint arXiv:2501.02625 , 2025. [4] Yonatan Bisk, Rowan Zellers, Jianfeng Gao, Yejin Choi, et al. Piqa: Reasoning about phys-ical commonsense in natural language. In Proceedings of the AAAI conference on artificial intelligence , volume 34, pages 7432–7439, 2020. [5] Roberto L Castro, Andrei Panferov, Soroush Tabesh, Oliver Sieberling, Jiale Chen, Mahdi Nikdan, Saleh Ashkboos, and Dan Alistarh. Quartet: Native fp4 training can be optimal for large language models. In The Thirty-ninth Annual Conference on Neural Information Processing Systems .[6] Chi-Chih Chang, Chien-Yu Lin, Yash Akhauri, Wei-Cheng Lin, Kai-Chiang Wu, Luis Ceze, and Mohamed S Abdelfattah. xkv: Cross-layer svd for kv-cache compression. arXiv preprint arXiv:2503.18893 , 2025. [7] Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher M De Sa. Quip: 2-bit quanti-zation of large language models with guarantees. Advances in neural information processing systems , 36:4396–4429, 2023. [8] Mengzhao Chen, Meng Wu, Hui Jin, Zhihang Yuan, Jing Liu, Chaoyi Zhang, Yunshui Li, Jie Huang, Jin Ma, Zeyue Xue, et al. Int vs fp: A comprehensive study of fine-grained low-bit quantization formats. arXiv preprint arXiv:2510.25602 , 2025. [9] Brian Chmiel, Ron Banner, Elad Hoffer, Hilla Ben-Yaacov, and Daniel Soudry. Accurate neural training with 4-bit matrix multiplications at standard formats. In The Eleventh International Conference on Learning Representations , 2022. [10] Brian Chmiel, Ron Banner, Elad Hoffer, Hilla Ben-Yaacov, and Daniel Soudry. Accurate neural training with 4-bit matrix multiplications at standard formats. In The Eleventh International Conference on Learning Representations , 2023. URL https://openreview.net/forum? id=yTbNYYcopd .[11] Brian Chmiel, Maxim Fishman, Ron Banner, and Daniel Soudry. Fp4 all the way: Fully quantized training of llms. arXiv preprint arXiv:2505.19115 , 2025. [12] Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. Think you have solved question answering? try arc, the ai2 reasoning challenge. arXiv preprint arXiv:1803.05457 , 2018. [13] Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. Gpt3. int8 (): 8-bit matrix multiplication for transformers at scale. Advances in neural information processing systems , 35: 30318–30332, 2022. [14] Vage Egiazarian, Roberto L Castro, Denis Kuznedelev, Andrei Panferov, Eldar Kurtic, Shubhra Pandit, Alexandre Marques, Mark Kurtz, Saleh Ashkboos, Torsten Hoefler, et al. Bridging the gap between promise and performance for microscaling fp4 quantization. arXiv preprint arXiv:2509.23202 , 2025. 13 [15] Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, et al. The llama 3 herd of models. arXiv preprint arXiv:2407.21783 , 2024. [16] Suyog Gupta, Ankur Agrawal, Kailash Gopalakrishnan, and Pritish Narayanan. Deep learning with limited numerical precision. In International conference on machine learning , pages 1737–1746. PMLR, 2015. [17] Jordan Hoffmann, Sebastian Borgeaud, Arthur Mensch, Elena Buchatskaya, Trevor Cai, Eliza Rutherford, Lisa Anne Hendricks, Johannes Welbl, Aidan Clark, et al. Training compute-optimal large language models. [18] Albert Q Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, et al. Mixtral of experts. arXiv preprint arXiv:2401.04088 , 2024. [19] Hao Kang, Qingru Zhang, Souvik Kundu, Geonhwa Jeong, Zaoxing Liu, Tushar Krishna, and Tuo Zhao. Gear: An efficient kv cache compression recipe for near-lossless generative inference of llm. arXiv preprint arXiv:2403.05527 , 2024. [20] Seonggon Kim, Juncheol Shin, Seung-taek Woo, and Eunhyeok Park. Hot: Hadamard-based optimized training. In Proceedings of the Computer Vision and Pattern Recognition Conference ,pages 4787–4796, 2025. [21] Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. Awq: Activation-aware weight quantization for on-device llm compression and acceleration. Proceedings of machine learning and systems ,6:87–100, 2024. [22] Jiang Liu, Jialian Wu, Xiaodong Yu, Yusheng Su, Prakamya Mishra, Gowtham Ramesh, Sud-hanshu Ranjan, Chaitanya Manem, Ximeng Sun, Ze Wang, Pratik Prabhanjan Brahma, Zicheng Liu, and Emad Barsoum. Instella: Fully open language models with stellar performance. arXiv preprint arXiv:2511.10628 , 2025. [23] Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Krishnamoorthi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. Spinquant: Llm quantization with learned rotations. arXiv preprint arXiv:2405.16406 , 2024. [24] Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. Kivi: a tuning-free asymmetric 2bit quantization for kv cache. In Proceedings of the 41st International Conference on Machine Learning , pages 32332–32344, 2024. [25] Ilya Loshchilov and Frank Hutter. Decoupled weight decay regularization, 2019. URL https: //arxiv.org/abs/1711.05101 .[26] Paulius Micikevicius, Sharan Narang, Jonah Alben, Gregory Diamos, Erich Elsen, David Garcia, Boris Ginsburg, Michael Houston, Oleksii Kuchaiev, Ganesh Venkatesh, et al. Mixed precision training. In International Conference on Learning Representations , 2018. [27] Paulius Micikevicius, Dusan Stosic, Neil Burgess, Marius Cornea, Pradeep Dubey, Richard Grisenthwaite, Sangwon Ha, Alexander Heinecke, Patrick Judd, John Kamalu, et al. Fp8 formats for deep learning. arXiv preprint arXiv:2209.05433 , 2022. [28] Denis Paperno, Germán Kruszewski, Angeliki Lazaridou, Ngoc-Quan Pham, Raffaella Bernardi, Sandro Pezzelle, Marco Baroni, Gemma Boleda, and Raquel Fernández. The lambada dataset: Word prediction requiring a broad discourse context. In Proceedings of the 54th annual meeting of the association for computational linguistics (volume 1: Long papers) , pages 1525–1534, 2016. [29] Houwen Peng, Kan Wu, Yixuan Wei, Guoshuai Zhao, Yuxiang Yang, Ze Liu, Yifan Xiong, Ziyue Yang, Bolin Ni, Jingcheng Hu, et al. Fp8-lm: Training fp8 large language models. arXiv preprint arXiv:2310.18313 , 2023. 14 [30] Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael Matena, Yanqi Zhou, Wei Li, and Peter J Liu. Exploring the limits of transfer learning with a unified text-to-text transformer. Journal of machine learning research , 21(140):1–67, 2020. [31] Martin Schiemer, Clemens JS Schaefer, Jayden Parker Vap, Mark James Horeni, Yu Emma Wang, Juan Ye, and Siddharth Joshi. Hadamard domain training with integers for class incremental quantized learning. arXiv preprint arXiv:2310.03675 , 2023. [32] Yuxuan Sun, Ruikang Liu, Haoli Bai, Han Bao, Kang Zhao, Yuening Li, Jiaxin Hu, Xianzhi Yu, Lu Hou, Chun Yuan, et al. Flatquant: Flatness matters for llm quantization. In International Conference on Machine Learning , pages 57587–57613. PMLR, 2025. [33] Gemma Team, Morgane Riviere, Shreya Pathak, Pier Giuseppe Sessa, Cassidy Hardin, Surya Bhupatiraju, Léonard Hussenot, Thomas Mesnard, Bobak Shahriari, Alexandre Ramé, et al. Gemma 2: Improving open language models at a practical size. arXiv preprint arXiv:2408.00118 ,2024. [34] Albert Tseng, Jerry Chee, Qingyao Sun, Volodymyr Kuleshov, and Christopher De Sa. Quip#: Even better llm quantization with hadamard incoherence and lattice codebooks. Proceedings of machine learning research , 235:48630, 2024. [35] Albert Tseng, Tao Yu, and Youngsuk Park. Training llms with mxfp4. In International Conference on Artificial Intelligence and Statistics , pages 1630–1638. PMLR, 2025. [36] Maolin Wang, Seyedramin Rasoulinezhad, Philip HW Leong, and Hayden K-H So. Niti: Training integer neural networks using integer-only arithmetic. IEEE Transactions on Parallel and Distributed Systems , 33(11):3249–3261, 2022. [37] Xiuying Wei, Yunchen Zhang, Yuhang Li, Xiangguo Zhang, Ruihao Gong, Jinyang Guo, and Xianglong Liu. Outlier suppression+: Accurate quantization of large language models by equivalent and effective shifting and scaling. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing , pages 1648–1665, 2023. [38] Haocheng Xi, Han Cai, Ligeng Zhu, Yao Lu, Kurt Keutzer, Jianfei Chen, and Song Han. Coat: Compressing optimizer states and activation for memory-efficient fp8 training. [39] Haocheng Xi, Yuxiang Chen, Kang Zhao, Kai Jun Teh, Jianfei Chen, and Jun Zhu. Jetfire: Efficient and accurate transformer pretraining with int8 data flow and per-block quantization. In 
+
+International Conference on Machine Learning , pages 54049–54063. PMLR, 2024. [40] Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. Smoothquant: Accurate and efficient post-training quantization for large language models. In International Conference on Machine Learning , pages 38087–38099. PMLR, 2023. [41] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. Efficient streaming language models with attention sinks. arXiv preprint arXiv:2309.17453 , 2023. [42] Yuedong Yang, Hung-Yueh Chiang, Guihong Li, Diana Marculescu, and Radu Marculescu. Efficient low-rank backpropagation for vision transformer adaptation. Advances in Neural Information Processing Systems , 36:14725–14736, 2023. [43] Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. Hellaswag: Can a machine really finish your sentence? In Proceedings of the 57th annual meeting of the association for computational linguistics , pages 4791–4800, 2019. 15 Figure 6: Outlier patterns of Weight ( W ), Activation ( X), and Gradient ( GY ) tensors across 300 training steps for all 16 representative blocks of Llama3.2-3B. Each row represents a tensor from a specific layer, and the color indicates the detected outlier pattern at each step. This extended view reveals depth-dependent transitions in gradient outlier patterns: Row-wise patterns appear in early blocks, fade to None in the middle layers, and re-emerge selectively in the K-projection gradient toward the final blocks. 
+
+# A Calibration Algorithm Details 
+
+Outlier Pattern Detection via CV. For a given tensor T ∈ Rm×n, we compute the CV along both dimensions: CV row (T ) = 1
+
+m
+
+> m
+
+X
+
+> i=1
+
+std (Ti, :)
+
+mean (|Ti, :|) + ϵ (9) CV col (T ) = 1
+
+n
+
+> n
+
+X
+
+> j=1
+
+std (T:,j )
+
+mean (|T:,j |) + ϵ (10) where ϵ is a small constant for numerical stability. We then normalize these values by the tensor dimensions to ensure size-independent comparison: 
+
+ˆCV row = CV row /√n (11) 
+
+ˆCV col = CV col /√m (12) The outlier pattern is classified as: • Row-wise : if ˆCV col > τ (high variance across rows within columns, indicating some rows have much larger values). • Column-wise : if ˆCV row > τ (high variance across columns within rows, indicating some columns have much larger values). 16 • None : if both normalized CVs are below the threshold τ .where τ is a predefined threshold. In our experiments, we use τ = 2 .0.
+
+# B Outlier Patterns of Llama3.2-3B 
+
+Figure 6 visualizes the outlier patterns of all 16 representative blocks of Llama3.2-3B across 300 training steps. Three distinct phases emerge along the depth dimension. In early blocks (e.g., block.0 , block.1 ), the gradients of K, V, and O projections exhibit Row-wise outliers. Near the embedding layer, each weight row maps directly to a token-level representation. The loss signal therefore concentrates on a few high-impact tokens, producing token-wise (row-wise) outlier structure in the gradients. In middle blocks ( block.5 –block.21 ), gradient patterns transition to None. Repeated attention, feed-forward, and layer normalization operations diffuse token-specific gradient energy across feature dimensions, distributing magnitudes uniformly and eliminating the row-wise concentration. In late blocks ( block.22 –block.28 ), Row-wise outliers re-emerge selectively in the K-projection gradient. Near the output, attention tends to concentrate on a small set of anchor tokens [ 41 ]. This creates an asymmetry in the attention gradient. The key gradient ∇K S = Q⊤∇S /√d aggregates contributions from all query positions onto each key token. When many queries attend to the same anchor, gradient signals accumulate on that token’s row, producing a row-wise outlier. In contrast, 
+
+∇QS = ∇S K/ √d distributes gradients independently across query positions, so no single row dominates. This asymmetry explains why the row-wise pattern recurs in K but not in Q. Why this transition occurs specifically around block 22 is left for future investigation. Across all three phases, Weight and Activation patterns remain stable throughout training, consistent with Section 4.3. The depth-dependent variation of gradient patterns is structurally rich, yet temporally stable—making them reliably detectable via a short calibration phase. 
+
+# C Detailed Experimental Settings 
+
+We evaluate AdaHOP on four LLM architectures of varying scales: Llama3.2-1B, Llama3.2-3B, Instella-3B, and Llama3.1-8B. All models are trained on the C4 (Colossal Clean Crawled Corpus) dataset [ 30 ] with 4096 tokens and a batch size of 64. We compare AdaHOP against five baseline methods: BF16 full-precision training, which serves as an upper bound on quality; naive MXFP4 quantization without any outlier suppression; MXFP4+Hadamard, which applies uniform IHT to all layers; Tseng et al. [ 35 ], a recent MXFP4 training method; and HALO [ 3], which applies OHT to gradient computation paths. We report training loss, zero-shot accuracy on downstream benchmarks (PIQA [ 4], HellaSwag [ 43 ], ARC-Easy [ 12 ], LAMBADA [ 28 ]), memory consumption, and training throughput. All models are trained using the AdamW optimizer [ 25 ] with a learning rate of 4 × 10 −4 and an epsilon of 10 −8, following a linear warmup schedule over 200 steps. Training is conducted with a global batch size of 128 and a sequence length of 4,096 tokens. Following the Chinchilla optimal scaling law [ 17 ], the number of training tokens is scaled with model size: Llama3.2-1B is trained on 40B tokens, Llama3.2-3B and Instella-3B on 60B tokens each, and Llama3.1-8B on 160B tokens. Gradient norms are clipped to a maximum of 1.0 throughout training. 
+
+# D Theoretical Analysis 
+
+This section presents the key theoretical results and complete proofs that justify AdaHOP’s transform selection strategy presented in Section 5.3. While IHT and OHT are mathematically equivalent in infinite precision, their quantization error characteristics differ significantly depending on the outlier structure. The central insight is that the Hadamard transform mixes values along the dimension it is applied to: right multiplication XH n mixes values within each row (across columns), while left multiplication HmX mixes values within each column (across rows). Consequently, a transform is effective only when it is applied orthogonally to the outlier direction. The following proposition formalizes this, and the complete pattern-transform correspondence is summarized in the table below. 17 Proposition 1 (Transform Effectiveness for Outlier Patterns) . For matrix A ∈ Rm×k with row out-liers, left multiplication reduces the outlier factor by γ(HmA) ≈ 1 
+
+> m
+
+γ(A), while right multiplication leaves it unchanged: γ(AH k) ≈ γ(A). Symmetrically, for matrix B ∈ Rk×n with column outliers, right multiplication yields γ(BH n) ≈ 1 
+
+> n
+
+γ(B), while left multiplication is ineffective.                             
+
+> ABOptimal Transform Improvement ∗
+> Row Col OHT O(√mn )
+> Row Row Partial †O(√k)(IHT) / O(√m)(OHT) Col Col Partial †O(√k)(IHT) / O(√n)(OHT) Col Row IHT O(k)
+> ∗Improvement factor over no transform, where kdenotes the shared (contraction) dimension of C=AB .
+> †For Row-Row, IHT smooths only B’s rows ( O(√k)) while OHT smooths only A’s rows ( O(√m)); neither fully resolves both operands. The symmetric argument holds for Col-Col. This motivates OE (Section D.1).
+
+Let Hd ∈ Rd×d denote the normalized Hadamard matrix of size d × d, satisfying HTd Hd = Id.Recall the outlier factor defined as: 
+
+γ(A) = mn · max i,j |aij |2
+
+∥A∥2
+
+> F
+
+(13) which measures how concentrated the energy is in extreme values. We further classify outlier patterns: • Row pattern : Outliers are concentrated in specific rows, i.e., ∃ row indices I such that 
+
+max j |aij | ≫ median k,j |akj | for i ∈ I .• Column pattern : Outliers are concentrated in specific columns, i.e., ∃ column indices J
+
+such that max i |aij | ≫ median i,k |aik | for j ∈ J .In low-precision matrix multiplication C = AB where A ∈ Rm×k and B ∈ Rk×n, we define the row-column pattern as the case where A exhibits row outliers and B exhibits column outliers. This pattern commonly arises in transformer computations where gradient tensors have token-wise outliers (row pattern) and activation tensors have channel-wise outliers (column pattern). For computing the matrix product C = AB with quantization, we consider two Hadamard transform strategies: 
+
+IHT: Applied to the inner (reduction) dimension k. Requires Hk.
+
+Cinner = Q(AH k) · Q(HTk B) (14) 
+
+OHT: Applied to the outer dimensions m and n. Requires Hm and Hn.
+
+Couter = HTm (Q(HmA) · Q(BH n)) Hn (15) 
+
+Lemma 1 (Hadamard Mixing Direction) . Let Hn ∈ Rn×n be the normalized Hadamard matrix. For a matrix X ∈ Rm×n:
+
+• Right multiplication XH n: mixes values within each row (across columns). 
+
+• Left multiplication HmX: mixes values within each column (across rows). Proof of Proposition 1. For row outliers in A, the high-magnitude values are concentrated in specific rows. Left multiplication HmA computes (HmA)ij = P
+
+> p
+
+(Hm)ip Apj , which mixes different rows’ values in each column. If row r has outliers with magnitude μ, the transformed elements distribute this magnitude across all m rows. Specifically, since |(Hm)ip | = 1 /√m, the peak magnitude is reduced by factor √m. Thus, ∥HmA∥max ≈ 1√m ∥A∥max , yielding γ(HmA) ∝ (∥HmA∥max )2 ≈ 1 
+
+> m
+
+γ(A).Right multiplication AH k mixes columns within each row. Row outliers remain in their original rows since no mixing across rows occurs, hence γ(AH k) ≈ γ(A).The argument for column outliers in B is symmetric. For the row-column pattern ( A has row outliers, B has column outliers), we derive the quantization error bounds. 18 Theorem 1 (Error Bound for Row-Column Pattern) . Let A have row outliers with factor γ(A), and 
+
+B have column outliers with factor γ(B). The quantization error for computing C = AB satisfies: 
+
+IHT: 
+
+∥AB − Cinner ∥F ≤ O
+
+
+
+ϵquant · ∥ A∥F ∥B∥F · pγ(A) · γ(B)
+
+
+
+(16) 
+
+OHT: 
+
+∥AB − Couter ∥F ≤ O
+
+
+
+ϵquant · ∥ A∥F ∥B∥F ·
+
+q γ(A) 
+
+> m
+
+· γ(B)
+
+> n
+
+
+
+(17) 
+
+Proof. For IHT, we apply: • AH k to A: Right multiplication does not reduce row outliers =⇒ γ ≈ γ(A).• HTk B to B: Left multiplication does not reduce column outliers =⇒ γ ≈ γ(B).The quantization error scales with the product of the dynamic ranges (determined by γ). For OHT, we apply: • HmA to A: Left multiplication reduces row outliers =⇒ γ ≈ γ(A)/m .• BH n to B: Right multiplication reduces column outliers =⇒ γ ≈ γ(B)/n .The orthogonal transforms HTm and Hn preserve the Frobenius norm of the error, so the reduction in 
+
+γ directly translates to reduced error bounds. 
+
+Corollary 1 (OHT Improvement Factor) . For the row-column pattern, OHT achieves an improvement factor of: Error inner 
+
+Error outer 
+
+= O  √mn  (18) 
+
+For typical matrix dimensions in transformers ( m, n ∼ 10 3–10 4), this represents a 1–2 order of magnitude reduction in quantization error. 
+
+D.1 OE for Enhanced Precision 
+
+When outliers are severely concentrated, we introduce OE. Following the methodology in Section 5.2, OE is combined with IHT. 
+
+OE Formulation. Given A ∈ Rm×k with row outliers, we decompose A = Aclean + Aoutlier ,where Aoutlier contains only the top-s outlier rows ( s ≪ m; we use s to distinguish from the shared dimension k). The product becomes AB = Aclean B + Aoutlier B. Applying IHT to the clean part and computing the outlier part in BF16: 
+
+Cclean = Q(Aclean Hk) · Q(HTk B) (19) 
+
+Coutlier = Aoutlier · B (BF16, exact) (20) Since Aclean Hk · HTk B = Aclean B in infinite precision, IHT preserves the exact product for the clean path. The outlier path is computed entirely in BF16, incurring no quantization error. 
+
+Theorem 2 (OE Error Bound) . Let A ∈ Rm×k have row outliers concentrated in s rows ( s ≪ m). After extraction: 
+
+γ(Aclean ) ≈ O(1) (21) 
+
+The combined error bound satisfies: 
+
+∥AB − (Cclean + Coutlier )∥F ≤ O
+
+
+
+ϵquant · ∥ Aclean ∥F ∥B∥F ·
+
+q
+
+γ(HTk B)
+
+
+
+(22) 
+
+where γ(HTk B) depends on B’s outlier pattern: γ(HTk B) ≈ γ(B)/k if B has row outliers (smoothed by left multiplication), and γ(HTk B) ≈ O(1) if B has the None pattern. In both cases relevant to OE-Left (RN and RR pattern pairs per Figure 5), the error is substantially reduced compared to the baseline O(ϵquant · ∥ A∥F ∥B∥F · pγ(A) · γ(B)) .
+
+19 Figure 7: Hardware-aware implementation pipeline of AdaHOP. The pipeline consists of four stages: FOID, IHT and Quantization, Fused MXFP4+BF16 GEMM, and Fused Scatter-Add, all implemented as optimized Triton kernels targeting AMD CDNA4 architecture. Note that red block of Fast Outlier Index Detection represents first 64 elements along each column. 
+
+Proof. Decompose AB = Aclean B + Aoutlier B.The outlier path Coutlier = Aoutlier · B is computed in BF16 (full precision), contributing zero quantization error. For the clean path, Aclean Hk · HTk B = Aclean B holds exactly in infinite precision, so the error arises solely from quantization: 
+
+∥Aclean B − Q(Aclean Hk) Q(HTk B)∥F (23) After removing the top-s outlier rows, Aclean has a nearly uniform magnitude distribution with 
+
+γ(Aclean ) ≈ O(1) . Right multiplication Aclean Hk preserves this low outlier factor, since Aclean has no pronounced row or column structure to be disrupted. For B, left multiplication HTk B mixes values across rows (within each column). If B has row outliers, this reduces γ(B) by a factor of k; if B has the None pattern, γ remains O(1) .Thus the quantization error of the clean path scales as: 
+
+O
+
+
+
+ϵquant · ∥ Aclean Hk∥F · ∥ HTk B∥F ·
+
+q
+
+γ(Aclean Hk) · γ(HTk B)
+
+
+
+(24) Using the orthogonality of Hk to preserve Frobenius norms ( ∥Aclean Hk∥F = ∥Aclean ∥F , ∥HTk B∥F =
+
+∥B∥F ) and γ(Aclean Hk) ≈ O(1) , this simplifies to: 
+
+O
+
+
+
+ϵquant · ∥ Aclean ∥F · ∥ B∥F ·
+
+q
+
+γ(HTk B)
+
+
+
+(25) Compared to the baseline error without extraction, O(ϵquant · ∥ A∥F ∥B∥F · pγ(A) · γ(B)) , OE eliminates the pγ(A) amplification factor, which is the dominant source of quantization error when 
+
+A has severe row outliers. 
+
+# E Hardware-Aware Implementation Details 
+
+The AdaHOP pipeline is implemented as fused Triton kernels optimized for AMD CDNA4 architec-ture, as illustrated in Figure 7. The implementation consists of four stages designed to minimize the computational overhead of OE while fully exploiting the hardware’s mixed-precision capabilities. 1. FOID exploits the fixed structure of outlier rows or columns by computing the variance of the first 64 elements along each row (or column) to quickly identify outlier indices. The top-k rows (or columns) by variance are selected as outlier features, and the corresponding entries in the residual tensor are zeroed out. 2. IHT and Quantization apply IHT to the residual tensor (with outliers removed) using 1D FWHT with block size 32, followed by MXFP4 quantization with 1D per-column scaling. For activation tensors in the Forward path, both the quantized residual and the BF16 outlier tensor are saved to the context for backpropagation. 20 3. Fused MXFP4+BF16 GEMM exploits the Compute Unit (CU) architecture of AMD CDNA4, which supports mixed-precision parallel GEMM, to execute the MXFP4 residual multiplica-tion and BF16 outlier multiplication concurrently with a tile size of 64 × 64 .4. Fused Scatter-Add scatters and adds the result of the outlier matmul in-place to the residual matmul result using BF16 accumulation, avoiding the overhead of materializing intermediate results. 21
