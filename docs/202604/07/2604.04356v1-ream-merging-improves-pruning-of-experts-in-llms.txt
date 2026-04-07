@@ -1,0 +1,671 @@
+Title: REAM: Merging Improves Pruning of Experts in LLMs
+
+URL Source: https://arxiv.org/pdf/2604.04356v1
+
+Published Time: Tue, 07 Apr 2026 01:36:49 GMT
+
+Number of Pages: 19
+
+Markdown Content:
+# REAM: Merging Improves Pruning of Experts in LLMs 
+
+Saurav Jha 1,2 ∗ Maryam Hashemzadeh 1,3 Ali Saheb Pasand 1,4 Ali Parviz 1
+
+Min-Joong Lee 5 Boris Knyazev 1,3,6 ∗
+
+> 1
+
+Mila – Quebec AI Institute 2Polytechnique Montréal 3Université de Montréal 
+
+> 4
+
+McGill University 5AI Center, Samsung, South Korea 6Samsung AI Lab, Montreal 
+
+Correspondence: b.knyazev@samsung.com ∗equal contribution 
+
+https://github.com/SamsungSAILMontreal/ream 
+
+https://huggingface.co/collections/SamsungSAILMontreal/ream 
+
+Abstract 
+
+Mixture-of-Experts (MoE) large language models (LLMs) are among the top-performing architectures. The largest models, often with hundreds of billions of parameters, pose significant memory challenges for deployment. Traditional approaches to reduce memory requirements include weight prun-ing and quantization. Motivated by the Router-weighted Expert Activation 
+
+Pruning (REAP) that prunes experts, we propose a novel method, Router-weighted Expert Activation Merging (REAM). Instead of removing experts, REAM groups them and merges their weights, better preserving original performance. We evaluate REAM against REAP and other baselines across multiple MoE LLMs on diverse multiple-choice (MC) question answering and generative (GEN) benchmarks. Our results reveal a trade-off between MC and GEN performance that depends on the mix of calibration data. By controlling the mix of general, math and coding data, we examine the Pareto frontier of this trade-off and show that REAM often outperforms the base-lines and in many cases is comparable to the original uncompressed models. 
+
+1 Introduction 
+
+Mixture-of-Experts (MoE) layers replace a standard feed-forward block in a modern Transformer architecture (Vaswani et al., 2017) with a set of experts and a router that activates only a small subset of them for each token (Jacobs et al., 1991; Shazeer et al., 2017). This conditional computation mechanism allows a model to grow dramatically in parameter count, while keeping the active per-token compute budget comparatively small. For modern LLMs whose performance benefits from scale, MoEs present a practical large-scale design architecture (Jiang et al., 2024; Liu et al., 2024; Yang et al., 2025a; Team et al., 2025). For instance, Switch Transformers (Fedus et al., 2022) showed that sparse routing can push such models toward trillion-parameter scale without a commensurate increase in inference FLOPs. However, this efficiency comes with a fundamental trade-off. While MoEs reduce active computation, all experts must still be stored, so they often trade FLOPs for memory and remain difficult to adapt in resource-constrained settings .A growing line of works suggests that the large parameter budget of MoEs is not used as effectively as intended because many experts become redundant (Chi et al., 2022; Liu et al., 2023; Li et al., 2024; Jaiswal et al., 2025). These motivate the search for methods that remove the redundancy among similar experts without significantly sacrificing model performance. Inspired by traditional compression methods (Frantar et al., 2022; Lin et al., 2024), MoE-based works address the above redundancy through two main directions: expert pruning (He et al., 2024; Lasby et al., 2025) and merging (Li et al., 2024; Chen et al., 2025). These two directions have certain trade-offs. On the one hand, merging preserves more information about all the original experts, but it depends critically on the quality of the grouping mechanism and can force suboptimal or functionally mismatched experts into the 1
+
+> arXiv:2604.04356v1 [cs.AI] 6 Apr 2026
+
+same group. On the other hand, pruning avoids the issues of grouping by dropping the orig-inal experts. In particular, Lasby et al. (2025) proposed Router-weighted Expert Activation Pruning (REAP) that showed benefits of pruning compared to simple merging techniques. Despite their results, the removal of experts may discard their useful knowledge, so REAP may not optimally balance the trade-offs between pruning and merging strategies .To better balance the trade-off between pruning and merging, we propose Router-weighted Expert Activation Merging (REAM) that preserves the knowledge of all experts, while effectively being similar to pruning due to our expert grouping and weighting approaches (Section 4). Our key contributions are as follows: • Method: We propose REAM, a unified expert compression framework with four key com-ponents to balance the trade-offs between merging and pruning in MoE models: (1) an expert similarity metric that combines gate logit similarities with softmax-scaled expert output similarities, capturing both routing-level and representation-level redundancy; 
+
+(2) a pseudo-pruning strategy that produces a few large groups and many singletons simultaneously; (3) enhanced weight alignment through a more informed cost matrix using both activation-based and weight-based costs; (4) a sequential merging procedure that recomputes forward-pass statistics after each layer is merged. • Performance: We evaluate REAM under a 25% and a 50% expert reduction regime on Qwen3 and GLM4.5 MoE LLMs (Yang et al., 2025b;a; Zeng et al., 2025) using eight multiple-choice (MC) benchmarks and six generative (GEN) reasoning and coding bench-marks. We also examine the choice of calibration data by controlling the mixing ratio of general text, math and code data, which allows us to reveal an inherent trade-off between MC and GEN performance. We examine the Pareto frontier of this trade-off and show that REAM often outperforms the baselines. In the 25% reduction regime, REAM performs comparably to, or only slightly below, the original uncompressed models. 
+
+2 Related Work 
+
+SMoE compression. In Sparse Mixture-of-Experts (SMoE, or simply MoE as referred to in this paper), the memory footprint and associated model-loading and communication overhead is tied to the total number of experts, which incurs significant deployment cost even though inference compute is sparse (Jiang et al., 2025). This has led to work on MoE efficiency span both system-level methods that reduce serving overhead without changing the model itself (Xue et al., 2024; Muzio et al., 2024; Cai et al., 2025), and model-level methods that shrink the deployed model via compression techniques like quantization (Dong et al., 2025), low-rank decomposition (Yang et al., 2024; Mi et al., 2026), pruning (Jaiswal et al., 2025) or merging (Li et al., 2024). Model-level compression methods are either static (Chen et al., 2025; Lasby et al., 2025), where a one-shot transformation is applied at deployment time with no additional training, or dynamic (Muqeeth et al., 2024; Nguyen et al., 2025), where training-time updates are made to the model parameters and the router to recover accuracy. Our work is along the static direction, which is more pragmatic than a dynamic one for real-world settings constrained by compute, data availability, privacy constraints, or deployment pipelines that require deterministic, reproducible model transformations. 
+
+Expert pruning and merging. Expert reduction methods in MoEs mainly follow two paradigms: pruning and merging . Pruning removes redundant experts through routing (Chen et al., 2022; Lu et al., 2024; Xie et al., 2024; Lasby et al., 2025) or search-based (Yang et al., 2024) saliency criteria. Compared to pruning, merging combines similar experts in the weight-activation space (Li et al., 2022; Chen et al., 2025; Li et al., 2024; Zhang et al., 2025; He et al., 2024; Chen et al., 2025) or shared-subspace representations (Gu et al., 2025; Li et al., 2026). After the grouping step, merging often aligns the parameters of experts (He et al., 2023; Li et al., 2024; Tran et al., 2025), and then form a merged expert via interpolation or other approaches (Miao et al., 2025; Nguyen et al., 2026). Pruning and merging can be followed by additional compression of experts using singular value decomposition (Li et al., 2024; 2026), quantization (He et al., 2024), or by post-compression adaptation to recover lost performance (Muzio et al., 2024; Huang et al., 2025). In our work, we focus only on the merging step and further compression or adaptation can be complementary to our approach. 2While there are many strong expert pruning and merging methods, we build on REAP (Lasby et al., 2025) that achieved state-of-the-art performance in large-scale settings under 25% and 50% compression regimes. However, REAP removes experts potentially discarding important knowledge especially on the tasks outside of the calibration data domain. More-over, REAP’s advantage over merging is based on the assumption that merging methods tie gate weights and that gate logits are independent from the experts, thereby incurring an irreducible error in merging, which may not be true in practice. 
+
+3 Background 
+
+MoE layer. An MoE layer replaces the feed-forward network in each Transformer (Vaswani et al., 2017) block with a set of N expert networks {Ei}Ni=1 and a learned router producing scores g(x) = xWg ∈ RN that are dependent on the input token x ∈ X. Gate logits are then converted to probabilities σ(x) = Softmax (g(x)) , so the MoE output is: 
+
+y(x) = ∑Ni=1 π(x)i Ei(x), (1) where π(x) = Mask (σ(x), top-k) ∈ RN are the masked gate logits that are set to zero for the logits not in the top-k values of σ(x); top-k is a constant that is much smaller than N,e.g., N = 128 and top-k = 8 in Qwen3 models (Yang et al., 2025a). 
+
+Expert saliency. Central to both merging and pruning is the notion of expert saliency score 
+
+Si that estimates the i-th expert’s importance. For example, routing frequency (Jaiswal et al., 2025) counts how often expert i is selected among the top-k experts: 
+
+Sfreq  
+
+> i
+
+= 1
+
+|X| ∑x∈X 1[i ∈ Top-k(σ(x))] , (2) where Top-k(·) returns the indices of the top-k largest scores. Frequency is simple, but it assumes that all active experts contribute equally to the output, so it can overvalue experts that are chosen with small router scores. REAP refines this by weighting selections by an estimate of contribution magnitude to the layer output (Lasby et al., 2025): 
+
+Sreap  
+
+> i
+
+= 1
+
+|X i| ∑x∈X i π(x)i ∥Ei(x)∥2, (3) where Xi ∈ X is the set of tokens where expert i is active. This formulation better preserves MoE layer outputs and is leveraged in our approach. 
+
+Expert similarity. Expert merging methods typically start by computing the similarity δ
+
+between experts i and j, usually based on expert outputs (Li et al., 2024; Chen et al., 2025): 
+
+δE(i, j) = 1
+
+|X| ∑x∈X sim (Ei(x), Ej(x)) , (4) where sim (·, ·) is a similarity metric, such as cosine similarity. Alternatively, the similarity δ
+
+can be computed based on gate logits (He et al., 2024): 
+
+δg(i, j) = sim ([ g(x1)i, . . . , g(x|X|)i], [g(x1)j, . . . , g(x|X|)j]) , (5) where g(xj)i ∈ R are the gate logits of expert i for token xj of the calibration data X.
+
+Expert grouping and merging. The second step of merging concerns grouping of similar experts. Li et al. (2024) introduced a simple grouping method, in which first the experts with highest Sfreq  
+
+> i
+
+are chosen as the group centroids. Then all other experts are assigned based on the expert similarity in Eq. (4) or (5) . This procedure does not explicitly control the size C of resulting groups. Expert merging is then done as the weighted average per group: 
+
+Wmerged = ∑Ci=1 Sfreq  
+
+> i
+
+Wi
+
+∑Ci=1 Sfreq 
+
+> i
+
+, (6) where Wi are expert i’s weight matrices with neuron permutation alignment (Ainsworth et al., 2023) applied w.r.t. the dominant (centroid) expert. 3Merging                     
+
+> Pseudo-pruning
+> E1 E2 E3 E4 E5 E6 E7
+> Saliency scores
+> E8
+> E1 E2
+> E3 E4
+> E5
+> E6
+> E7
+> E8
+> N' = 4, C= 3
+> E9
+> E9
+> 125
+> router
+> 71257
+> Pruning
+> E1 E2
+> E3 E4
+> E5
+> E6
+> E7
+> E8 E9
+> E7
+> E8
+> E1 E4
+> E2
+> E3
+> E6
+> E9
+> E5
+> Centroid Non-centroid
+
+(a) Merging vs. Pruning vs. Pseudo-pruning E1   
+
+> E2
+> E3
+> E4
+> E1
+> E2
+> E3
+> E4
+> E1
+> E2
+> E3
+> E4
+> E1
+> E2
+> E3
+> E4
+> E1
+> E2
+> E3
+> E4
+> E1
+> E2
+> E3
+> E4
+> group & cluster for
+> pseudo-pruning
+> compute activations for all
+> layers using the original model
+> Calibration
+> dataset
+> Calibration
+> dataset
+> re-compute per-layer activations
+> with the last pseudo-pruned layer
+> 12
+
+(b) Sequential merging 
+
+Figure 1: Illustration of REAM components: a) Comparison of expert compression strate-gies reducing N=9 experts to N′=4. HC-SMoE merging (Chen et al., 2025) clusters all experts by output similarity regardless of saliency (e.g., E1 and E7 grouped together). Pruning retains the top-4 salient experts unchanged and discards the rest. Our REAM’s pseudo-pruning selects the top-4 experts as protected centroids and absorbs remaining experts into their nearest centroid via saliency-weighted merging, leaving other groups as singletons. b) Compared to baseline pruning and merging methods 1⃝ that collect the acti-vations from the original uncompressed model for all layers at once, REAM 2⃝ recomputes the per-layer activations after merging each MoE layer before processing the next layer. 
+
+Gate weights. After obtaining a reduced set of experts, pruning methods typically remove the rows of the gate weights Wg corresponding to the dropped experts as in REAP (Lasby et al., 2025). In contrast, merging methods keep gate weights as is and sum the gate logits per group, which can result in an irreducible error as shown by Lasby et al. (2025) and discussed in Section 2. In our work, we follow REAP and remove the rows of the gate weights that are not corresponding to centroid experts. 
+
+4 Router-weighted Expert Activation Merging 
+
+Aggregated expert similarity. We compute expert similarity as the sum of two similarities: 
+
+δREAM (i, j) = δg(i, j) + ˜δE(i, j), (7) where δg(i, j) is computed as in Eq. (5) and our gated expert similarity ˜δE(i, j) is computed based on Eq. (4): ˜δE(i, j) = 1
+
+|X| ∑x∈X sim (σ(x)i Ei(x), σ(x)j Ej(x)) , (8) where we use gated expert outputs σ(x)i Ei(x), which matches closely the computation of the MoE output in Eq. (1) . It ensures that expert outputs are modulated by the gate, making the similarity metric aware of expert specialization. 
+
+Pseudo-pruning. Given REAP saliency scores Sreap 
+
+i computed over a calibration set X, we group the N experts into N′ < N clusters via a greedy pseudo-pruning procedure. Here, we follow Li et al. (2024) and for each layer ℓ, we designate the N′ experts with the highest saliency as the cluster centroids Cℓ = {c1, . . . , cN′ }, but we sort them in decreasing order of saliency. Then, starting from c1, we greedily assign to it up to C unassigned non-centroid experts Ej that are most similar to c1 based on δREAM (c1, j) in Eq. (7). Since typically N − N′ ≪ N′ · C (e.g., N′ is 25% smaller than N), the set of non-centroid experts is far smaller than the total absorption capacity of all centroids, so most centroids re-ceive no assignments and form singleton groups that pass through unchanged. Accordingly, we call our grouping method pseudo-pruning . Unlike merging methods that tend to cluster experts into many medium-sized groups, pseudo-pruning results in a few large groups while many singletons are left intact (Fig. 1a). 4Activation and weight permutation alignment. In the expert merging step of Eq. (6) ,the weights need to be aligned before computing their weighted average. For example, Li et al. (2024) used the Hungarian algorithm with the cost matrix Cwt computed based on the distances between the weights of the centroid expert ci and expert j. To improve the alignment, we introduce a combined cost matrix C⟨ci ,j⟩ = Cact + Cwt ∈ Rd×d. Here, 
+
+[Cact ]pq = ∥ ¯Hpci − ¯Hqj ∥2 is the distance between the normalized calibration-token activation vectors of the p-th and the q-th neurons across the two experts, and [Cwt ]pq = ∥Wpci − Wqj ∥2
+
+is the distance between their weight matrices W(p) 
+
+> i
+
+. Thus, C⟨ci ,j⟩ combines data-driven signal with a data-independent one so that a matched neuron pair must be consistent in both activation and weight space. The optimal permutation is then applied to reorder the weights of expert j. Using data-based cost alone to find the optimal permutation can be noisy since two neurons might happen to produce similar activations on the calibration batch by coincidence, even if their weights are very different. On the contrary, weight-based cost alone ignores how the model actually uses each neuron in practice – two neurons with similar weights but very different activation patterns (due to how inputs distribute) are still suboptimal to merge. The combined cost matrix balances between both ends. 
+
+Sequential merging. Prior expert pruning and merging methods run a single forward pass through the original, unmodified model to collect per-layer statistics. The pre-collected statistics are then used to compress all layers independently. However, once the experts in layer ℓ are compressed, its modified outputs render the statistics for the subsequent layers as stale. Instead, we propose updating the model outputs to reflect the currently merged layers. As shown in Fig. 1b, after merging layer ℓ, a second forward pass is run through this layer to recompute its activations to be used by the subsequent layer ℓ + 1. This ensures that each layer’s statistics reflect the actual input it will receive at inference time. Since sequential merging requires computing the forward pass through a given MoE layer twice, a genuine concern remains its computational overhead compared to non-sequential merging. However, in practice, we find it to be reasonably fast. For Qwen3-30B-A3B-Instruct-2507 (Yang et al., 2025a), non-sequential merging takes ≈1 hour, while our sequential variant takes ≈1.5 hours, with ≈30 GB of VRAM in both cases. Given that merging is done only once for a given model, the effectiveness of this procedure usually carries more significance than the efficiency. 
+
+5 Experiments 
+
+Setup. We follow evaluation in REAP (Lasby et al., 2025) and evaluate all methods without any fine-tuning after compression. For our testbed, we focus primarily on Qwen3-30B-A3B-Instruct-2507 (Yang et al., 2025a), a 30B-parameter MoE model with N =128 experts per layer, of which top-k=8 are active per token. We additionally validate on the larger Qwen3-Coder-Next and Qwen3-Next-80B-A3B-Instruct (Cao et al., 2026), both 80B-parameter models with 512 experts per layer, and on GLM-4.5-Air (Zeng et al., 2025), a 106B-parameter model with 128 experts per layer. We compress models by merging 25% or 50% of the experts per layer, e.g., reducing from 128 to 96 or 64 experts, respectively. 
+
+Calibration dataset. For calibration, we collect router logits and expert activations on a mixture of three datasets with 3072 sequences of 512 tokens each — C4 (Raffel et al., 2019) for general language understanding, NuminaMath (LI et al., 2024) for mathematical reasoning, and The-Stack-Smol (Kocetkov et al., 2022) for code generation. To study the sensitivity of merging decisions w.r.t. the calibration distribution, we experiment with ten different mixing ratios across these three sources, ranging from math-heavy (0.0:0.7:0.3) to code-heavy (0.1:0.1:0.8) configurations (see Table 3 for the full table of ratios). 
+
+Evaluation. Compressed models are evaluated on two benchmark suites (see Section A.2 for details). The first consists of 8 multiple-choice (MC) tasks following prior work (Chen et al., 2025; Lasby et al., 2025). The second consists of 6 generative (GEN) tasks: IFEval (Zhou et al., 2023), AIME25 (Zhang & Math-AI, 2025), GSM8K (Cobbe et al., 2021), HumanEval (Chen et al., 2021), GPQA-Diamond (Rein et al., 2024), and LiveCodeBench (Jain et al., 2025). 550 55 60    
+
+> MC Score
+> 35
+> 40
+> 45
+> 50
+> 55
+> 60
+> GEN Score
+> 64 experts
+> The-Stack-Smol ratio
+> 0
+> 0.1
+> 0.3
+> 0.5
+> 0.55
+> 0.7
+> 0.8
+> The-Stack-Smol ratio
+> 0
+> 0.1
+> 0.3
+> 0.5
+> 0.55
+> 0.7
+> 0.8
+> 62.5 65.0 67.5 70.0
+> MC Score
+> 50
+> 55
+> 60
+> 65
+> 70
+> 96 experts
+> The-Stack-Smol ratio
+> 0
+> 0.1
+> 0.3
+> 0.5
+> 0.55
+> 0.7
+> 0.8
+> The-Stack-Smol ratio
+> 0
+> 0.1
+> 0.3
+> 0.5
+> 0.55
+> 0.7
+> 0.8
+> REAP
+> HC-SMoE
+> REAM
+> Original
+> MC = GEN
+
+Figure 2: Discriminative (MC) vs. Generative (GEN) trade-off depending on the cali-bration data mixture: benchmark scores with 64 ( left ) and 96 ( right ) experts for REAP, HC-SMoE, and REAM across ten mixing ratios of the calibration data with Qwen3-30B-A3B-Instruct-2507. The marker sizes are proportional to the The-Stack-Smol share of the mixture. We report the mean score within each suite. Since generative tasks are typically more prac-tically relevant and challenging, we present our key results on the GEN suite (Tables 1, 2). 
+
+Baselines. We compare REAM against two expert pruning baselines: frequency-based (Freq) and REAP (Lasby et al., 2025). HC-SMoE (Chen et al., 2025) is used as a merging baseline with average linkage clustering and activation-based permutation alignment. The only hyperparameter of REAM is group size C of pseudo-pruning (Section 4), which is fixed to 16 or 32 depending on the number of experts (Section A.1). 
+
+5.1 Main Results MC vs GEN results. We first compare REAM to baselines at 64 and 96 experts obtained with ten mixing ratios of the calibration dataset on both GEN and MC benchmarks (Fig. 2). We leave the detailed results across the mixing ratios of C4:Math:Code in Fig. 6 and Tables 5-6. Given their reliance on expert saliencies for compression, we observe the performance of Freq, REAP, and REAM to strongly depend on the calibration composition, but not for HC-SMoE. For Freq and REAP, calibrating without any code data (Code = 0 corresponding to the smallest markers in Fig. 2) is catastrophic for code-generation tasks, with HumanEval and LiveCodeBench scores collapsing to near zero despite strong math performance, i.e., agap of over 40 points compared to the best configuration (Table 6). Similarly to Freq and REAP, REAM is also sensitive to the mixing ratio where its best ratio (0 : 0.5 : 0.5) achieves a GEN average of 69.8, within 1.1 points of the uncompressed 128-expert baseline (70.9), while its worst ratio of 0.5 : 0.5 : 0 yields 47.7 (Table 5). By contrast, HC-SMoE’s best and worst averages span only 3.5 points (67.4 vs. 63.9), suggesting its saliency-independent clustering is robust to, but also unable to benefit from, task-aligned calibration. Overall, well-chosen data mixtures help REAM consistently outperform all baselines, with REAP standing second, and HC-SMoE and Freq being roughly tied (Table 1). Table 1: Results at 96 experts on Qwen3-30B-A3B-Instruct-2507. Each method uses the calibration mixture achieving its best GEN score; bold is the best among compressed models. 
+
+Method N C4:Math:Code IFEval AIME25 GSM8K GPQA HumanEval LCB GEN Original 128 – 90.4 56.7 89.3 47.0 93.3 48.6 70.9 Freq 96 0:0.3:0.7 87.8 60 .0 82.9 36.9 93.9 44.0 67.6 HC-SMoE 96 0.5:0:0.5 88.2 60 .0 84.7 34.3 91.5 45.9 67.4 REAP 96 0.2:0.25:0.55 89.6 50.0 87.9 39.4 94.5 50.3 68.6 REAM 96 0:0.5:0.5 89.9 60 .0 86.3 38.4 93.3 51 .0 69.8 
+
+6c4                         
+
+> MC
+> c4
+> GEN
+> math
+> MC
+> math
+> GEN
+> stack
+> MC
+> stack
+> GEN
+> MC
+> GEN
+> Freq
+> REAP
+> HC-SMoE
+> REAM
+> +0.96 -0.85 -0.37 +0.01 -0.40 +0.63 -0.77
+> +0.96 -0.83 -0.19 +0.04 -0.57 +0.59 -0.86
+> -0.77 -0.09 -0.19 -0.56 +0.79 +0.71 +0.37
+> +0.95 -0.82 -0.17 -0.05 -0.57 +0.67 -0.90
+> 96 Experts
+> 1.0
+> 0.5
+> 0.0
+> 0.5
+> 1.0
+> Pearson r
+
+(a) Correlation r across methods and domains 50 55 60 65 70               
+
+> 30
+> 40
+> 50
+> 60
+> 70
+> 96 Experts (25% reduction)
+> Freq HV=429.7 ·7/10
+> REAP HV=878.0 ·5/10
+> REAM HV=920.3 ·7/10
+> HC-SMoE HV=853.3 ·2/10
+
+(b) Pareto frontiers per method 
+
+Figure 3: Additional analyses for 96 experts: a) Pearson correlation r between calibration datasets (C4, Math, Code) and MC/GEN scores, and between MC and GEN scores them-selves, for each merging method. b) Pareto frontiers where each point is one of 10 calibration mixtures. Filled markers denote Pareto-optimal configurations not simultaneously dom-inated on MC and GEN by any other mixture of the same method, and hollow markers denote dominated ones. The hypervolume (HV) measures the area of the MC ×GEN plane dominated by each method’s frontier relative to a shared reference point, quantifying its overall performance ceiling. Per-method offsets are applied for better visibility. 
+
+Calibration data vs. performance correlation. To understand the systematic structure underlying the calibration data mixtures, we further analyze the performance correlations r
+
+for different methods on the 96-expert setting. Fig. 3a shows that for Freq, REAP, and REAM, the proportion of C4 data in the calibration mixture is strongly positively correlated with MC scores ( r ≥ 0.95) yet strongly negatively correlated with GEN scores ( r ≤ − 0.82), indicating a fundamental MC–GEN trade-off driven by general-domain calibration. Conversely, Code proportion is consistently positively correlated with GEN ( r ≥ 0.59) while negatively correlated with MC ( r ≤ − 0.40), and math proportion has negligible correlation with either suite. The strong negative MC–GEN correlation for these three methods shows that no single calibration dataset simultaneously maximizes both performances. HC-SMoE shows an exception to this trend. While its C4–MC correlation is strongly negative, its stack–MC and MC–GEN correlations are positive. Such counterintuitive behavior can be attributed to HC-SMoE’s grouping decisions being largely invariant to what calibration data is provided. We provide further analysis and discussion in Section A.3. 
+
+5.2 Pareto Analysis of MC vs GEN Setup. A real-world deployment scenario of a compressed MoE is often concerned with the best-case comparison across methods at equal performance levels, e.g. , while preserving an MC score of 65, what is the best GEN any calibration ratio can achieve for REAM vs. HC-SMoE? 
+
+Hence, we study the sensitivity of each compression method to the choice of calibration mixture by examining each method’s configurations in the joint MC ×GEN space. Here, each of the 10 mixing ratios yields one point per method. The convex hull enclosing all 10 points gives us the Pareto frontier, i.e. , the subset of configurations that are not simultaneously dominated on both metrics by any other configuration of the same method. Lastly, to quantify how much of the MC ×GEN space each method’s frontier occupies, we compute the hypervolume (HV) indicator, i.e. , the area of the MC ×GEN plane dominated by the Pareto frontier relative to a fixed reference point set one unit below the global minimum on each axis. A larger HV means the method can achieve better MC–GEN trade-offs across a wider range of calibration preferences. Together with the fraction of Pareto-optimal configurations 
+
+n/ 10, which measures how many of the 10 ratios lie on the frontier, we characterize both the performance ceiling and the calibration robustness of each method. 
+
+Results. At 25% compression, HC-SMoE has the lowest n/10 ( = 2 / 10) and low HV (853.3), meaning that nearly all its configurations are clustered in a tight band regardless of whether calibration data is majorly text, math, or code (Fig. 3b). While this was a design choice in 7Table 2: GEN benchmark results on additional models with a 25% expert reduction: 512 → 384 experts for Qwen3-Next-80B-A3B-Instruct and Qwen3-Coder-Next, and 128 → 96 for GLM-4.5-Air. The calibration mixture is fixed at C4 : Math : Code = 0 : 0.3 : 0.7 to favor GEN tasks; bold is the best among compressed models.                                                                                  
+
+> Model Method NIFEval AIME25 GSM8K GPQA HumanEval LCB GEN
+> Qwen3-80B-A3B Original 512 93.4 80.0 78.6 47.0 95.1 43.2 72.9 REAP 384 92.8 66.7 77.7 42.4 94.5 43.6 69.6 REAM 384 93.4 73.3 78.1 46.5 93.9 43.7 71.5
+> Qwen3-Coder Original 512 89.6 80.0 85.4 42.4 92.7 47.5 72.9 REAP 384 87.5 70.0 86.4 37.9 94.5 47.7 70.7 REAM 384 89.3 80.0 85.3 40.4 94.5 48.0 72.9
+> GLM-4.5-Air Original 128 90.4 83.3 94.8 42.9 93.9 57.4 77.1 REAP 96 80.6 76.7 93.9 38.4 90.2 51.7 71.9 REAM 96 83.6 83.3 94.9 37.9 90.2 53.7 73.9
+
+HC-SMoE (Chen et al., 2025), our analysis reaffirms that HC-SMoE’s performance envelope is narrow and that calibration selection offers little leverage. Freq shows the opposite failure mode — a high n/10 (7 / 10) driven by a wide scatter of configurations across the MC ×GEN plane, yet the lowest HV (429.7) of all methods. REAP achieves a higher HV (878.0) with a moderate n/10 (5 / 10), thus tracing a clearer MC–GEN trade-off curve that shifts predictably with calibration mixtures. However, its frontier saturates in the high-GEN region where code-heavy ratios dominate. Our REAM attains both the highest HV (920.3) and the highest n/10 (7 / 10). This shows that for virtually any MC floor, there exists a calibration mixture under which REAM’s frontier dominates all other methods on GEN, confirming that its advantage is not confined to a single lucky ratio but holds broadly across the calibration space. Fig. 7 in Appendix further shows a similar analysis at 64 experts. 
+
+5.3 Larger Models Setup. We assess the effectiveness of REAM on two variants of Qwen3-Next with a larger set of 512 experts and 80B parameters: Qwen3-Next-80B-A3B-Instruct (Yang et al., 2025a) and Qwen3-Coder-Next (Cao et al., 2026), and on GLM-4.5-Air (Zeng et al., 2025) with 128 experts and 106B parameters. These models were evaluated without any additional tuning of REAM or baselines (other than fixing C to 32 or 16, Section A.1). Since performing merging and evaluation for all the mixing ratios is expensive, we fix the mixture at a code heavy ratio of 0 : 0.3 : 0.7 to favor the overall GEN score following our analysis in Section 5.1. Additional mixing ratios and ablations for Qwen3-Coder-Next are reported in Table 4. 
+
+Results. We show that REAM matches the GEN score of the uncompressed Qwen3-Coder-Next at 25% compression, thus demonstrating near-lossless compression on a strong code model (Table 2). Moreover, REAM consistently outperforms REAP on GEN across all the three models. On several tasks (IFEval, AIME25 and GSM8K), REAM often recovers the full original score while REAP lags behind. Similar to Table 1, GPQA remains the most sensitive task where both the methods show notable drops. Further ablations of REAM on Qwen3-Coder-Next (Table 4) show trends similar to that of Qwen3-30B-A3B-Instruct-2507. Here, AIME25 is highly sensitive to the overall calibration mix while both GSM8K and HumanEval are boosted by code-heavy calibration with REAM to the point of surpassing the original uncompressed model. 
+
+5.4 Additional Experiments Ablation study. Fig. 4a reports the effect of removing each REAM component in isolation at 96 experts with a GEN-favoring calibration mixture of 0.1:0.1:0.8. We observe the largest single degradation ( ∆AVG = −8.7) to come from replacing REAP’s saliency score (Eq. (3) )with routing frequency (Eq. (2) ). This finding is in line with recent works confirming router frequency as an unreliable proxy for expert importance given that it ignores the magnitude of each expert’s actual contribution to the layer output (Lasby et al., 2025; Mi et al., 2026). 8REAM (full)           
+
+> only align activations
+> w/o seq. merge
+> w/o gate logits sim. g
+> w/o pseudo-prune
+> w/o gated experts sim. E
+> freq. saliency
+> 50
+> 60
+> 70
+> Score
+> 63.2 63.1 62.4 63.1
+> 59.3
+> 62.9
+> 51.7
+> 69.5 68.7 68.3 66.8 66.3
+> 58.0
+> 63.5
+> MC (discriminative) GEN (generative)
+
+(a) Avg. MC and GEN scores MC GEN AVG IFEval                                                       
+
+> AIME25
+> GSM8K GPQA
+> HumanEval
+> LiveCodeBench
+> freq. saliency
+> w/o gated experts sim. E
+> w/o pseudo-prune
+> w/o gate logits sim. g
+> w/o seq. merge
+> only align activations
+> -11.5 -6.0 -8.7 -5.2 -10.0 -3.1 -7.6 -1.2 -8.7
+> -0.3 -11.5 -5.9 -3.0 -26.7 -2.8 -6.1 -12.2 -17.9
+> -3.9 -3.2 -3.6 -2.5 -6.7 +0.6 -6.6 -0.6 -3.4
+> -0.1 -2.7 -1.4 -1.4 -13.4 -0.6 +1.0 -0.6 -0.9
+> -0.8 -1.2 -1.0 -1.1 -3.4 -0.2 -2.5 +0.0 +0.2
+> -0.1 -0.8 -0.5 -0.3 -3.4 +0.9 -2.0 +0.0 -0.1
+> score relative to full REAM (mixing ratio 0.1:0.1:0.8, 96 experts)
+
+(b) Per-task score drop ( ∆)
+
+Figure 4: Ablation of REAM components with 96 experts: (a) MC and GEN scores for each ablation variant; (b) Per-task score drop ( ∆) relative to the full REAM performance. Our second-largest drop stems from removing gate softmax scaling ( σ(x) in Eq. (8) ) before computing pairwise output similarity ( ∆AVG = −5.9, ∆GEN = −11.5) during grouping. This reaffirms that ignoring the router’s confidence in grouping similarity treats all experts symmetrically, thus allowing experts that produce similar raw outputs but are preferred on different token distributions to be incorrectly merged. We also observe removing pseudo-pruning to incur a moderate penalty ( ∆AVG = −3.6), which confirms the importance of our grouping compared to the one used in MC-SMoE (Li et al., 2024). We also find the expert co-activation signals from gate logit similarity ( δg in Eq. (7) ) and the re-computation of activations from sequential merging to be each contributing smaller but consistent gains of 
+
+∆AVG = −1.4 and −1.0 respectively. Finally, replacing the combined activation and weight alignment C⟨ci ,j⟩ with activation-only alignment Cact yields the smallest penalty ( ∆AVG = 
+
+−0.5), suggesting that the weight-based cost matrix provides a marginal but consistent regularization in neuron pair matching (Section 4). Removing all our components together would make REAM equivalent to MC-SMoE (Li et al., 2024). 200 225 250 275 300 325 350 375     
+
+> Average Pre-logit Rank
+> 45
+> 50
+> 55
+> 60
+> 65
+> AVG Performance (96 experts)
+> Freq (r=0.70, p=0.025)
+> REAP (r=0.85, p=0.002)
+> HC-SMoE (r=-0.10, p=0.775)
+> REAM (r=0.95, p=0.000)
+
+Figure 5: Correlation between avg. pre-logit ranks and AVG benchmark scores across 10 calibration ratios for 96 experts. 
+
+Rank analyses. To study whether expert merg-ing strategies that better preserve the represen-tational capacity of the compressed model trans-late into higher benchmark scores, we compute the average numerical rank of the pre-logit em-beddings for each method across all ten calibra-tion mixtures and correlate it with the down-stream performance. Fig. 5 shows that REAM has the steepest and tightest regression curve where rank is an excellent predictor of perfor-mance. REAP follows closely but with a wider scatter while Freq has the least rank-efficiency. The strong correlation between rank and perfor-mances of these methods vouches for using rank as a cheap, task-agnostic proxy to estimate the optimal calibration mixtures in merging. 
+
+6 Conclusion 
+
+We propose REAM as an expert compression method that shows strong results across gen-erative (GEN) benchmarks at 25% and 50% compression rates. We find several challenges for expert compression. First, no single method dominates across all setups and tasks: the baseline merging method (HC-SMoE) balances discriminative (MC) and generative (GEN) performance, while REAP and REAM can dominate either MC or GEN. Second, the trade-off between MC and GEN is surprising. MC tasks are generally considered easier, yet expert compression deteriorates them under certain calibration mixtures, indicating that MC and GEN may rely on different subsets of experts. Understanding this asymmetry could inform mixture-aware compression methods that allocate capacity differently across expert groups. Finally, benchmarks with small sample sizes (e.g., AIME25 with 30 problems) introduce considerable variance, so future work should explore larger and more diverse evaluation suites to more accurately estimate the gap with the uncompressed models. 9Acknowledgments 
+
+Saurav Jha is supported by the IVADO postdoctoral fellowship and the Canada First Re-search Excellence Fund. The experiments were in part enabled by computational resources provided by Calcul Québec and Compute Canada. 
+
+References 
+
+Samuel K Ainsworth, Jonathan Hayase, and Siddhartha Srinivasa. Git re-basin: Merging models modulo permutation symmetries. In ICLR , 2023. 3 Luisa Bentivogli, Peter Clark, Ido Dagan, and Danilo Giampiccolo. The fifth pascal recog-nizing textual entailment challenge. TAC , 7(8):1, 2009. 15 Weilin Cai, Juyong Jiang, Le Qin, Junwei Cui, Sunghun Kim, and Jiayi Huang. Shortcut-connected expert parallelism for accelerating mixture of experts. In International Conference on Machine Learning , pp. 6211–6228. PMLR, 2025. 2 Ruisheng Cao, Mouxiang Chen, Jiawei Chen, Zeyu Cui, Yunlong Feng, Binyuan Hui, Yuheng Jing, Kaixin Li, Mingze Li, Junyang Lin, et al. Qwen3-coder-next technical report. arXiv preprint arXiv:2603.00729 , 2026. 5, 8, 17 I-Chun Chen, Hsu-Shen Liu, Wei-Fang Sun, Chen-Hao Chao, Yen-Chang Hsu, and Chun-Yi Lee. Retraining-free merging of sparse mixture-of-experts via hierarchical clustering, 2025. URL https://openreview.net/forum?id=yeeIGM3N6w . 1, 2, 3, 4, 5, 6, 8 Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, Alex Ray, Raul Puri, Gretchen Krueger, Michael Petrov, Heidy Khlaaf, Girish Sastry, Pamela Mishkin, Brooke Chan, Scott Gray, Nick Ryder, Mikhail Pavlov, Alethea Power, Lukasz Kaiser, Mo-hammad Bavarian, Clemens Winter, Philippe Tillet, Felipe Petroski Such, Dave Cummings, Matthias Plappert, Fotios Chantzis, Elizabeth Barnes, Ariel Herbert-Voss, William Hebgen Guss, Alex Nichol, Alex Paino, Nikolas Tezak, Jie Tang, Igor Babuschkin, Suchir Balaji, Shantanu Jain, William Saunders, Christopher Hesse, Andrew N. Carr, Jan Leike, Josh Achiam, Vedant Misra, Evan Morikawa, Alec Radford, Matthew Knight, Miles Brundage, Mira Murati, Katie Mayer, Peter Welinder, Bob McGrew, Dario Amodei, Sam McCandlish, Ilya Sutskever, and Wojciech Zaremba. Evaluating large language models trained on code, 2021. 5, 15 Tianyu Chen, Shaohan Huang, Yuan Xie, Binxing Jiao, Daxin Jiang, Haoyi Zhou, Jianxin Li, and Furu Wei. Task-specific expert pruning for sparse mixture-of-experts. ArXiv ,abs/2206.00277, 2022. URL https://api.semanticscholar.org/CorpusID:249240535 . 2 Zewen Chi, Li Dong, Shaohan Huang, Damai Dai, Shuming Ma, Barun Patra, Saksham Singhal, Payal Bajaj, Xia Song, Xian-Ling Mao, et al. On the representation collapse of sparse mixture of experts. Advances in Neural Information Processing Systems , 35:34600– 34613, 2022. 1 Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina Toutanova. Boolq: Exploring the surprising difficulty of natural yes/no questions. In Proceedings of the 2019 conference of the north American chapter of the association for computational linguistics: Human language technologies, volume 1 (long and short papers) ,pp. 2924–2936, 2019. 15 Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. Think you have solved question answering? try arc, the ai2 reasoning challenge. arXiv preprint arXiv:1803.05457 , 2018. 15 Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. Training verifiers to solve math word problems. arXiv preprint arXiv:2110.14168 , 2021. 5, 15 10 Peijie Dong, Lujun Li, Yuedong Zhong, DaYou Du, Ruibo FAN, Yuhan Chen, Zhenheng Tang, Qiang Wang, Wei Xue, Yike Guo, and Xiaowen Chu. STBLLM: Breaking the 1-bit barrier with structured binary LLMs. In The Thirteenth International Conference on Learning Representations , 2025. URL https://openreview.net/forum?id=6XUSDvBFkV . 2 William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research ,23(120):1–39, 2022. 1 Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. Gptq: Accurate post-training quantization for generative pre-trained transformers. arXiv preprint arXiv:2210.17323 , 2022. 1 Leo Gao, Jonathan Tow, Stella Biderman, Sid Black, Anthony DiPofi, Charles Foster, Lau-rence Golding, Jeffrey Hsu, Kyle McDonell, Niklas Muennighoff, et al. A framework for few-shot language model evaluation. Zenodo , 2021. 15 Hao Gu, Wei Li, Lujun Li, Qiyuan Zhu, Mark Lee, Shengjie Sun, Wei Xue, and Yike Guo. Delta decompression for moe-based llms compression. Proceedings of Machine Learning Research , 267:20497–20514, 2025. 2 Shwai He, Run-Ze Fan, Liang Ding, Li Shen, Tianyi Zhou, and Dacheng Tao. Merging experts into one: Improving computational efficiency of mixture of experts. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing , pp. 14685–14691, 2023. 2 Shwai He, Daize Dong, Liang Ding, and Ang Li. Demystifying the compression of mixture-of-experts through a unified framework. arXiv preprint arXiv:2406.02500 , 2, 2024. 1, 2, 3Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. Measuring massive multitask language understanding. In International Conference on Learning Representations , 2021. URL https://openreview.net/forum?id= d7KBjmI3GmQ . 15 Weizhong Huang, Yuxin Zhang, Xiawu Zheng, Fei Chao, Rongrong Ji, and Liujuan Cao. Discovering important experts for mixture-of-experts models pruning through a theoret-ical perspective. In The Thirty-ninth Annual Conference on Neural Information Processing Systems , 2025. URL https://openreview.net/forum?id=7kQjbCQwtT . 2 Robert A Jacobs, Michael I Jordan, Steven J Nowlan, and Geoffrey E Hinton. Adaptive mixtures of local experts. Neural computation , 3(1):79–87, 1991. 1 Naman Jain, King Han, Alex Gu, Wen-Ding Li, Fanjia Yan, Tianjun Zhang, Sida Wang, Armando Solar-Lezama, Koushik Sen, and Ion Stoica. Livecodebench: Holistic and contamination free evaluation of large language models for code. In The Thirteenth International Conference on Learning Representations , 2025. URL https://openreview.net/ forum?id=chfJJYC3iL . 5, 15 Ajay Jaiswal, Jianyu Wang, Yixiao Li, Pingzhi Li, Tianlong Chen, Zhangyang Wang, Chong Wang, Ruoming Pang, and Xianzhi Du. Finding fantastic experts in moes: A unified study for expert dropping strategies and observations. arXiv preprint arXiv:2504.05586 ,2025. 1, 2, 3 Albert Q Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, et al. Mixtral of experts. arXiv preprint arXiv:2401.04088 , 2024. 1 Yinsicheng Jiang, Yao Fu, Yeqi Huang, Ping Nie, Zhan Lu, Leyang Xue, Congjie He, Man-Kit Sit, Jilong Xue, Li Dong, Ziming Miao, DaYou Du, Tairan Xu, Kai Zou, Edoardo Ponti, and Luo Mai. Moe-CAP: Benchmarking cost, accuracy and performance of sparse mixture-of-experts systems. In The Thirty-ninth Annual Conference on Neural Information Processing Systems Datasets and Benchmarks Track , 2025. URL https://openreview.net/forum?id= k2fWVhG0u5 . 2 11 Denis Kocetkov, Raymond Li, Loubna Ben Allal, Jia Li, Chenghao Mou, Carlos Muñoz Fer-randis, Yacine Jernite, Margaret Mitchell, Sean Hughes, Thomas Wolf, Dzmitry Bahdanau, Leandro von Werra, and Harm de Vries. The stack: 3 tb of permissively licensed source code. Preprint , 2022. 5 Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with pagedattention. In Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles , 2023. 15 Mike Lasby, Ivan Lazarevich, Nish Sinnadurai, Sean Lie, Yani Ioannou, and Vithursan Thangarasa. Reap the experts: Why pruning prevails for one-shot moe compression. 
+
+arXiv preprint arXiv:2510.13999 , 2025. 1, 2, 3, 4, 5, 6, 8 Jia LI, Edward Beeching, Lewis Tunstall, Ben Lipkin, Roman Soletskyi, Shengyi Costa Huang, Kashif Rasul, Longhui Yu, Albert Jiang, Ziju Shen, Zihan Qin, Bin Dong, Li Zhou, Yann Fleureau, Guillaume Lample, and Stanislas Polu. Numinamath. 
+
+[https://huggingface.co/datasets/AI-MO/NuminaMath-1.5](https://github.com/ project-numina/aimo-progress-prize/blob/main/report/numina_dataset.pdf) , 2024. 5Lujun Li, Qiyuan Zhu, Jiacheng Wang, Xiaoyu Qin, Wei Li, Hao Gu, Sirui Han, and Yike Guo. Sub-moe: Efficient mixture-of-expert llms compression via subspace expert merging. In Proceedings of the AAAI Conference on Artificial Intelligence , volume 40, pp. 22994–23002, 2026. 2 Margaret Li, Suchin Gururangan, Tim Dettmers, Mike Lewis, Tim Althoff, Noah A. Smith, and Luke Zettlemoyer. Branch-train-merge: Embarrassingly parallel training of expert language models. In First Workshop on Interpolation Regularizers and Beyond at NeurIPS 2022 , 2022. URL https://openreview.net/forum?id=SQgVgE2Sq4 . 2 Pingzhi Li, Zhenyu Zhang, Prateek Yadav, Yi-Lin Sung, Yu Cheng, Mohit Bansal, and Tianlong Chen. Merge, then compress: Demystify efficient SMoe with hints from its routing policy. In The Twelfth International Conference on Learning Representations , 2024. URL https://openreview.net/forum?id=eFWG9Cy3WK . 1, 2, 3, 4, 5, 9 Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangx-uan Xiao, Xingyu Dang, Chuang Gan, and Song Han. Awq: Activation-aware weight quantization for on-device llm compression and acceleration. Proceedings of machine learning and systems , 6:87–100, 2024. 1 Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao Wu, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenyu Zhang, Chong Ruan, et al. Deepseek-v3 technical report. arXiv preprint arXiv:2412.19437 , 2024. 1 Boan Liu, Liang Ding, Li Shen, Keqin Peng, Yu Cao, Dazhao Cheng, and Dacheng Tao. Diversifying the mixture-of-experts representation for language models with orthogonal optimizer. In European Conference on Artificial Intelligence , 2023. URL 
+
+https://api.semanticscholar.org/CorpusID:264146569 . 1 Xudong Lu, Qi Liu, Yuhui Xu, Aojun Zhou, Siyuan Huang, Bo Zhang, Junchi Yan, and Hongsheng Li. Not all experts are equal: Efficient expert pruning and skipping for mixture-of-experts large language models. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pp. 6159–6172, 2024. 2 Zhendong Mi, Yixiao Chen, Pu Zhao, Xiaodong Yu, Hao Wang, Yanzhi Wang, and Shaoyi Huang. Effective moe-based llm compression by exploiting heterogeneous inter-group experts routing frequency and information density. arXiv preprint arXiv:2602.09316 , 2026. 2, 8 Ruijie Miao, Yilun Yao, Zihan Wang, Zhiming Wang, Bairen Yi, LingJun Liu, Yikai Zhao, and Tong Yang. Mergemoe: Efficient compression of moe models via expert output merging, 2025. URL https://openreview.net/forum?id=jfZF7nJnqx . 2 12 Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. Can a suit of armor conduct electricity? a new dataset for open book question answering. In Proceedings of the 2018 conference on empirical methods in natural language processing , pp. 2381–2391, 2018. 15 Mohammed Muqeeth, Haokun Liu, and Colin Raffel. Soft merging of experts with adaptive routing. Transactions on Machine Learning Research , 2024. ISSN 2835-8856. URL https: //openreview.net/forum?id=7I199lc54z . Featured Certification. 2 Alexandre Muzio, Alex Sun, and Churan He. Seer-moe: Sparse expert efficiency through regularization for mixture-of-experts. arXiv preprint arXiv:2404.05089 , 2024. 2 Dung Viet Nguyen, Anh Nguyen Thi, Minh Hoang Nguyen, Luc Nguyen, Shiqi Jiang, Ethan Fetaya, Linh Duy Tran, Gal Chechik, and Tan Minh Nguyen. Expert merging in sparse mixture of experts with nash bargaining. In The Fourteenth International Conference on Learning Representations , 2026. URL https://openreview.net/forum?id=JLe9xfd0ln . 2 Viet Dung Nguyen, Minh Nguyen Hoang, Luc Nguyen, Rachel Teo, Tan Minh Nguyen, and Linh Duy Tran. CAMEx: Curvature-aware merging of experts. In The Thirteenth International Conference on Learning Representations , 2025. URL https://openreview.net/ forum?id=nT2u0M0nf8 . 2 Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael Matena, Yanqi Zhou, Wei Li, and Peter J. Liu. Exploring the limits of transfer learning with a unified text-to-text transformer. arXiv e-prints , 2019. 5 David Rein, Betty Li Hou, Asa Cooper Stickland, Jackson Petty, Richard Yuanzhe Pang, Julien Dirani, Julian Michael, and Samuel R Bowman. Gpqa: A graduate-level google-proof q&a benchmark. In First conference on language modeling , 2024. 5, 15 Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. Winogrande: An adversarial winograd schema challenge at scale. arXiv preprint arXiv:1907.10641 , 2019. 15 Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. In International Conference on Learning Representations , 2017. 1 Kimi Team, Yifan Bai, Yiping Bao, Guanduo Chen, Jiahao Chen, Ningxin Chen, Ruijue Chen, Yanru Chen, Yuankun Chen, Yutian Chen, et al. Kimi k2: Open agentic intelligence. arXiv preprint arXiv:2507.20534 , 2025. 1 Viet-Hoang Tran, Van-Hoan Trinh, Khanh Vinh Bui, and Tan Minh Nguyen. On linear mode connectivity of mixture-of-experts architectures. In The Thirty-ninth Annual Conference on Neural Information Processing Systems , 2025. 2 Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. In NeurIPS , 2017. 1, 3 Yanyue Xie, Zhi Zhang, Ding Zhou, Cong Xie, Ziang Song, Xin Liu, Yanzhi Wang, Xue Lin, and Xu An. Moe-pruner: Pruning mixture-of-experts large language model using the hints from its router. arXiv preprint arXiv:2410.12013 , 3, 2024. 2 Leyang Xue, Yao Fu, Zhan Lu, Luo Mai, and Mahesh Marina. Moe-infinity: Activation-aware expert offloading for efficient moe serving. arXiv preprint arXiv:2401.14361 , 3, 2024. 2An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388 , 2025a. 1, 2, 3, 5, 8, 18, 19 An Yang, Bowen Yu, Chengyuan Li, Dayiheng Liu, Fei Huang, Haoyan Huang, Jiandong Jiang, Jianhong Tu, Jianwei Zhang, Jingren Zhou, Junyang Lin, Kai Dang, Kexin Yang, Le Yu, Mei Li, Minmin Sun, Qin Zhu, Rui Men, Tao He, Weijia Xu, Wenbiao Yin, Wenyuan Yu, Xiafei Qiu, Xingzhang Ren, Xinlong Yang, Yong Li, Zhiying Xu, and Zipeng Zhang. Qwen2.5-1m technical report. arXiv preprint arXiv:2501.15383 , 2025b. 2 13 Cheng Yang, Yang Sui, Jinqi Xiao, Lingyi Huang, Yu Gong, Yuanlin Duan, Wenqi Jia, Miao Yin, Yu Cheng, and Bo Yuan. Moe-i2: Compressing mixture of experts models through inter-expert pruning and intra-expert low-rank decomposition. In Findings of the Association for Computational Linguistics: EMNLP 2024 , pp. 10456–10466, 2024. 2 Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. Hellaswag: Can a machine really finish your sentence? In Proceedings of the 57th annual meeting of the association for computational linguistics , pp. 4791–4800, 2019. 15 Aohan Zeng, Xin Lv, Qinkai Zheng, Zhenyu Hou, Bin Chen, Chengxing Xie, Cunxiang Wang, Da Yin, Hao Zeng, Jiajie Zhang, et al. Glm-4.5: Agentic, reasoning, and coding (arc) foundation models. arXiv preprint arXiv:2508.06471 , 2025. 2, 5, 8 Yifan Zhang and Team Math-AI. American invitational mathematics examination (aime) 2025, 2025. 5, 15 Zeliang Zhang, Xiaodong Liu, Hao Cheng, Chenliang Xu, and Jianfeng Gao. Diversifying the expert knowledge for task-agnostic pruning in sparse mixture-of-experts. In Wanxiang Che, Joyce Nabende, Ekaterina Shutova, and Mohammad Taher Pilehvar (eds.), Findings of the Association for Computational Linguistics: ACL 2025 , pp. 86–102, Vienna, Austria, July 2025. Association for Computational Linguistics. ISBN 979-8-89176-256-5. doi: 10.18653/ v1/2025.findings-acl.4. URL https://aclanthology.org/2025.findings-acl.4/ . 2 Jeffrey Zhou, Tianjian Lu, Swaroop Mishra, Siddhartha Brahma, Sujoy Basu, Yi Luan, Denny Zhou, and Le Hou. Instruction-following evaluation for large language models, 2023. URL https://arxiv.org/abs/2311.07911 . 5, 15 14 A Appendix 
+
+A.1 Hyperparameters 
+
+The only hyperparameter of REAM is group size C of pseudo-pruning (Section 4) is fixed to 16 for Qwen3-30B-A3B-Instruct-2507 (when compressed to 96 experts) or to 32 (when compressed to 64 experts); 32 for Qwen3-Coder-Next and Qwen3-Next-80B-A3B-Instruct and to 16 for GLM-4.5-Air. A general idea behind this choice is that for models with more experts originally or more experts to be merged, we found it beneficial to increase C. This hyperparameter is not heavily tuned and is set once for each model and compression ratio. 
+
+A.2 MC and GEN Tasks 
+
+The following 8 MC tasks are used for evaluation: WinoGrande (Sakaguchi et al., 2019), the Challenge and Easy set in AI2 Reasoning Challenge (ARC) (Clark et al., 2018), BoolQ (Clark et al., 2019), HellaSwag (Zellers et al., 2019), MMLU (Hendrycks et al., 2021), OpenBookQA (Mihaylov et al., 2018), and Recognizing Textual Entailment (RTE) (Bentivogli et al., 2009). The following 6 generative tasks are used for evaluation: IFEval (Zhou et al., 2023), AIME25 (Zhang & Math-AI, 2025), GSM8K (Cobbe et al., 2021), HumanEval (Chen et al., 2021), GPQA-Diamond (Rein et al., 2024), and LiveCodeBench-v6 (Jain et al., 2025). For evaluation we use EleutherAI Language Model Evaluation Harness (Gao et al., 2021) with a HuggingFace or vLLM backend (Kwon et al., 2023) and default task set-tings. GPQA-Diamond is evaluated without chain-of-thought (CoT) reasoning using 5 shots. For LiveCodeBench-v6 we use their official evaluation code. But to evalua-tion GLM-4.5-Air on HumanEval and LiveCodeBench we use the evaluation tool from 
+
+https://github.com/zai-org/glm-simple-evals .
+
+A.3 Why Evaluate on Different Mixtures of the Calibration Dataset? 
+
+We note that expert merging is fundamentally a data-driven procedure, e.g., both the saliency scores Sreap  
+
+> i
+
+and the pairwise similarities δ(ci, j) are computed entirely from activations on the calibration set X, thus making the merging decisions an implicit function of the calibration distribution. This has a direct consequence for downstream performance — if an expert is rarely activated or produces low-magnitude outputs on X, it will receive a low saliency score and be a candidate for absorption into another expert, regardless of how important it might be for a target task underrepresented in X. Similarly, two experts that appear interchangeable on X may serve very different roles on out-of-distribution inputs. The calibration set thus acts as an implicit prior over which expert behaviors to preserve. This motivates us to experiment extensively with different dataset mixtures (C4, Math, Code, and their combinations) to understand how compression quality varies with calibration distribution. In doing so, our hypothesis remains identifying a good compression method that does not remain tied to a fixed calibration assumption but instead adapts its merging decisions flexibly to the target task distribution. Table 3: Calibration dataset mixing ratios used in experiments. Each row defines the proportion of C4 (general text), math (NuminaMath), and code (The-Stack-Smol).                                  
+
+> C4 Math Code Description
+> 0.3 0.3 0.3 Balanced 0.5 0.5 0.0 C4 + math only 0.5 0.0 0.5 C4 + code only 0.0 0.5 0.5 Math + code only 0.2 0.5 0.3 Math-leaning 0.1 0.8 0.1 Math-heavy 0.0 0.7 0.3 Math-heavy, no C4 0.2 0.25 0.55 Code-leaning 0.1 0.1 0.8 Code-heavy 0.0 0.3 0.7 Code-heavy, no C4
+
+15 40 50 60 70                                     
+
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> GEN Score
+> C4 ·64 experts
+> ratio
+> 0
+> 0.1
+> 0.2
+> 0.3
+> 0.5
+> ratio
+> 0
+> 0.1
+> 0.2
+> 0.3
+> 0.5
+> 40 50 60 70
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> Math ·64 experts
+> ratio
+> 0
+> 0.1
+> 0.25
+> 0.3
+> 0.5
+> 0.7
+> 0.8
+> ratio
+> 0
+> 0.1
+> 0.25
+> 0.3
+> 0.5
+> 0.7
+> 0.8
+> 40 50 60 70
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> Stack-Smol ·64 experts
+> ratio
+> 0
+> 0.1
+> 0.3
+> 0.5
+> 0.55
+> 0.7
+> 0.8
+> ratio
+> 0
+> 0.1
+> 0.3
+> 0.5
+> 0.55
+> 0.7
+> 0.8
+> 45 50 55 60 65 70
+> MC Score
+> 30
+> 40
+> 50
+> 60
+> 70
+> GEN Score
+> C4 ·96 experts
+> ratio
+> 0
+> 0.1
+> 0.2
+> 0.3
+> 0.5
+> ratio
+> 0
+> 0.1
+> 0.2
+> 0.3
+> 0.5
+> 45 50 55 60 65 70
+> MC Score
+> 30
+> 40
+> 50
+> 60
+> 70
+> Math ·96 experts
+> ratio
+> 0
+> 0.1
+> 0.25
+> 0.3
+> 0.5
+> 0.7
+> 0.8
+> ratio
+> 0
+> 0.1
+> 0.25
+> 0.3
+> 0.5
+> 0.7
+> 0.8
+> 45 50 55 60 65 70
+> MC Score
+> 30
+> 40
+> 50
+> 60
+> 70
+> Stack-Smol ·96 experts
+> ratio
+> 0
+> 0.1
+> 0.3
+> 0.5
+> 0.55
+> 0.7
+> 0.8
+> ratio
+> 0
+> 0.1
+> 0.3
+> 0.5
+> 0.55
+> 0.7
+> 0.8
+> Freq REAP HC-SMoE REAM
+
+Figure 6: Effect of calibration data mixture on MC–GEN trade-off. Each panel shows discriminative (MC) vs. generative (GEN) benchmark scores for Freq, REAP, HC-SMoE, and REAM across ten mixing ratios of C4, Math, and Code datasets, with marker size proportional to each dataset’s share of the mixture. Results are shown at two expert-count targets: 64 (50% reduction) and 96 (25% reduction). The star denotes the performance of the original Qwen3-30B-A3B-Instruct with 128 experts. 
+
+Detailed analysis of calibration data vs. performance. We find C4 (general text) to be the strongest predictor of MC performance while The-Stack-Smol (code) to drive GEN performance (Fig. 3a). Across Freq, REAP, and REAM, the proportion of C4 in the calibration mixture strongly predicts MC scores ( r ≈ +0.95– +0.96) while also suppressing GEN scores (r ≈ − 0.82– −0.85). This can be attributed to MC benchmarks such as ARC, BoolQ, and HellaSwag drawing on the same factual and commonsense knowledge encoded in general web text. Subsequently, calibrating on C4 causes the saliency scores to favor the general-purpose experts that these tasks rely on but at the cost of the specialized experts that generative tasks require. Code data shows a complementary pattern: positive correlation with GEN ( r ≈ +0.59– +0.71) and negative with MC ( r ≈ − 0.40– −0.57), since code-heavy calibration elevates the saliency of structured-reasoning and syntax-specialized experts that directly serve GEN benchmarks like HumanEval and LiveCodeBench. Surprisingly, the proportion of math data has weak and near-zero correlations with both MC and GEN (|r| ≤ 0.19 for REAP and REAM), despite AIME25 appearing in the GEN suite. This suggests that mathematical reasoning is distributed diffusely across experts rather than concentrated in a few high-activation specialists. As such, changing the math fraction does not systematically shift which experts survive merging. Put together, these findings suggest a fundamental MC–GEN trade-off. Because the merging budget is fixed, one cannot simultaneously preserve both general-text and code-specialized experts and the calibration data distribution acts as the sole lever for controlling this trade-off. Our REAM responds the best to this trade-off with its peak MC score of 69.2 at 96 experts (0.5:0.5:0) and its peak GEN score of 69.8 (0:0.5:0.5), beating all other methods on 96 experts. At 64 experts (50% compression), REAM achieves the best MC and the second-best GEN, maintaining a similar task-aligned pattern. 16 A.4 Additional Ablations on Qwen3-Coder-Next 
+
+Table 4 compares REAP against various ablations of REAM components on a number of calibration mixtures. We see that the code-biased mixture 0.0:0.3:0.7 is the best overall for GEN average for all variants of REAM. AIME25 is highly sensitive to the calibration mix, ranging from 53.3 (REAP, code-heavy 0.1:0.1:0.8) to 83.3 (w/o logit profile, 0.0:0.3:0.7), i.e., a
+
+∼30-point swing. Code-heavy calibration (0.1:0.1:0.8) also boosts GSM8K above the original (REAP: 89.7, REAM: 89.0 vs original 85.4), and pushes HumanEval to 95.1. Both these results exceed the uncompressed model. On the contrary, HumanEval is overall robust to compression where most variants stay in the 91–95 range regardless of method or ratio. We also find the removal of sequential merging to be the most damaging ablation where the performance for REAM at 0.0:0.3:0.7 ratio drops GEN from 72.9 to 69.0. Removing the logit profile similarity from pseudo-pruning surprisingly achieves the best AIME25 (83.3, which is even above the original 80.0) at 0.0:0.3:0.7. However, this boost on AIME25 does not transfer to other ratios, suggesting that it may be a calibration interaction rather than a genuine gain. Overall, we find logit profile similarity to be the most important for maintaining a balanced GEN average across diverse ratios. Table 4: Further GEN benchmark results for Qwen3-Coder-Next (Cao et al., 2026) com-pressed from 512 to 384 experts (25% reduction in N), with group size C = 32. The ratio column denotes the calibration mixture (C4 : Math : Stack-Smol). Bold marks the best score in each column across all rows.                                                                                                                                              
+
+> Method Ratio IFEval AIME25 GSM8K GPQA HumanEval LCB GEN
+> Original —89.6 80.0 85.4 42.4 92.7 47.5 72.9
+> REAP 0.0/0.3/0.7 87.5 70.0 86.4 37.9 94.5 47.7 70.7 0.1/0.1/0.8 87.5 53.3 89.7 35.9 95.1 47.6 68.2 0.2/0.25/0.55 86.6 60.0 87.6 37.9 93.3 47.0 68.7 0.2/0.5/0.3 88.1 60.0 86.1 34.3 89.6 42.7 66.8 REAM full 0.0/0.3/0.7 89.3 80.0 85.3 40.4 94.5 48.0 72.9
+> 0.1/0.1/0.8 89.5 60.0 89.0 36.4 93.9 44.0 68.8 0.2/0.25/0.55 87.2 60.0 87.5 36.9 93.3 41.0 67.7 0.0/0.7/0.3 88.4 56.7 85.8 38.9 95.1 48.7 68.9 0.0/0.5/0.5 89.3 73.3 84.9 39.4 93.9 48.4 71.5 REAM w/o δgin Eq. (7) 0.0/0.3/0.7 89.8 83.3 84.3 38.4 93.9 47.6 72.9
+> 0.1/0.1/0.8 88.4 53.3 87.5 34.3 93.9 44.1 66.9 0.2/0.25/0.55 89.0 70.0 87.5 37.4 91.5 40.6 69.3 REAM w/o seq. merge 0.0/0.3/0.7 89.3 63.3 84.6 38.4 92.1 46.4 69.0 0.1/0.1/0.8 88.4 63.3 87.9 31.3 93.3 43.6 68.0 0.2/0.25/0.55 89.1 70.0 87.0 36.9 93.3 41.9 69.7 40 45 50 55 60 65
+> 20
+> 30
+> 40
+> 50
+> 60
+> 64 Experts (50% reduction)
+> Freq HV=302.0 ·6/10
+> REAP HV=931.4 ·6/10
+> REAM HV=910.7 ·7/10
+> HC-SMoE HV=741.1 ·5/10
+
+Figure 7: Pareto frontiers of expert-merging methods at 64 retained experts. Each point is one of 10 calibration mixtures; filled markers denote Pareto-optimal configurations (not simultaneously dominated on both MC and GEN by any other mixture of the same method) and hollow markers denote dominated ones. The hypervolume (HV) measures the area of the MC ×GEN plane dominated by each method’s frontier relative to a shared reference point, quantifying its overall performance ceiling. HV and n/ 10 counts are computed on the original scores. Per-method offsets are then applied for better visibility. 17 Table 5: Per-task generative (GEN) benchmark results on Qwen3-30B-A3B-Instruct-2507 (Yang et al., 2025a) with 64 experts across all calibration mixing ratios, including one additional single-dataset REAM ratio. Columns show individual GEN tasks followed by aggregate MC, GEN, and overall averages. Bold marks the best result within each mixture-ratio block; underlined marks the second best. 
+
+Mix Ratio Method IFEval AIME25 GSM8K GPQA HumanEval LiveCode MC GEN AVG C4 : Math : Code 
+
+Original (128 experts) 90.4 56.7 89.3 47.0 93.3 48.6 69.7 70.9 70.3 
+
+0.3 : 0.3 : 0.3 Freq 67.3 0.0 50.1 28.8 66.5 13.1 44.8 37.6 41.2 REAP 85.4 40.0 87.6 33.3 15.8 1.7 56.0 44.0 50.0 HC-SMoE 77.2 23.3 70.9 20.7 79.3 28.2 53.4 49.9 51.7 
+
+REAM 82.4 33.3 81.9 31.3 13.4 1.0 56.1 40.5 48.3 0.1 : 0.8 : 0.1 Freq 67.0 46.7 79.8 37.9 1.8 0.2 43.5 38.9 41.2 REAP 84.9 50.0 80.2 35.4 15.8 3.4 54.1 45.0 49.5 HC-SMoE 82.6 10.0 66.8 35.4 68.9 20.6 53.0 47.4 50.2 
+
+REAM 83.7 56.7 85.0 35.4 11.6 2.0 54.3 45.7 50.0 0.5 : 0 : 0.5 Freq 67.8 0.0 1.8 25.8 33.5 7.1 48.2 22.7 35.4 REAP 82.4 0.0 85.2 32.3 7.9 0.6 58.4 34.7 46.6 HC-SMoE 73.4 23.3 70.2 33.8 75.0 27.5 53.0 50.5 51.8 
+
+REAM 81.9 0.0 78.4 26.8 14.6 1.0 57.8 33.8 45.8 0.5 : 0.5 : 0 Freq 26.0 0.0 57.3 27.8 0.0 0.0 50.0 18.5 34.3 REAP 77.5 36.7 80.1 33.8 5.0 0.0 59.5 38.9 49.2 HC-SMoE 83.8 23.3 65.1 33.3 78.0 29.0 51.0 52.1 51.5 
+
+REAM 77.9 33.3 87.7 34.8 0.0 0.0 61.2 39.0 50.1 0 : 0.5 : 0.5 Freq 59.6 23.3 67.2 29.3 77.4 30.4 37.5 47.9 42.7 REAP 86.0 50.0 80.4 33.3 76.8 31.6 50.8 59.7 55.2 
+
+HC-SMoE 71.7 20.0 68.2 36.4 43.9 13.0 56.9 42.2 49.5 REAM 80.2 60.0 78.1 31.3 82.3 32.4 49.6 60.7 55.2 0 : 0.3 : 0.7 Freq 54.3 20.0 61.9 26.8 79.9 24.8 36.5 44.6 40.6 REAP 83.8 50.0 84.1 31.8 89.0 38.3 50.5 62.8 56.7 
+
+HC-SMoE 71.2 23.3 71.3 33.8 45.1 14.4 57.8 43.2 50.5 REAM 79.5 40.0 82.0 28.8 86.0 35.8 48.7 58.7 53.7 0.1 : 0.1 : 0.8 Freq 59.6 0.0 62.0 33.8 82.9 33.2 38.8 45.2 42.0 REAP 83.9 26.7 86.7 25.8 90.2 1.7 51.2 52.5 51.9 
+
+HC-SMoE 67.9 20.0 71.2 31.3 46.3 15.2 57.5 42.0 49.7 REAM 78.5 26.7 79.5 30.8 76.8 27.8 49.9 53.4 51.6 0 : 0.7 : 0.3 Freq 62.5 33.3 66.0 34.3 78.0 17.9 37.5 48.7 43.1 REAP 84.2 46.7 79.3 32.3 57.9 16.9 51.8 52.9 52.3 HC-SMoE 77.3 20.0 68.4 36.4 63.4 18.8 55.1 47.4 51.2 REAM 79.9 50.0 81.0 35.4 59.8 17.5 51.0 53.9 52.5 
+
+0.2 : 0.25 : 0.55 Freq 68.2 20.0 77.0 27.8 84.2 34.1 39.5 51.9 45.7 REAP 88.1 41.0 86.7 29.8 66.5 18.5 52.7 55.1 53.9 
+
+HC-SMoE 72.4 20.0 75.4 33.3 58.5 20.1 55.9 46.6 51.3 REAM 81.5 33.3 82.6 23.7 74.4 24.6 51.1 53.4 52.2 0.2 : 0.5 : 0.3 Freq 71.7 36.7 73.8 34.8 75.0 15.0 42.2 51.2 46.7 REAP 84.7 40.0 84.8 31.3 36.6 7.2 54.3 47.4 50.9 HC-SMoE 78.1 30.0 68.9 35.4 70.1 23.4 53.8 51.0 52.4 
+
+REAM 78.8 46.7 82.9 32.8 45.7 8.5 52.7 49.2 51.0 1 : 0 : 0 REAM 74.3 0.0 73.6 26.8 0.0 0.0 64.7 29.1 46.9 
+
+18 Table 6: Per-task generative (GEN) benchmark results on Qwen3-30B-A3B-Instruct-2507 (Yang et al., 2025a) with 96 experts across all calibration mixing ratios, including three additional single-dataset REAM ratios. Columns show individual GEN tasks followed by aggregate MC, GEN, and overall averages. Bold marks the best result within each mixture-ratio block; underlined marks the second best. 
+
+Mix Ratio Method IFEval AIME25 GSM8K GPQA HumanEval LiveCode MC GEN AVG C4 : Math : Code 
+
+Original (128 experts) 90.4 56.7 89.3 47.0 93.3 48.6 69.7 70.9 70.3 
+
+0.3 : 0.3 : 0.3 Freq 84.0 43.3 83.3 31.8 80.5 39.0 56.2 60.3 58.3 REAP 89.2 63.3 86.1 40.4 75.6 30.1 66.1 64.1 65.1 HC-SMoE 88.4 40.0 84.2 34.3 91.5 44.7 65.7 63.9 64.8 REAM 88.7 43.3 87.3 39.4 88.4 36.6 66.3 64.0 65.1 
+
+0.1 : 0.8 : 0.1 Freq 87.3 60.0 84.9 35.4 54.9 15.0 52.2 56.2 54.2 REAP 88.4 60.0 85.1 38.9 77.4 29.9 64.3 63.3 63.8 HC-SMoE 89.7 46.7 85.0 36.9 91.5 42.6 65.1 65.4 65.2 
+
+REAM 88.0 40.0 88.8 35.4 75.0 26.3 65.0 58.9 62.0 0.5 : 0 : 0.5 Freq 83.2 0.0 68.5 32.8 73.8 30.9 58.4 48.2 53.3 REAP 89.7 13.3 86.8 35.9 81.7 29.3 66.8 56.1 61.5 HC-SMoE 88.2 60.0 84.7 34.3 91.5 45.9 65.0 67.4 66.2 
+
+REAM 89.0 13.3 85.9 36.4 85.4 33.2 67.2 57.2 62.2 0.5 : 0.5 : 0 Freq 56.1 10.0 71.1 35.4 0.6 0.0 58.5 28.9 43.7 REAP 88.2 66.7 85.7 40.4 2.4 0.2 68.5 47.3 57.9 HC-SMoE 89.3 43.3 84.9 36.4 92.1 45.4 64.9 65.2 65.1 
+
+REAM 89.6 66.7 87.2 40.4 2.4 0.1 69.2 47.7 58.5 0 : 0.5 : 0.5 Freq 86.3 50.0 79.6 32.3 94.5 50.0 46.6 65.5 56.0 REAP 88.4 56.7 84.9 38.4 91.5 46.8 61.8 67.8 64.8 HC-SMoE 88.8 53.3 85.0 36.4 91.5 42.5 67.0 66.2 66.6 
+
+REAM 89.9 60.0 86.3 38.4 93.3 51.0 61.0 69.8 65.4 0 : 0.3 : 0.7 Freq 87.8 60.0 82.9 36.9 93.9 44.0 47.2 67.6 57.4 REAP 89.1 50.0 87.3 42.4 92.7 47.0 61.3 68.1 64.7 HC-SMoE 87.4 56.7 85.3 36.4 90.2 43.5 67.1 66.6 66.8 
+
+REAM 90.9 53.3 87.7 40.9 91.5 48.0 62.0 68.7 65.4 0.1 : 0.1 : 0.8 Freq 83.0 46.7 88.8 36.9 87.8 49.9 52.0 65.5 58.8 REAP 89.2 56.7 85.1 37.4 92.7 50.1 63.2 68.5 65.9 HC-SMoE 88.0 56.7 85.8 38.4 91.5 42.6 67.2 67.2 67.2 
+
+REAM 91.7 56.7 87.6 38.9 92.7 49.3 63.2 69.5 66.3 0 : 0.7 : 0.3 Freq 87.2 53.3 79.1 34.8 92.7 45.8 47.8 65.5 56.6 REAP 87.6 60.0 84.8 37.9 91.5 45.0 62.1 67.8 65.0 HC-SMoE 89.6 50.0 83.9 35.9 90.2 43.1 66.4 65.5 65.9 
+
+REAM 89.0 63.3 86.8 36.9 90.8 50.5 61.9 69.5 65.7 0.2 : 0.25 : 0.55 Freq 83.5 30.0 81.3 32.8 87.8 49.4 53.6 60.8 57.2 REAP 89.6 50.0 87.9 39.4 94.5 50.3 64.0 68.6 66.3 HC-SMoE 89.8 50.0 84.4 38.9 91.5 44.0 66.6 66.4 66.5 
+
+REAM 90.3 43.3 87.6 33.8 94.5 44.0 64.3 65.6 64.9 0.2 : 0.5 : 0.3 Freq 82.1 50.0 83.0 35.4 85.4 45.2 53.5 63.5 58.5 REAP 89.3 63.3 85.4 39.9 86.6 44.6 64.1 68.2 66.1 
+
+HC-SMoE 89.3 53.3 84.8 34.3 89.6 42.9 65.8 65.7 65.8 REAM 88.0 56.7 88.4 35.4 90.2 45.3 64.8 67.3 66.1 0 : 1 : 0 REAM 88.8 56.7 87.6 35.9 71.3 28.5 64.3 61.5 62.9 0 : 0 : 1 REAM 92.2 60.0 88.0 32.8 92.7 49.3 62.9 69.2 66.0 1 : 0 : 0 REAM 87.9 0.0 87.0 37.9 0.0 0.0 69.6 35.5 52.5 
+
+19
