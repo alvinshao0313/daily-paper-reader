@@ -1,0 +1,511 @@
+Title: Adaptive Parallel Monte Carlo Tree Search for Efficient Test-time Compute Scaling
+
+URL Source: https://arxiv.org/pdf/2604.00510v1
+
+Published Time: Thu, 02 Apr 2026 00:35:05 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+# Adaptive Parallel Monte Carlo Tree Search for Efficient Test-time Compute Scaling 
+
+Hongbeen Kim 1 Juhyun Lee 1 Sanghyeon Lee 1 Kwanghoon Choi 1 Jaehyuk Huh 1
+
+## Abstract 
+
+Monte Carlo Tree Search (MCTS) is an effec-tive test-time compute scaling (TTCS) method for improving the reasoning performance of large language models, but its highly variable execu-tion time leads to severe long-tail latency in prac-tice. Existing optimizations such as positive early exit, reduce latency in favorable cases but are less effective when search continues without mean-ingful progress. We introduce negative early exit ,which prunes unproductive MCTS trajectories, and an adaptive boosting mechanism that reallo-cates reclaimed computation to reduce resource contention among concurrent searches. Integrated into vLLM, these techniques substantially reduce p99 end-to-end latency while improving through-put and maintaining reasoning accuracy. 
+
+## 1. Introduction 
+
+Large language models (LLMs) have demonstrated strong performance across a wide range of tasks, but complex reasoning often benefits from allocating additional compu-tation at inference time. Test-time compute scaling (TTCS) addresses this need by increasing inference-time computa-tion through generation, search, and evaluation, enabling LLMs to solve more challenging reasoning tasks with higher accuracy (Lightman et al., 2024; Sun et al., 2024; Zhao et al., 2025; Peng et al., 2025; Setlur et al., 2025). Within TTCS, the choice of search strategy plays a cen-tral role in determining reasoning performance. Among existing approaches, Monte Carlo Tree Search (MCTS) has emerged as one of the most effective methods for LLM-based reasoning (Hao et al., 2023; Feng et al., 2023; Guan et al., 2025; Misaki et al., 2025; Zhou et al., 2024; Antoni-ades et al., 2024; Shi et al., 2025; Ma et al., 2024). When paired with a verifier or process reward model, MCTS con-
+
+> 1School of Computing, Korea Advanced Institute of Science and Technology, Daejeon, South Korea. Correspondence to: Jae-hyuk Huh <jhhuh@casys.kaist.ac.kr>.
+> Preprint. April 2, 2026.
+
+sistently achieves higher accuracy than parallel candidate expansion methods (e.g., Best-of-N approaches). This ad-vantage stems from its ability to balance exploration and exploitation, maintain multiple reasoning trajectories, and revisit paths with low early evaluations when their long-term potential remains promising. Despite its accuracy advantages, MCTS poses a significant challenge in practical serving environments due to its in-herently sequential execution. As the search progresses, de-cisions increasingly depend on prior explorations, causing execution time to grow rapidly with search depth. As a result, a small number of compute-intensive requests can dispropor-tionately consume system resources, leading to pronounced long-tail latency. Moreover, deeper search does not always translate into better reasoning outcomes: MCTS may con-tinue consuming substantial computation even when further exploration provides little benefit, fundamentally constrain-ing its deployability in production settings. Prior work has primarily explored two strategies to miti-gate MCTS latency (Fu et al., 2024; Liu et al., 2018). First, although not applied to TTCS, parallel MCTS variants re-lax strict serial dependencies by allowing multiple rollouts to proceed asynchronously, enabling concurrent expansion and reducing the wall-clock time of individual searches (Liu et al., 2018). Second, positive early exit techniques terminate the search once intermediate evaluations surpass a prede-fined confidence threshold, avoiding unnecessary computa-tion when a high-quality solution is found early (Fu et al., 2024). These approaches are particularly effective when the search converges quickly or when early evaluations provide reliable guidance. However, in realistic inference workloads, tail latency can-not be eliminated by these techniques alone. In many cases, search continues without clear signs of improvement despite additional exploration. Without a mechanism to identify and stop such unproductive searches, MCTS persists until com-pletion, expending substantial computation for little benefit. While parallelization may reduce the execution time of in-dividual searches, it does not reduce total computation. In capacity-constrained serving environments, this sustained overhead increases queueing delay and further exacerbates tail latency. Positive early exit is similarly ineffective in 1
+
+> arXiv:2604.00510v1 [cs.AI] 1 Apr 2026 Adaptive Parallel Monte Carlo Tree Search for Efficient Test-time Compute Scaling
+
+these scenarios, as the search never reaches a sufficiently confident intermediate state. In this work, we take a system-centric perspective on MCTS-based reasoning, reconceptualizing it as a system that re-quires active resource management rather than a search process to be merely accelerated. Building on this view, we introduce negative early exit , a mechanism that identifies and prunes search trajectories that continue to consume com-putation without improving solution quality. In addition, we propose an adaptive boosting mechanism that redistributes reclaimed computational resources to concurrent searches with higher potential, prioritizing system capacity toward the most promising reasoning trajectories. Unlike the prior parallel MCTS (Liu et al., 2018), it controls parallelism dynamically based on the system state. We integrate these ideas into a system that preserves the accuracy benefits of MCTS while substantially re-ducing long-tail latency and improving throughput. Built on vLLM (Kwon et al., 2023) and evaluated on Qwen-2.5 (Qwen et al., 2025) and Llama-3.1 (Grattafiori et al., 2024), it achieves up to 2.83× lower p99 end-to-end la-tency than serial MCTS and up to 1.46× lower latency than systems using positive early exit alone, while increasing throughput by up to 2.44× without sacrificing reasoning accuracy. 
+
+## 2. Background 
+
+2.1. Test-time Compute Scaling 
+
+The standard auto-regressive inference in Large Language Models (LLMs) often falls short on complex tasks that re-quire deep exploration or reasoning. Here, reasoning entails exploring alternatives, verifying intermediate steps, and iter-atively refining a candidate before committing to an answer. Test-Time Compute Scaling (TTCS) provides this capability to systematically evaluate multiple candidate solutions by allocating extra inference compute and adjusting the compu-tational effort for each prompt, which improves robustness and accuracy. Snell et al. (Snell et al., 2025) analyze the trade-off between pre-training and test-time compute, proposing a compute-optimal scaling strategy tailored to individual prompts. They observe that while simple iterative refinements may suffice for straightforward tasks, complex reasoning increasingly re-quires verifier-guided search methods such as Monte Carlo Tree Search (MCTS). Such search methods rely on an ex-ternal verifier to evaluate intermediate reasoning steps and guide exploration toward promising trajectories. A widely used verifier is the Process Reward Model (PRM), which generally produce a reward that reflects the local step cor-rectness (i.e., how logically valid the current step is) (Light-man et al., 2024; Sun et al., 2024; Zhao et al., 2025; Peng sync                
+
+> sync
+> traj 1 at t3
+> ···  traj 2 at t3
+> (b) Parallel Search
+> t0
+> traj 1 at t3
+> traj 2 at t5
+> t1 t1
+> t2 t2
+> t3
+> t4
+> t5
+> (a) Sequential Search
+> t0
+> t1
+> t3 t3 t3 t3
+> t2 t2 t2 t2
+> t1 t1 t1 t1
+> : Rejected by verifier : Selected by verifier
+> Figure 1. Two categories of the TTCS method: (a) sequential search and (b) parallel search. tdenotes the time.
+
+et al., 2025). 
+
+2.2. Structural Differences in Search Methods 
+
+We categorize search methods into two distinct categories based on their trajectory generation patterns, as illustrated in Figure 1. The first category, which we term Sequential Search , constructs trajectories sequentially through itera-tive execution. MCTS (Kocsis & Szepesvári, 2006a) is a representative example of Sequential Search, sequentially generating trajectories as candidate solutions through suc-cessive rollout executions. In contrast, the second category, which we term Parallel Search , generates trajectories in parallel. Beam Search and REBASE (Wu et al., 2024) are prominent examples of Parallel Search. Specifically, Beam Search maintains a fixed number of top-k partial hypothe-ses at each step, expanding them in parallel to identify the most probable complete trajectories. These methods involve a synchronization at each search step to prune or select candidates across the child nodes. For more details on the specific mechanics of each search method, please refer to Appendix A and Appendix B. These methodologies diverge in their approach to navigating the candidate solution space, resulting in disparate computa-tional efficiencies. Specifically, sequential search improves inference efficiency by leveraging outcomes from prior ex-ecutions to guide path selection, but its serial execution inherently restricts parallelism and slows down runtime. In contrast, parallel search methods generate a fixed number of samples at each step, incurring unnecessary computation, but enabling faster execution through parallelization. Conse-quently, sequential search supports more efficient but slower inference, whereas parallel search enables faster inference despite reduced computational efficiency. 2Adaptive Parallel Monte Carlo Tree Search for Efficient Test-time Compute Scaling            
+
+> & %"! "$! #
+> 
+> 
+> %")
+> '!")($
+> '")($
+> 16.7% Token Reduction
+> 2.9% Token Reduction
+> MCTS
+> Beam
+> Search
+> Figure 2. Comparison of search efficiency between Beam Search and MCTS, and the token reduction enabled by early exit, with MCTS using 12 rollouts and Beam Search using 8 beams.
+
+## 3. Motivation 
+
+3.1. Search Efficiency of TTCS Methods 
+
+MCTS and Beam Search are widely used TTCS methods, they exhibit markedly different token generation efficien-cies. MCTS constructs trajectories sequentially by repeat-edly selecting the promising nodes, which helps minimize unnecessary token generation. In contrast, Beam Search expands a fixed number of candidates at each reasoning step, inevitably producing redundant or low-value tokens alongside useful ones. Consequently, even when achieving comparable accuracy, Beam Search tends to generate more tokens than MCTS, as also evidenced in Figure 2 As shown in Figure 2, MCTS generates fewer tokens on average compared to Beam Search while achieving slightly higher accuracy. The efficiency gap between MCTS and Beam Search becomes significantly more pronounced when 
+
+positive early exit is applied. Under this mechanism, the search process terminates as soon as it discovers a solution that satisfies a predefined quality threshold, thereby avoid-ing further unnecessary rollouts. Figure 2 indicates that the token reduction achieved by positive early exitis more pro-nounced for MCTS than for Beam Search, which can be attributed to the following factors. In parallel search, the system must maintain a constant beam width k; thus, even if an optimal solution is identified at step t, the computa-tional cost for the other k − 1 candidates has already been incurred across all preceding steps. Conversely, sequential search methods explore the state space through iterative simulations, allowing them to bypass a vast majority of the potential search tree if a high-quality solution is found in an early iteration. This structural advantage allows sequential search to transform from an exhaustive exploration tool into a surgical retrieval mechanism, resulting in disproportion-ately higher token savings and superior scaling efficiency compared to the rigid, breadth-first nature of parallel meth-ods. 0 1000 2000 3000     
+
+> Latency (sec)
+> (a) Without Early Exit
+> 0
+> 100
+> 200
+> 300
+> Frequency
+> 01000 2000 3000
+> Latency (sec)
+> (b) With Early Exit
+> 0.0
+> 0.5
+> 1.0
+> CDF
+> Figure 3. End-to-end latency distribution of sequential MCTS (a) with and (b) without early exit. Maximum number of rollouts is 32.
+
+3.2. Latency Challenges of MCTS-Based TTCS 
+
+A major challenge in deploying MCTS-based reasoning is its long and unpredictable latency. The core reason is that this workflow imposes sequential dependencies—on step tokens within a rollout and on trajectory tokens across roll-outs—forcing the model to generate many tokens strictly in sequence. Within a rollout the next step tokens depend on the preceding ones and are generated autoregressively. Each rollout must be executed using the statistics accumu-lated from previous rollouts, which causes execution across rollouts to proceed in a serial manner. This sequential de-pendency prevents parallelization across rollouts, making search execution intrinsically slower than parallel search. Figure 3(a) shows that sequential dependencies often lead to long latency. As the rollout budget grows, this lack of parallelism between rollouts directly manifests as increased end-to-end latency and highly variable response times. Posi-tive early exit can be employed to address such end-to-end latency inflation. For example, Certaindex demonstrated that early-exit can substantially reduce the latency of many reasoning requests once the outcome is essentially deter-mined (Fu et al., 2024). Overall, this adaptive allocation improves average-case performance and ensures that sim-pler queries complete quickly. However, positive early exit is not a complete solution. A non-trivial fraction of reasoning requests still fail to satisfy the exit condition, which forces the system to carry out the full set of rollouts As shown in Figure 3(b), these reasoning requests dominate the tail of the latency distribution and lead to rare but severe delays. For latency-sensitive applications, such long-tailed behavior is as detrimental as high mean latency because it undermines service predictability. Thus, while early-exit strategies mark progress, they leave open the question of how to systematically reduce tail latency in MCTS-based reasoning without sacrificing quality. 3Adaptive Parallel Monte Carlo Tree Search for Efficient Test-time Compute Scaling (a) (b)            
+
+> Figure 4. Impact of parallelism on latency and accuracy. (a) Aver-age latency per tree search decreases as parallelism increases. (b) Higher parallelism leads to minor fluctuations in accuracy. Results are reported on a subset of challenging problems that require gen-erating a large number of tokens. …
+> v=0.1
+> v=0.5 v=0.2 Viable leaf node
+> (v ≥τ)
+> Futile leaf node
+> (v < τ)
+> v=0.1 v=0.2
+> v=0.2
+> Negative early exit
+> Req1 Req2
+> Figure 5. Overview of negative early exit mechanism with a accep-tance threshold of τ= 0 .3.
+
+3.3. Effect of Parallelization on MCTS-based TTCS 
+
+While the parallelization mechanism was not originally de-signed for TTCS, it is readily applicable to MCTS-based TTCS and yields significant latency reduction. Figure 4 il-lustrates the effectiveness of WU-UCT parallelization when applied to 100 problems sampled from the Math500 dataset, specifically selecting those that generated the highest total number of tokens during the vanilla MCTS. To prevent per-formance interference caused by resource contention, we parallelized each tree search sequentially, ensuring that only one tree search is processed at a time. As shown in (a), the average latency per tree search decreases as the degree of parallelism increases. The reason it does not continue to decrease linearly is that parallelism is limited near the root node in the early stages of the search. As illustrated in (b), accuracy is slightly affected as parallelism increases. We attribute this either to semantic degradation arising from the omission of certain statistics essential for exact MCTS, or to sampling variations caused by the floating-point preci-sion limits of the language model. The overall low accuracy results from our selection of challenging instances that re-quired a high volume of generated tokens. The end-to-end accuracy evaluation is presented in Section 5.4. 
+
+3.4. Opportunity of Negative Early Exit 
+
+Even with positive early exit, tail latency can still remain high for requests that do not satisfy the early-exit condition. While parallelism can help mitigate this issue, it primarily reduces overall latency rather than specifically addressing tail latency. Therefore, it is crucial to identify the scenarios that lead to tail latency and to develop targeted solutions that eliminate unnecessary execution. Tail latency is driven by two cases in which the problem is hard and positive early exit cannot be triggered: (i) ad-ditional rollouts eventually discover a better solution; (ii) each rollout produces persistently low scores, leaving the problem unsolved within the rollout budget. For the case (ii), exhausting the rollout budget offers little value, since further rollouts are unlikely to produce the correct answer. To introduce negative early exit, it is necessary to estab-lish a criterion to assess whether additional rollouts are likely to discover a better trajectory. In MCTS, new tra-jectories are generated by selecting one of the current leaf nodes for expansion. The trajectory score is computed by aggregating the PRM reward scores of the nodes along the trajectory. Four common aggregation schemes are consid-ered: (1) minimum (Wang et al., 2024; PRIME RL, 2024), (2) cumulative product (Zhang et al., 2025b), (3) cumu-lative sum (PRIME RL, 2025), or (4) average (Skywork, 2024; RLHFlow, 2024). Among them, the state-of-the-art PRM (Zhang et al., 2025a) argues that trajectory scoring based on (1) minimum or (2) cumulative product is most suit-able. Accordingly, it adopts the cumulative product scheme. Under both aggregation schemes, the resulting trajectory score is upper-bounded by the score of its leaf node; that is, the trajectory score can never exceed the leaf score. There-fore, leaf nodes below the acceptance threshold are termed 
+
+futile , while those above it are termed viable . Based on this property, we propose the negative early exit mechanism illustrated in Figure 5: when all leaf nodes in the current search tree are futile , the request is early-exited. This cor-responds to case (ii), where any future trajectory generated from the tree is guaranteed to have a score below the thresh-old, making further rollouts unlikely to yield a higher-quality solution. Conversely, if at least one leaf node is viable , we continue the search, as additional rollouts may still discover a better trajectory. 
+
+## 4. Method 
+
+4.1. Overview 
+
+Existing MCTS parallelization techniques like WU-UCT (§4.2) offer a way to run multiple rollouts concurrently, but they do not adaptively manage the degree of parallelism. This is a critical limitation for LLM-based TTCS, where un-controlled parallelism can saturate the inference engine and severely increase latency. We address this with our system, a scheduling framework that treats parallel rollouts not as a resource to maximize, but as a constrained computational budget—defined by the maximum number of concurrent rollouts—to be allocated efficiently and purposefully. 4Adaptive Parallel Monte Carlo Tree Search for Efficient Test-time Compute Scaling 
+
+To ensure this budget is used effectively, our system first establishes an effective parallel search foundation with our WU-PUCT policy, which adapts the principle of unobserved counts to the PUCT selection rule to guide parallel work-ers toward diverse parts of the search tree. This is com-plemented by two novel intra-task pruning mechanisms: a probabilistic model that terminates rollouts with a low statistical likelihood of success, and a deterministic rule that stops them once their cumulative reward can no longer reach a target threshold. These mechanisms work together to minimize wasted work within each parallel search. These intra-task optimizations are managed by a global, budget-aware scheduling policy that operates at the macro-level. A lightweight predictor helps the scheduler identify which tasks are likely to be long-running, allowing it to proactively increase their target parallelism level. Crucially, when an early-exit mechanism terminates a rollout, the scheduler can immediately reassign that freed-up budget slot to another task. This combination of efficient parallelization, fine-grained pruning, and dynamic, predictive resource allo-cation allows our system to reduce tail latency for complex tasks while keeping the total computation within the budget, thereby ensuring stable performance from the LLM serving infrastructure. 
+
+4.2. Parallel MCTS with Partial Statistics 
+
+Parallelizing MCTS remains a significant challenge due to the sequential nature of the search process, where each trajectory selection depends on up-to-date node statistics. Even before MCTS was widely adopted in reasoning tasks, its serial execution was a major computational bottleneck in classical settings. Without proper coordination, naive parallelization can degrade performance and lead to crit-ical issues such as exploration collapse —where multiple workers redundantly sample the same path—or exploitation failure —where the search fails to converge on optimal nodes due to stale information (Chaslot et al., 2008; Segal, 2010; Liu et al., 2018). To address these limitations, we extend our framework with a parallel rollout mechanism that integrates the principle of unobserved counts, originally introduced in the WU-UCT scheme (Liu et al., 2018). Unlike standard MCTS which enforces strict serial execution, this approach adopts a more relaxed strategy by allowing rollouts to continue using "in-flight" statistics when dependent updates have not yet been backpropagated. This enables a higher degree of parallelism and provides substantial speedup with minimal impact on search quality. Specifically, we adapt the AlphaZero-style PUCT rule to this parallel setting by incorporating these unobserved counts into the selection criteria. We define modified visitation statistics as ˜N (s) = N (s) + O(s) and ˜N (s, a ) = N (s, a ) +             
+
+>   
+> 
+> 
+> 
+> 
+> 
+>  
+> c1 0.99 0.87 0.98 0.99
+> ···
+> ···
+> ···
+> ···
+> : Check if leaves futile
+> : Not check if leaves futile
+> (a) Correlation between two scores (b) Selective futility check
+> c2 c3 c4
+> root
+> Figure 6. Selective Futility Check Mechanism. (a) Trajectories with low initial scores tend to yield low final scores. (b) Selective futility check leveraging this correlation.
+
+O(s, a ), where O(·) denotes the number of in-flight rollouts that have been launched but not yet completed. The resulting selection rule, which we term WU-PUCT , is formulated as: WU-PUCT (s, a ) = Q(s, a ) + cpuct · P (s, a ) ·
+
+q ˜N (s)1 + ˜N (s, a ) .
+
+By incorporating ongoing rollouts into the node statis-tics, WU-PUCT effectively penalizes nodes that are al-ready being explored by other workers. This preserves the exploration–exploitation balance and prevents redun-dant computation under high-throughput parallel execu-tion. This mechanism is natively embedded into our 
+
+launch_rollout() API, allowing the scheduler to ini-tiate multiple rollouts concurrently while maintaining con-sistency through the corrected selection rule. 
+
+4.3. Negative Early Exit 
+
+Building on the observations in Section 3.4, we can prema-turely terminate the search process when all leaf nodes in the current search tree are identified as futile . However, this strict condition for termination is seldom met in practice, leading to a limited invocation of early exits—approximately 5% on the Math500 dataset. To further enhance resource efficiency, we introduce a relaxed criterion for early pruning based on the predictive value of early-stage rewards. Em-pirical observations suggest that trajectories with low initial rewards at the first depth tend to fall short of the acceptance threshold in their final scores. As shown in Figure 6 (a), the first-step reward exhibits a clear correlation with the final trajectory score, with trajecto-ries that receive low rewards at the first depth rarely reaching the acceptance threshold later. Motivated by this trend, we exclude such low-potential branches from the negative-exit check, preventing them from delaying termination while still allowing the search procedure itself to proceed normally on potentially promising parts of the tree. An example of this selective futility check is shown in Figure 6(b). 5Adaptive Parallel Monte Carlo Tree Search for Efficient Test-time Compute Scaling 
+
+4.4. Parallelism Degree Control Policy 
+
+We employ a dynamic Parallelism Degree Control Policy to optimize the balance between individual task latency and overall system throughput. This policy adaptively modulates the Degree of Parallelism (DOP) for each task by synthe-sizing two orthogonal factors: temporal seniority and score-based urgency. The primary objective is to prevent task starvation while simultaneously accelerating the clearance of tasks that are nearing completion, thereby optimizing the utilization of the running queue. Hereafter, boosting refers to executing multiple rollouts for a single task in parallel. The scheduler calculates a parallelism degree score S(i, t )
+
+for task i at time t to determine its resource allocation tier. The scoring function is defined as: 
+
+S(i, t ) = log(1 + ∆ ti) + β · I(ρi > τ )
+
+In this formulation, ∆ti represents the elapsed time since the task’s arrival, calculated as tcurrent − tarrival . The term 
+
+log(1 + ∆ ti) introduces a logarithmic scaling to the waiting time, which provides high initial sensitivity to ensure new tasks receive adequate resources while damping the score of long-running tasks to prevent resource monopolization. The second term employs an indicator function I(ρi > τ ),where ρi is the progress ratio defined by the best interme-diate score relative to the acceptance threshold, and τ is a proximity constant set to 0.9. This 90% Proximity Rule identifies tasks that are on the verge of satisfying the positive early exit criteria. When a task reaches this critical threshold ( ρi > 0.9), the β coef-ficient significantly boosts its priority score, triggering an immediate escalation in its parallelism degree. By concen-trating computational power on these near-complete tasks, the system effectively minimizes the tail latency and rapidly frees up resources occupied by running tasks. The resulting score S(i, t ) is then mapped to discrete parallelism degree, ensuring a balanced resource allocation for the active task set. 
+
+4.5. Scheduling Algorithm 
+
+To maximize search efficiency under constrained compu-tational budgets, we implement a dynamic scheduling pol-icy that adaptively redistributes rollout resources among concurrent reasoning jobs , each corresponding to a single tree search. The algorithm begins by managing job admis-sion, where pending jobs are moved into the active running queue only when the total rollout occupancy is below the maximum system capacity. This ensures a baseline level of progress for all admitted jobs while preventing resource exhaustion. Once jobs are active, the scheduler determines the optimal parallelism for each job based on its Parallelism Degree 
+
+Algorithm 1 Dynamic Scheduling with Boosting  
+
+> 1:
+
+Phase 1: Job Admission  
+
+> 2:
+
+Admit pending jobs to Qrun such that |Q run | ≤ M ,where M is max concurrency.  
+
+> 3:
+
+Phase 2: Scoring and Resource Allocation  
+
+> 4:
+
+for all Ji ∈ Q run do  
+
+> 5:
+
+Compute Parallelism Degree Score Si. 
+
+> 6:
+
+Determine target parallelism ˆPi: 
+
+> 7:
+
+ˆPi =
+
+(1 if Nobs (Ji) < τ 
+
+max 
+
+
+
+1, ⌊ SiP Sj · M ⌋
+
+
+
+otherwise  
+
+> 8:
+
+end for  
+
+> 9:
+
+Finalize Pi by allocating remaining budget B to jobs in descending order of Si. 
+
+> 10:
+
+Phase 3: Execution and Preemption  
+
+> 11:
+
+for all Ji ∈ Q run do  
+
+> 12:
+
+Let Ai be the number of active rollouts for Ji. 
+
+> 13:
+
+if Ai > P i then  
+
+> 14:
+
+Preempt: Cancel (Ai−Pi) rollouts with minimum cumulative rewards.  
+
+> 15:
+
+else if Ai < P i then  
+
+> 16:
+
+Expansion: Launch (Pi − Ai) new rollouts.  
+
+> 17:
+
+end if  
+
+> 18:
+
+end for 
+
+Score S. A key feature of this allocation strategy is the im-plementation of a gating mechanism for early-stage jobs; any job that has not yet surpassed a predefined observa-tion threshold is restricted to serial execution. This prevents the premature commitment of heavy parallel resources to paths with insufficient data. For jobs beyond this threshold, the scheduler allocates the remaining rollout budget propor-tionally to their scores, prioritizing those with the highest urgency. The final stage of the policy involves real-time execution adjustment to synchronize the actual number of running rollouts with these new assignments. The system achieves high elasticity by either launching additional rollouts to meet increased quotas or preempting existing ones when a job’s allocation decreases. In the event of preemption, the scheduler intelligently terminates the least promising rollouts—those with the lowest cumulative rewards—to preserve the most valuable computations. This continuous feedback loop allows the system to remain highly responsive to the evolving search landscapes of multiple simultaneous jobs. 6Adaptive Parallel Monte Carlo Tree Search for Efficient Test-time Compute Scaling 
+
+## 5. Evaluation 
+
+5.1. Methodology System Specifications and Models. All experiments were conducted on a single node equipped with four NVIDIA H100-SXM 80GB GPUs interconnected via NVLink. Two GPUs were allocated to generation model inference, while the remaining two GPUs were dedicated to reward model inference. We evaluate system performance under reason-ing workloads using two generation models, Llama-3.1-8B-Instruct (Grattafiori et al., 2024) and Qwen2.5-14B-Instruct (Qwen et al., 2025), and conduct test-time inference scaling experiments independently for each model. For re-ward evaluation, we use Qwen2.5-Math-PRM-7B (Zhang et al., 2025a). This configuration is used consistently across all experiments. 
+
+Datasets. We evaluate mathematical reasoning using Math500 and AMC23 (Lightman et al., 2023; MAA, 2023). Math500 is a 500-problem benchmark derived from MATH that measures step-by-step solution accuracy. AMC23 con-sists of problems from the 2023 American Mathematics Competitions and is used to evaluate generalization to un-seen problems. Due to the limited number of unique prob-lems in AMC23, we augment the workload with distinct, accuracy-preserving prefixes only for performance measure-ments to fully utilize the system. All accuracy results are re-ported on the original AMC23 dataset, and prefix caching is enabled only within the MCTS process and disabled across requests by assigning unique prefixes per request. 
+
+Compared Systems. We compare the following system configurations. Positive early exit (PE) is adopted from prior work, while negative early exit (NE) and Boosting are our proposed extensions. • Beam search : A baseline with positive early exit ap-plied to beam search, with the beam size fixed at 8 and the maximum number of concurrent jobs fixed at 16. We set the beam size to match the accuracy of Vanilla MCTS as closely as possible. • Vanilla : A baseline system that serves generation models using MCTS-based test-time compute scaling, where tree search is performed sequentially for each request. • PE (Positive Early Exit) : A system that adaptively terminates rollouts when intermediate reward signals indicate sufficient confidence, reducing unnecessary computation and allowing easy instances to complete quickly (Fu et al., 2024). • PE+NE (Negative Early Exit) : An extension of PE that additionally stops rollouts early when all tra-0.5 1 2 4              
+
+> 0
+> 1000
+> 2000
+> 3000
+> Latency (sec)  llama
+> 0.5 124
+> 0
+> 500
+> 1000
+> 1500
+> qwen
+> p50
+> p99
+> 0.5 124
+> Request Rate (req/sec)
+> 0
+> 800
+> 1600
+> 2400
+> Latency (sec)
+> 0.5 124
+> Request Rate (req/sec)
+> 0
+> 300
+> 600
+> 900
+> (a) Math500
+> (b) amc23
+> Beam Search MCTS PE PE+NE PE+NE+Boosting
+> Figure 7. Impact of request arrival rates on p50 (darker) and p99 (lighter) end-to-end latency across different search strategies.
+
+jectories consistently exhibit low scores, identifying unlikely-to-be-solved instances early and reducing tail latency. • PE+NE+Boosting : The full system configuration that utilizes the GPU computation freed by early exits to perform additional MCTS rollouts in parallel, improv-ing both latency and throughput under higher load. 
+
+5.2. End-to-end Latency Reduction 
+
+Figure 7 shows the p50 and p99 end-to-end latency as the request arrival rate increases, illustrating how tail latency emerges in MCTS-based reasoning serving and how our techniques mitigate it. Beam search consistently exhibits the highest p99 latency, as its decoding cost scales quadrat-ically with the beam size, allowing individual requests to monopolize GPU resources and induce severe queuing de-lays. Vanilla MCTS improves p99 latency by an average of 1.64 × over beam search; however, because tree search is executed sequentially per request, long-running searches accumulate under higher load, resulting in persistent tail latency. Positive Early Exit (PE) reduces unnecessary computation by terminating rollouts early when intermediate rewards indicate sufficient confidence, achieving an average p99 reduction of 1.38 × relative to Vanilla. However, PE still fully explores low-promise requests, which can dominate the queue under high system pressure and limit its effective-ness in controlling tail latency. Negative Early Exit (NE) addresses this limitation by identifying search states whose cumulative scores cannot mathematically exceed a thresh-old and terminating them early. As a result, NE reduces p99 latency by 1.49 × over Vanilla and provides an additional 1.08 × improvement over PE, directly targeting tail behavior. Boosting reinvests the GPU computation freed by early exits into parallel MCTS rollouts, accelerating request comple-7Adaptive Parallel Monte Carlo Tree Search for Efficient Test-time Compute Scaling 0.5 1 2 4             
+
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> Throughput
+> (req/sec)
+> llama
+> 0.5 124
+> 0.00
+> 0.25
+> 0.50
+> 0.75
+> qwen
+> 0.5 124
+> Request Rate (req/sec)
+> 0.00
+> 0.04
+> 0.08
+> 0.12
+> Throughput
+> (req/sec)
+> 0.5 124
+> Request Rate (req/sec)
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> (a) Math500
+> (b) amc23
+> Beam Search MCTS PE PE+NE PE+NE+Boosting
+
+Figure 8. Request throughput across various model-task con-figurations. PE and NE consistently increase throughput. PE+NE+Boosting yields throughput gains across most cases. 
+
+tion and alleviating queuing delays. The full configuration (PE+NE+Boosting) achieves an additional p99 reduction of 1.15 × over PE and 1.07 × over PE+NE. In the worst case, p99 latency decreases from 1,886 ms to 1,277 ms, corresponding to a 1.47 × improvement over Vanilla and a 1.21 × improvement over PE. One notable exception occurs in the (amc23, Qwen) configuration, where the p99 latency slightly increases compared to PE+NE. We attribute this to parallelization overhead; in this configuration most re-quests could be resolved with minimal sequential rollouts, but the scheduler’s aggressive parallelization unnecessarily monopolizes resources, thereby increasing queuing delays for concurrent requests. Overall, these results show that tail latency in MCTS-based reasoning serving is a system-level resource management problem that requires combining early termination with parallelized test-time compute scaling. 
+
+5.3. Request Throughput Improvement 
+
+Figure 8 presents the request throughput across the eval-uated systems. Similar to the latency trends, beam search exhibits the lowest throughput due to its heavy resource consumption. In contrast, Positive Early Exit (PE) and Neg-ative Early Exit (NE) significantly reduce system overhead, yielding throughput improvements of 1.3× and 1.36 × over the Vanilla MCTS baseline, respectively. The fully inte-grated system—incorporating Boosting—achieves through-put gains of 1.37 × for (Math500, Llama), 1.76 × for (Math500, Qwen), and 1.15 × for (amc23, Llama). These gains stem from the system’s ability to discover optimal solutions rapidly through refined search, allowing it to re-lease computational resources back to the queue ahead of schedule and thus accommodate more concurrent requests. However, in the (amc23, Qwen) configuration, applying Boosting on top of Negative Early Exit results in a through-put reduction to 0.8× relative to NE alone. This behavior arises because most requests in this workload are solvable with a small number of serial rollouts, leaving limited oppor-
+
+Table 1. Accuracy Comparison Across Optimizations (%) 
+
+Method Math500 amc23 
+
+Llama Qwen Llama Qwen Beam Search 72.9 87.1 52.5 67.5 MCTS (Vanilla) 75.3 88.3 57.5 72.5 MCTS + PE 76.2 88.3 47.5 69.2 Ours (Full Suite) 74.8 87.6 55.0 65.0 
+
+tunity for effective parallelization. As a result, the overhead of scheduling and coordinating parallel rollouts outweighs the marginal benefit of additional compute, leading to re-duced throughput in this regime. 
+
+5.4. Impact on Reasoning Accuracy 
+
+Table 1 illustrates the impact of optimization on accuracy. In the Math500 dataset, the inclusion of PE yields a marginal accuracy improvement. We attribute this fluctuation primar-ily to the inherent randomness stemming from floating-point precision limits. Specifically, in highly parallelized GPU en-vironments, the non-deterministic nature of floating-point accumulation—where subtle variations in the order of op-erations can lead to divergent rounding—appears to be the dominant factor. This sensitivity to numerical noise is no-tably more pronounced in the amc23 dataset, where the accuracy exhibits greater volatility. This is largely a func-tion of dataset scale; whereas Math500 provides a more stable estimate across 500 instances, the smaller sample size of amc23 (40 instances) means that the outcome of a single request exerts a disproportionately large influence on the aggregate metric, thereby amplifying minor stochastic variations. 
+
+## 6. Conclusion 
+
+In conclusion, we show that the primary challenge in deploy-ing MCTS-based test-time compute scaling is not reasoning accuracy, but managing its uneven computational cost un-der realistic serving workloads. By adopting a system-level perspective, we introduce Negative Early Exit to eliminate unproductive computation and Boosting to reallocate freed resources to higher-potential searches. Integrated into our system, these mechanisms preserve MCTS accuracy while reducing p99 end-to-end latency by up to 2.83 × and improv-ing throughput by up to 2.44 ×, making test-time compute scaling practical for large-scale reasoning-serving systems. 
+
+## References 
+
+Antoniades, A., Örwall, A., Zhang, K., Xie, Y., Goyal, A., and Wang, W. Swe-search: Enhancing software agents with monte carlo tree search and iterative refinement. 
+
+arXiv preprint arXiv:2410.20285 , 2024. URL https: 
+
+8Adaptive Parallel Monte Carlo Tree Search for Efficient Test-time Compute Scaling 
+
+//arxiv.org/abs/2410.20285 .Chaslot, G. M.-B., Winands, M. H., and van Den Herik, H. J. Parallel monte-carlo tree search. In International Con-ference on Computers and Games , pp. 60–71. Springer, 2008. Ding, Y., Jiang, W., Liu, S., Jing, Y., Guo, J., Wang, Y., Zhang, J., Wang, Z., Liu, Z., Du, B., Liu, X., and Tao, D. Dynamic parallel tree search for efficient llm rea-soning. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) . Association for Computational Linguistics, 2025. URL https://aclanthology.org/2025. acl-long.550 .Feng, X., Wan, Z., Wen, M., McAleer, S. M., Wen, Y., Zhang, W., and Wang, J. Alphazero-like tree-search can guide large language model decoding and train-ing. arXiv preprint arXiv:2309.17179 , 2023. doi: 10.48550/arXiv.2309.17179. URL https://arxiv. org/abs/2309.17179 .Fu, Y., Chen, J., Zhu, S., Fu, Z., Dai, Z., Qiao, A., and Zhang, H. Efficiently serving llm reasoning programs with certaindex. arXiv preprint arXiv:2412.20993 , 2024. URL https://arxiv.org/abs/2412.20993 .Grattafiori, A., Dubey, A., Jauhri, A., Pandey, A., Kadian, A., Al-Dahle, A., Letman, A., Mathur, A., Schelten, A., Vaughan, A., et al. The llama 3 herd of models. arXiv preprint arXiv:2407.21783 , 2024. Guan, X., Zhang, L. L., Liu, Y., Shang, N., Sun, Y., Zhu, Y., Yang, F., and Yang, M. rstar-math: Small llms can master math reasoning with self-evolved deep think-ing. arXiv preprint arXiv:2501.04519 , 2025. doi: 10.48550/arXiv.2501.04519. URL https://arxiv. org/abs/2501.04519 .Hao, S., Gu, Y., Ma, H., Hong, J. J., Wang, Z., Wang, D. Z., and Hu, Z. Reasoning with language model is planning with world model. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing ,pp. 8154–8173, Singapore, 2023. Association for Com-putational Linguistics. Kocsis, L. and Szepesvári, C. Bandit based monte-carlo planning. In European Conference on Machine Learning ,pp. 282–293. Springer, 2006a. Kocsis, L. and Szepesvári, C. Bandit based monte-carlo planning. In European conference on machine learning ,pp. 282–293. Springer, 2006b. Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C. H., Gonzalez, J. E., Zhang, H., and Stoica, I. Efficient memory management for large language model serving with pagedattention. In Proceedings of the 29th ACM Symposium on Operating Systems Principles (SOSP ’23) ,Koblenz, Germany, October 2023. ACM. ISBN 979-8-4007-0229-7. doi: 10.1145/3600006.3613165. URL 
+
+https://arxiv.org/abs/2309.06180 . Also available as arXiv:2309.06180. Lightman, H., Kosaraju, V., Burda, Y., Edwards, H., Baker, B., Lee, T., Leike, J., Schulman, J., Sutskever, I., and Cobbe, K. Let’s verify step by step, 2023. URL https: //arxiv.org/abs/2305.20050 .Lightman, H., Kosaraju, V., Burda, Y., Edwards, H., Baker, B., Lee, T., Leike, J., Schulman, J., Sutskever, I., and Cobbe, K. Let’s verify step by step. In The Twelfth International Conference on Learning Representations (ICLR 2024) , 2024. URL https://openreview. net/forum?id=v8L0pN6EOi . Poster. Liu, A., Chen, J., Yu, M., Zhai, Y., Zhou, X., and Liu, J. Watch the unobserved: A simple approach to parallelizing monte carlo tree search. arXiv preprint arXiv:1810.11755 ,2018. Ma, Y., Yang, Q., Cao, R., Li, B., Huang, F., and Li, Y. How to understand whole software repository? arXiv preprint arXiv:2406.01422 , 2024. doi: 10.48550/arXiv.2406. 01422. URL https://arxiv.org/abs/2406. 01422 .MAA. American mathematics competitions. In American Mathematics Competitions , 2023. Misaki, K., Inoue, Y., Imajuku, Y., Kuroki, S., Nakamura, T., and Akiba, T. Wider or deeper? scaling llm inference-time compute with adaptive branching tree search. In 
+
+ICLR 2025 Workshop on Foundation Models in the Wild ,2025. URL https://openreview.net/forum? id=3HF6yogDEm . arXiv:2503.04412. Peng, M., Chen, N., Suo, Z., and Li, J. Rewarding graph reasoning process makes llms more generalized reasoners. In Proceedings of the 31st ACM SIGKDD Conference on Knowledge Discovery and Data Mining (KDD 2025) ,2025. doi: 10.1145/3711896.3737109. URL https: //doi.org/10.1145/3711896.3737109 .PRIME RL. EurusPRM-Stage1 Model Card. 
+
+https://huggingface.co/PRIME-RL/ EurusPRM-Stage1 , 2024. PRIME RL. EurusPRM-Stage2 Model Card. 
+
+https://huggingface.co/PRIME-RL/ EurusPRM-Stage2 , 2025. Qwen, :, Yang, A., Yang, B., Zhang, B., Hui, B., Zheng, B., Yu, B., Li, C., Liu, D., Huang, F., Wei, H., Lin, H., Yang, J., Tu, J., Zhang, J., Yang, J., Yang, J., Zhou, J., Lin, J., 9Adaptive Parallel Monte Carlo Tree Search for Efficient Test-time Compute Scaling 
+
+Dang, K., Lu, K., Bao, K., Yang, K., Yu, L., Li, M., Xue, M., Zhang, P., Zhu, Q., Men, R., Lin, R., Li, T., Tang, T., Xia, T., Ren, X., Ren, X., Fan, Y., Su, Y., Zhang, Y., Wan, Y., Liu, Y., Cui, Z., Zhang, Z., and Qiu, Z. Qwen2.5 technical report, 2025. URL https://arxiv.org/ abs/2412.15115 .RLHFlow. Rlhf-reward-modeling: math-rm /readme.md. 
+
+https://github.com/RLHFlow/ RLHF-Reward-Modeling/blob/main/ math-rm/README.md , 2024. Rosin, C. D. Multi-armed bandits with episode context. 
+
+Annals of Mathematics and Artificial Intelligence , 61(3): 203–230, 2011. Segal, R. B. On the scalability of parallel uct. In Interna-tional Conference on Computers and Games , pp. 36–47. Springer, 2010. Setlur, A., Nagpal, C., Fisch, A., Geng, X., Eisenstein, J., Agarwal, R., Agarwal, A., Berant, J., and Kumar, A. Rewarding progress: Scaling automated process verifiers for llm reasoning. In The 13th International Conference on Learning Representations (ICLR 2025) ,2025. URL https://openreview.net/forum? id=A6Y7AqlzLW . Spotlight. Shi, Z., Fang, M., and Chen, L. Monte carlo planning with large language model for text-based game agents. 
+
+arXiv preprint arXiv:2504.16855 , 2025. URL https: //arxiv.org/abs/2504.16855 .Skywork. Skywork-o1-open-prm-qwen-2.5-1.5b model card. https://huggingface.co/Skywork/ Skywork-o1-Open-PRM-Qwen-2.5-1.5B ,2024. Snell, C. V., Lee, J., Xu, K., and Kumar, A. Scaling llm test-time compute optimally can be more effective than scaling parameters for reasoning. In The Thirteenth Inter-national Conference on Learning Representations , 2025. Sun, Z., Yu, L., Shen, Y., Liu, W., Yang, Y., Welleck, S., and Gan, C. Easy-to-hard generalization: Scal-able alignment beyond human supervision. In 
+
+Proceedings of the 38th Conference on Neural Information Processing Systems (NeurIPS 2024) ,2024. URL https://proceedings.neurips. cc/paper_files/paper/2024/file/ 5b6346a05a537d4cdb2f50323452a9fe-Paper-Conference. pdf . arXiv:2403.09472. Wang, P., Li, L., Shao, Z., Xu, R., Dai, D., Li, Y., Chen, D., Wu, Y., and Sui, Z. Math-shepherd: Verify and reinforce llms step-by-step without human annotations. In Pro-ceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) ,pp. 9426–9439, Bangkok, Thailand, Aug 2024. Associ-ation for Computational Linguistics. doi: 10.18653/v1/ 2024.acl-long.510. URL https://aclanthology. org/2024.acl-long.510/ .Wu, Y., Sun, Z., Li, S., Welleck, S., and Yang, Y. Infer-ence scaling laws: An empirical analysis of compute-optimal inference for problem-solving with language models, 2024. URL https://arxiv.org/abs/ 2408.00724 .Zhang, Z., Zheng, C., Wu, Y., Zhang, B., Lin, R., Yu, B., Liu, D., Zhou, J., and Lin, J. The lessons of developing process reward models in mathematical reasoning, 2025a. URL https://arxiv.org/abs/2501.07301 .Zhang, Z., Zheng, C., Wu, Y., Zhang, B., Lin, R., Yu, B., Liu, D., Zhou, J., and Lin, J. The lessons of developing process reward models in mathematical reasoning. In Findings of the Association for Computational Linguistics: ACL 2025 ,pp. 10495–10516, Vienna, Austria, 2025b. Association for Computational Linguistics. doi: 10.18653/v1/2025. findings-acl.547. URL https://aclanthology. org/2025.findings-acl.547/ .Zhao, J., Liu, R., Zhang, K., Zhou, Z., Gao, J., Li, D., Lyu, J., Qian, Z., Qi, B., Li, X., and Zhou, B. Genprm: Scaling test-time compute of process reward models via genera-tive reasoning. arXiv preprint arXiv:2504.00891 , 2025. URL https://arxiv.org/abs/2504.00891 .Zhou, A., Yan, K., Shlapentokh-Rothman, M., Wang, H., and Wang, Y.-X. Language agent tree search unifies reasoning, acting, and planning in language models. In 
+
+Proceedings of the 41st International Conference on Ma-chine Learning , volume 235 of Proceedings of Machine Learning Research , pp. 62138–62160. PMLR, 21–27 Jul 2024. URL https://proceedings.mlr.press/ v235/zhou24r.html .10 Adaptive Parallel Monte Carlo Tree Search for Efficient Test-time Compute Scaling s0                     
+
+> Selection Expansion Simulation Backpropagation
+> r: 0.1 r: 0.6
+> r: 0.7 r: 0.5
+> r: 0.3 r: 0.4
+> It’s 8. <eos> Finally, check…
+> Add 2 to … Then 2 is …
+> First, multiply… First, add…
+> What is 2+3x2?
+> r: 0.1 r: 0.6
+> r: 0.7 r: 0.5
+> r: 0.3 r: 0.4
+> … <eos> Finally, check…
+> … <\n\n> Then 2 is …
+> … <\n\n> First, add…
+> What is 2+3x2?
+> q=0.126, v=1
+> q=0.126, v=1
+> q=0.126, v=1
+> r: 0.1 r: 0.6
+> First, multiply… First, add…
+> What is 2+3x2?
+> It’s 8. <eos> Finally, check…
+> Add 2 to … Then 2 is …
+> First, multiply…
+> What is 2+3x2?
+> q=0.126, v=1
+> q=0.126, v=1
+> q=0.126, v=1 q=0, v=0
+> q=0, v=0
+> q=0, v=0
+> Selection Policy
+> 1
+> 234
+> 5
+> First, add…
+> Traj 1
+> s1,1 s1,2
+> s2,2 s2,1
+> s3,1 s3,2
+
+Figure 9. Node-reusing MCTS algorithm with four phases. 
+
+## A. Detailed Procedure of MCTS 
+
+MCTS invests more computation time compared to other TTCS methods such as beam search or best-of-n, achieving higher accuracy (Ding et al., 2025). Due to its consistently superior accuracy, recent work within TTCS has actively explored MCTS-based approaches (Hao et al., 2023; Feng et al., 2023; Guan et al., 2025; Misaki et al., 2025; Zhou et al., 2024; Antoniades et al., 2024; Shi et al., 2025; Ma et al., 2024). This is because, in domains with objective feedback, MCTS is particularly effective at leveraging external feedback as reward signals to select and refine promising solutions. In MCTS-based reasoning inference, the algorithm incrementally grows a search tree for a given reasoning request, treating each partial token sequence as a node that captures an intermediate reasoning step. We refer to the input prompt as a 
+
+reasoning request ; to generate the output for a given reasoning request, an MCTS-based engine issues at every reasoning step a sequence-token generation query to the language model, and we call each such query a LLM completion request .From each node, the model applies alternative actions—LLM step generation in reasoning inference—to spawn multiple child nodes; repeating this process gradually expands the tree. A trajectory from the root to a terminal node constitutes a complete reasoning result. To expand the search tree and select the final reasoning trajectory, a quantitative evaluation metric is required to measure each node’s contribution to optimal reasoning. Accordingly, a reward model is employed, which assigns a score to each node based on its plausibility and consistency. While many variants of MCTS exist for reasoning inference, we target the 
+
+node-reusing MCTS employed across recent frameworks. (Hao et al., 2023; Feng et al., 2023; Guan et al., 2025; Zhou et al., 2024; Ma et al., 2024) Both node-reusing MCTS and traditional MCTS iterate four phases: (1) selection, (2) expansion, (3) simulation, and (4) backpropagation as shown in Figure 9. In node-reusing MCTS, these phases proceed as follows. 
+
+Selection Beginning from the root node s0, the algorithm follows the selection policy until reaching the leaf node ( 1 ,
+
+5 ). There are two selection policies: Upper Confidence bounds applied to Trees (UCT) (Kocsis & Szepesvári, 2006b) and 
+
+Predictor-UCT (PUCT) (Rosin, 2011). In both policies, the child at step t is chosen according to the following: Node selected = arg max 
+
+> st,i
+
+ Q(st,i ) + U (st,i ) (1) Here, Q(st,i ) denotes the exploitation term—how promising i-th child node st,i appears at step t—and U (st,i ) denotes the exploration term that favors under-explored children. Exploitation uses the average return over trajectories that traverse this child; accordingly, it is computed as the node’s value estimate (q in 5 ) divided by its visit count (v in 5 ), whereas exploration uses visit count . PUCT further scales the exploration term by the network’s prior policy, steering under-explored choices toward nodes the network deems promising and thus improving search efficiency. Accordingly, whereas traditional MCTS employs UCT, we adopt PUCT to concentrate the exploration on more promising nodes. 
+
+Expansion The search tree is expanded by generating child nodes from the leaf node selected during the selection ( 2 ). 
+
+Simulation From the newly created node in the expansion, the algorithm iteratively generates the child nodes and selects one with the highest reward at each step, continuing until it reaches a terminal node ( 3 ). 
+
+Backpropagation When the simulation produces a terminal node that ends with an eos token, a trajectory is completed. We then backpropagate along this trajectory, adding the trajectory’s cumulative reward to each node’s value estimate while 11 Adaptive Parallel Monte Carlo Tree Search for Efficient Test-time Compute Scaling Expansion (n=4)    
+
+> s0
+> What is 2+3x2?
+> : Rejected by verifier : Selected by verifier
+> Pruning (k=2)
+> Expansion
+> Pruning This is last …
+> s2,2
+> Last process …
+> s2,3
+> It is hard to …
+> s2,4
+> Addition is …
+> s2,5
+> It is easy to …
+> s2,7
+> We have to …
+> s2,8
+> First, add…
+> s1,1
+> First, multiply…
+> s1,2
+> To solve this …
+> s1,3
+> Adding 2 …
+> s1,4
+> Then add 2 …
+> s2,1
+> 3x2 is 6 and …
+> s2,6
+> : Beam
+
+Figure 10. Beam Search algorithm with beam width 2 and 4 sampled candidates per beam. 
+
+incrementing its visit count by one ( 4 ). Whereas traditional MCTS discards nodes created during simulation, node-reusing MCTS retains them and proceeds to the next selection step as shown in 5 .In node-reusing MCTS, each repetition of the four phases yields one complete trajectory, called a rollout . After generating a fixed number of trajectories, the trajectory with the highest cumulative reward is output. Since a single rollout yields one trajectory and the next rollout starts afterward, trajectories are generated sequentially. We target node-reusing MCTS; unless otherwise noted, all subsequent references to MCTS denote node-reusing MCTS. 
+
+## B. Detailed Procedure of Beam Search 
+
+Beam Search is a parallel search method that maintains a small set of high-scoring partial solutions while incrementally extending them over a fixed number of reasoning steps. In the context of multi-step reasoning, the term beam typically refers to a partial trajectory, i.e., a prefix of a reasoning chain up to the current time step. The algorithm proceeds in discrete steps. At each step, it expands the current set of beams, scores the resulting candidates with a verifier, and prunes to retain only the top k candidates, where k is a predefined hyperparameter called the beam width . In summary, as illustrated in Figure 10, Beam Search proceeds by repeatedly alternating between two phases: (1) expansion and (2) pruning. 
+
+Expansion At time step t, each of the k surviving beams is expanded by generating candidate next reasoning steps conditioned on its current partial trajectory. For each beam, n candidate steps are generated, where n is a predefined hyperparameter. As in MCTS, a reasoning step corresponds to a multi-token sequence. 
+
+Pruning After expansion, the nk candidates are reduced to k surviving beams, and the rest are discarded. This step maintains a fixed beam width of k at every time step. Concretely, the top-k candidates are selected deterministically based on their accumulated scores, which are computed using an external verifier. The algorithm repeats the expansion–pruning phases until a termination criterion is met, typically a maximum reasoning depth T (i.e., a fixed number of reasoning steps). After termination, Beam Search selects the final solution among the completed trajectories. The output is chosen as the completed beam with the highest accumulated verifier score. 12

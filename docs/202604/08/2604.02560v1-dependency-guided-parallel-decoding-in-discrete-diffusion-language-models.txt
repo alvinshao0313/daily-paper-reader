@@ -1,0 +1,856 @@
+Title: Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models
+
+URL Source: https://arxiv.org/pdf/2604.02560v1
+
+Published Time: Mon, 06 Apr 2026 00:12:50 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models 
+
+Liran Ringel 1 Ameen Ali 2 Yaniv Romano 1 3 
+
+## Abstract 
+
+Discrete diffusion language models (dLLMs) accelerate text generation by unmasking multiple tokens in parallel. However, parallel decoding introduces a distributional mismatch: it approximates the joint conditional using a fully factorized product of per-token marginals, which degrades output quality when selected tokens are strongly dependent. We propose DEMASK (DEpendency-guided unMASKing), a lightweight dependency predictor that attaches to the final hidden states of a dLLM. In a single forward pass, it estimates pairwise conditional influences between masked positions. Using these predictions, a greedy selection algorithm identifies positions with bounded cumulative dependency for simultaneous unmasking. Under a sub-additivity assumption, we prove this bounds the total variation distance between our parallel sampling and the model’s joint. Empirically, DEMASK achieves 1.7–2.2 × speedup on Dream-7B while matching or improving accuracy compared to confidence-based and KL-based baselines. Code: GitHub | Model: Hugging Face 
+
+## 1. Introduction 40 60 80 100 120 
+
+> Mean Diffusion Steps
+> 0.60
+> 0.65
+> 0.70
+> 0.75
+> 0.80
+> Accuracy
+> Dream (1 TPF)
+> acc=0.812
+> steps=134
+> stop=0.04, conf=0.9
+> acc=0.828, steps=81.3
+> kl=0.0003, conf=0.9
+> acc=0.820, steps=120.7
+> GSM8K: Accuracy vs. Mean Diffusion Steps
+> (darker points = higher confidence threshold)
+> DEMASK (ours)
+> KLASS
+> Pareto frontier
+> Dream (1 TPF)
+
+Figure 1. Accuracy vs. mean diffusion steps (forward passes) on GSM8K for DEMASK and KLASS. Each point represents a hyperparam-eter configuration; darker points indicate higher confidence thresholds. The Pareto frontier (dashed) shows DEMASK dominates across the efficiency-accuracy trade-off. Dream (1 TPF) denotes 1 token per forward pass with entropy selection. 
+
+Discrete diffusion language models (dLLMs) (Shi et al., 2024; Zheng et al., 2025; Ye et al., 2025; Nie et al., 2025) have emerged as an alternative to autoregressive generation, iteratively denoising masked sequences while leveraging bidirectional context. A key advantage is the ability to unmask multiple tokens per diffusion step, accelerating inference compared to strictly left-to-right decoding—though potentially at the cost of output quality. 
+
+> 1
+
+Department of Computer Science, Technion – Israel Institute of Technology 2Blavatnik School of Computer Science and AI, Tel Aviv, Israel 3Department of Electrical and Computer Engineering, Technion – Israel Institute of Technology. Correspondence to: Liran Ringel 
+
+<liranringel@cs.technion.ac.il >.
+
+Preprint. April 6, 2026. 
+
+1
+
+> arXiv:2604.02560v1 [cs.CL] 2 Apr 2026 Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models
+
+Parallel decoding introduces a distributional mismatch: while the model’s conditional distribution factorizes via the chain rule, parallel sampling draws from a product of per-token marginals over a selected subset S of positions, i.e., 
+
+Qθ (YS ) = Q 
+
+> i∈S
+
+Pθ (Yi | context ) instead of the joint Pθ (YS | context ). This discrepancy degrades output quality when selected tokens exhibit strong dependencies. Consider “ 1 + □ = □”: each masked position’s marginal distribution independently favors common digits like “2” or “3”, but sampling both in parallel risks producing inconsistent results such as “ 1 + 2 = 5 ” since neither position conditions on the other. Unmasking one position before the other allows the second sample to condition on the first, restoring consistency. Our key insight is that if we can identify which masked positions are approximately conditionally independent, we can unmask them simultaneously without distributional mismatch. We propose to identify, at each diffusion step, a subset of masked positions whose cumulative pairwise dependency remains bounded. To this end, we introduce a lightweight dependency predictor that estimates pairwise conditional influences from the hidden states of a single forward pass (Figure 3), enabling a greedy algorithm to select approximately independent subsets whose cumulative dependency remains below a threshold τ .We provide theoretical justification: under a sub-additivity assumption (validated empirically), our greedy selection guarantees TV (Pθ , Q θ ) ≤ τ between the model’s joint Pθ and the factorized approximation Qθ . This bound directly limits how often parallel sampling produces different outputs than sequential sampling. Figure 1 previews a key empirical result: DEMASK consistently dominates the Pareto frontier of accuracy vs. inference speed, achieving higher accuracy at any given step budget compared to KLASS (Kim et al., 2025), a recent KL-based baseline. In sum, our contributions are: (1) A single-forward-pass predictor for pairwise dependencies, enabling dependency-bounded parallel sampling in dLLMs. (2) Theoretical bounds on distributional deviation under a sub-additivity assumption. (3) Empirical validation showing 1.7–2.2 × speedup with comparable or improved accuracy over confidence-based and KL-based baselines. (4) Training and evaluation code and trained predictor weights are publicly available on GitHub. 
+
+## 2. Related Work 
+
+2.1. Autoregressive Language Models 
+
+Autoregressive language models (Radford et al., 2018) generate text by predicting the next token given all previous tokens, factorizing the joint distribution via the chain rule: P (x) = Q 
+
+> t
+
+P (xt | x<t ). The Transformer architecture (Vaswani et al., 2017) enabled scaling to billions of parameters, with GPT-3 (Brown et al., 2020) demonstrating emergent few-shot capabilities. Recent autoregressive models (Dubey et al., 2024; Liu et al., 2024; Zeng et al., 2024; Yang et al., 2025; Team et al., 2025) achieve remarkable performance across reasoning, coding, and multilingual tasks. However, autoregressive decoding is inherently sequential: generating n tokens requires n forward passes, limiting throughput. This motivates parallel decoding paradigms such as discrete diffusion. 
+
+2.2. Discrete Diffusion Language Models 
+
+Masked diffusion models (MDMs), often called diffusion large language models (dLLMs), (Austin et al., 2021a; Lou et al., 2024; Shi et al., 2024; Sahoo et al., 2024) generate text by iteratively predicting masked tokens. The model uses bidirectional attention (no causal mask) and is trained to maximize a lower bound on the data log-likelihood (see Section 3). Recent work has scaled MDMs to billions of parameters. LLaDA (Nie et al., 2025) trains an 8B-parameter model from scratch, achieving performance competitive with LLaMA3. Dream (Ye et al., 2025) initializes from a pretrained autoregressive model and uses context-adaptive noise scheduling to reach 7B parameters. LLaDA 2.0 (Bie et al., 2025) extends this conversion approach to 100B parameters. These large-scale models expose the marginal-joint gap that motivates our approach. 
+
+2.3. Parallel Decoding Strategies 
+
+Most existing methods only implicitly mitigate the marginal-joint gap discussed in Section 1 through confidence-based selection. Dream and LLaDA select tokens based on entropy or top-k probability. LLaDA remasks a scheduled fraction of low-confidence predictions at each step. KLASS (Kim et al., 2025) uses KL divergence between consecutive timesteps, 2Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models 
+
+unmasking tokens whose predicted distributions remain stable. dParallel (Chen et al., 2025) uses certainty-forcing distillation to reduce the number of denoising steps. Patel et al. (2025) propose position contrastive guidance, biasing toward left-to-right decoding. In contrast with our approach, these methods treat tokens independently and do not explicitly model inter-token dependencies. 
+
+2.4. Dependency-Aware Decoding 
+
+Recent work explicitly addresses the marginal-joint gap by modeling token dependencies. PUNT (Azangulov et al., 2025) employs a divide-and-conquer strategy to identify an approximately independent subset using O(log |M |) forward passes per step, where |M | is the number of masked tokens. Discrete Copula Diffusion (Liu et al., 2025) captures dependencies via a separate autoregressive model. APD (Israel et al., 2025) combines dLLM marginals with joint probabilities from a small auxiliary autoregressive model via a multiplicative mixture. Bansal & Sanghavi (2025) train a lightweight sampler layer to approximate joint sampling from a frozen dLLM. Jazbec et al. (2025) learn unmasking policies via reinforcement learning, though without explicitly modeling token dependencies. Unlike these approaches, our method selects the least dependent token positions by predicting their dependencies in a single forward pass without requiring auxiliary models. Additionally, our selection rule has solid theoretical foundations. 
+
+## 3. Preliminaries 
+
+Discrete Diffusion Language Models. Discrete diffusion language models generate text through iterative denoising of masked sequences (Nie et al., 2025; Ye et al., 2025). Let Y = ( Y1, . . . , Y N ) ∈ V N denote a response sequence over vocabulary V, conditioned on a prompt X. During training, time t ∈ [0 , 1] indexes the corruption level: at each t, positions are independently replaced with a special [MASK] token with probability αt, where α0 = 0 (clean) and α1 = 1 (fully masked). The model is trained to maximize a lower bound on the data log-likelihood; in practice, this reduces to minimizing a time-weighted cross-entropy over masked positions (Shi et al., 2024; Sahoo et al., 2024; Ye et al., 2025; Bie et al., 2025): 
+
+L(θ) = E
+
+"
+
+w(t) X
+
+> i∈Mt
+
+− log Pθ (Yi | X, Y Ut )
+
+#
+
+(1) where Mt denotes the masked positions at time t, YUt the visible tokens, and w(t) a time-dependent weight. At inference time, generation begins from a fully masked sequence and proceeds through iterative refinement: each step involves a forward pass to obtain token distributions, selection of positions to unmask, and sampling new tokens at those positions. The selection strategy—which positions to unmask per step—governs the trade-off between parallelism and output quality. 
+
+Total Variation Distance. We define here this distance as it will be used later to bound the approximation error between the factorized and joint distributions. For distributions P and Q over a discrete sample space X , the total variation (TV) distance is defined as TV (P, Q ) = 12
+
+X
+
+> x∈X
+
+|P (x) − Q(x)|. (2) TV is a metric on probability distributions, bounded in [0 , 1] , and satisfies the triangle inequality. 
+
+## 4. Methodology 
+
+To accelerate generation, we propose an iterative unmasking procedure (Algorithm 1) where each diffusion step identifies a subset of masked positions S = {s1, . . . , s |S|} to unmask simultaneously. This subset is constructed using a greedy selection strategy (Algorithm 2), selecting positions one by one such that their values can be sampled with minimal deviation from the model’s joint distribution. Crucially, S is constructed using the output of a single forward pass. Figure 2 illustrates our approach. We first describe the greedy selection procedure (§4.1), then provide theoretical guarantees (§4.2), and finally detail the dependency predictor that enables efficient selection (§4.3). 3Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models A. Dependency Predictor & Matrix (Single Forward Pass)             
+
+> Discrete Diffusion LLM
+> Context
+> X
+> Masked Sequence
+> M= ( M1, M 2, . . . , M N)
+> Token Classifier Logits ˆP
+> Dependency Predictor
+> 0
+> 0
+> 0
+> 0
+> m1
+> m1
+> m2
+> m2
+> m3
+> m3
+> m4
+> m4
+> ˆDi,j
+> Dependency Matrix ˆDˆDi,j ≈expected TV shift in P(Ymi|X, Y U)when Ymjis revealed
+
+B. Greedy Subset Selection                                
+
+> Filter by confidence
+> C={c∈M\S|ptop1 [c]> γ }
+> C=∅?
+> Select candidate
+> c∗= arg min c∈C
+> ∑
+> s∈SDπ(c),π (s)
+> ∆∗=∑
+> s∈SDπ(c∗),π (s)
+> Update
+> S←S∪ { c∗}Daccum += ∆∗
+> Initialize
+> s1= min( M)
+> S={s1},Daccum = 0
+> Return S
+> Daccum + ∆ ∗
+> ≤τ?
+> Yes
+> No
+> Yes
+> No
+
+C. Iterative Parallel Decoding Cycle            
+
+> Diffusion LLM
+> (+ Dep. Predictor)
+> (Panel A)
+> 1. Forward Pass
+> State t
+> [M] +[M] =[M]
+> Selector
+> (Alg. 2)
+> (Panel B)
+> 2. Greedy Selection
+> ˆP,ˆDSampler
+> 3. Parallel Sample & Update
+> ˆP, S State t+ 1 2 + 3 = [M]
+> YS
+> Repeat until no masked tokens
+
+Figure 2. Overview of DEMASK. (A) A lightweight dependency predictor attaches to the dLLM backbone and estimates pairwise dependencies ˆD from hidden states in a single forward pass. (B) Greedy subset selection identifies positions with bounded cumulative dependency for parallel unmasking. (C) The iterative decoding cycle: each step performs a forward pass, selects positions, and samples them in parallel until all tokens are unmasked. 
+
+4.1. Greedy Position Selection 
+
+Let X denote the tokens of the input prompt. We partition the indices of the current response sequence into two sets: U
+
+(unmasked) and M (masked). Let YU = ( Yu1 , . . . , Y u|U | ) ∈ V |U | denote the tokens at positions U which were determined in previous diffusion steps, where V is the vocabulary. Analogously, let YS = ( Ys1 , . . . , Y s|S| ) ∈ V |S| denote the random variables corresponding to the tokens at the selected positions S ⊆ M , and let YM ∈ V |M | denote the variables corresponding to the set of masked positions M = {m1, . . . , m |M |}. Our goal is to select the largest subset S such that, conditioned on X
+
+and YU , the dependence among the variables in YS remains below a specified threshold. In diffusion language models, parallel sampling of multiple tokens amounts to sampling from their marginal distributions. While the model’s joint distribution follows the chain rule decomposition Pθ (YS | X, Y U ) = Q|S|
+
+j=1 Pθ (Ysj | Ys<j , X, Y U ),where s<j = {s1, . . . , s j−1}, parallel sampling effectively draws from a fully factorized approximation Qθ (YS | X, Y U ),defined as: 
+
+Qθ (YS | X, Y U ) = Y
+
+i∈S
+
+Pθ (Yi | X, Y U ) (3) where each token is sampled independently given the context. We construct the set S using a greedy approximation strategy, described in Algorithm 2. Let M = {m1, . . . , m |M |} be the ordered set of masked positions. Let D ∈ [0 , 1] |M |×| M | be the pairwise dependency matrix, where the entry Di,j represents the expected change in the conditional distribution of the variable at position mi when the variable at position mj is revealed: 
+
+Di,j = EYmj ∼Pθ (·| X,Y U )
+
+h
+
+TV 
+
+
+
+Pθ (Ymi | X, Y U ),Pθ (Ymi | X, Y U , Y mj )
+
+i 
+
+.
+
+(4) 4Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models 
+
+Algorithm 1 Iterative Diffusion Generation 
+
+Require: Prompt X, Sequence Length N , Thresholds τ, γ  
+
+> 1:
+
+U ← ∅ , M ← { 1, . . . , N } 
+
+> 2:
+
+while M̸ = ∅ do  
+
+> 3:
+
+Phase 1: Forward Pass  
+
+> 4:
+
+ˆP, ˆD ← Model (X, Y U , M )             
+
+> ▷Dims: ˆP∈[0 ,1] |M|×|V| ,ˆD∈[0 ,1] |M|×| M|
+> 5:
+
+ptop1 ← max( ˆP, dim = vocab )       
+
+> ▷Dims: ptop1 ∈[0 ,1] |M|
+> 6:
+
+Phase 2: Greedy Subset Selection (Algorithm 2)  
+
+> 7:
+
+S ← GreedySubsetSelection ( ˆD, M, p top1 , γ, τ ) 
+
+> 8:
+
+Phase 3: Parallel Sample & Update  
+
+> 9:
+
+YS ∼ Sample ( ˆP, S ) // Sample at positions S 
+
+> 10:
+
+U ← U ∪ S 
+
+> 11:
+
+M ← M \ S 
+
+> 12:
+
+YU ← Update (YU , Y S ) 
+
+> 13:
+
+end while  
+
+> 14:
+
+return YU
+
+Here, TV (P, Q ) = 12
+
+P 
+
+> y∈V
+
+|P (y) − Q(y)|. Intuitively, Di,j ≈ 0 implies that Ymi is nearly conditionally independent of 
+
+Ymj given the prompt X and history YU . Note that the matrix D is generally asymmetric. At inference time, we use ˆD, the output of a learned dependency predictor trained to approximate these values. The details on how we learn to predict ˆD are provided later in Section 4.3; first, we explain how the knowledge of the pairwise dependencies D can be used to select S.The algorithm initializes the set S by selecting the left-most masked position s1 = min( M ). This left-to-right bias reflects the sequential structure of natural language reasoning: prior work has shown that biasing toward earlier positions improves generation quality (Patel et al., 2025), and that token-order selection outperforms confidence-based selection when generating one token per step (Israel et al., 2025). Notably, our method can also be implemented without this left-to-right bias; it is merely a design choice that we found to work well. Subsequently, the algorithm proceeds iteratively. At each step, we first identify a set of candidate positions C ⊆ M \ S where the model’s confidence—measured by the top-1 probability—exceeds a threshold γ. This filtering follows the common practice in previous work, showing that confidence-based selection improves performance (Bie et al., 2025; Kim et al., 2025). In our context, this confidence-based selection is necessary because approximate independence does not imply low uncertainty: tokens may be approximately independent yet individually uncertain when their values depend on context not yet revealed. Without confidence filtering, the algorithm may commit to highly uncertain tokens early. From these high-confidence candidates C, we select the position c∗ that minimizes the aggregate pairwise dependency on the currently selected positions S:
+
+c∗ = arg min 
+
+> c∈C
+
+X
+
+> s∈S
+
+Dπ(c),π (s), (5) where π : M → { 1, . . . , |M |} maps a global position in M to its corresponding index in the matrix D: π(mi) = i. The algorithm continues to add positions to S until either no candidates remain (i.e., C = ∅) or the cumulative dependency exceeds τ . Formally, if Daccum is the current accumulated dependency, we stop if Daccum + P 
+
+> s∈S
+
+Dπ(c∗),π (s) > τ . This strategy maximizes the degree of parallelism for accelerated generation while strictly limiting the deviation from the model’s joint distribution to a user-specified bound, as formally proven in Section 4.2. 
+
+4.2. Theoretical Analysis 
+
+We now provide a theoretical grounding for the proposed greedy selection strategy, assuming that the true pairwise dependency matrix D is known. Our objective is to ensure that the joint distribution of the variables at the selected positions 
+
+S does not deviate significantly from the fully factorized approximation. 5Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models 
+
+Algorithm 2 Greedy Subset Selection 
+
+Require: Dependency matrix D, Mask positions M , Top-1 probs ptop1 , Confidence threshold γ, Dependency Bound τ
+
+1: S ← ∅ , Daccum ← 0
+
+2: s1 ← min( M ) // Start with left-most 
+
+3: S ← S ∪ { s1}
+
+4: while true do 
+
+5: Step 1: Filter Candidates by Confidence 
+
+6: C ← { c ∈ M \ S | ptop1 [c] > γ }
+
+7: if C = ∅ then break 
+
+8: end if 
+
+9: Step 2: Select Candidate Minimizing Dependency 
+
+10: c∗ ← arg min c∈C 
+
+P 
+
+> s∈S
+
+Dπ(c),π (s)
+
+11: ∆∗ ← P 
+
+> s∈S
+
+Dπ(c∗),π (s)
+
+12: Step 3: Check Cumulative Dependency Constraint 
+
+13: if Daccum + ∆ ∗ > τ then break 
+
+14: end if 
+
+15: S ← S ∪ { c∗}
+
+16: Daccum ← D accum + ∆ ∗
+
+17: end while 
+
+18: return S
+
+We measure the approximation error between the model’s joint distribution Pθ (YS | X, Y U ) and the factorized approximation 
+
+Qθ (YS | X, Y U ) using the TV distance: 
+
+E(S) = TV 
+
+
+
+Pθ (YS | X, Y U ), Q θ (YS | X, Y U )
+
+
+
+. (6) This metric admits a rigorous operational interpretation via the concept of maximal coupling. A coupling is any joint distribution over pairs (A, B ) whose marginals are PA and PB , respectively. It is a standard result that the minimum mismatch probability P(A̸ = B) among all couplings is exactly TV (PA, P B ), and this minimum is attained by the maximal coupling (Levin & Peres, 2017). In our case, let A ∼ Pθ (YS | X, Y U ) follow the model’s joint and B ∼ Qθ (YS | X, Y U )
+
+follow the factorized distribution. Then, the minimum mismatch probability is P(A̸ = B) = E(S). Consequently, if 
+
+E(S) ≤ τ , then under the optimal coupling (A, B ), we have P(A = B) ≥ 1 − τ (Levin & Peres, 2017, Proposition 4.7). To bound this error using only pairwise statistics, we rely on the following assumption regarding the sub-additivity of dependencies. 
+
+Assumption 4.1 (Sub-Additivity) . We assume the dependency of a variable on its history is sub-additive: 
+
+EYs<t 
+
+h
+
+TV 
+
+
+
+Pθ (Yst | X, Y U ), P θ (Yst | X, Y U , Y s<t )
+
+i 
+
+≤
+
+> t−1
+
+X
+
+> j=1
+
+Dπ(st),π (sj ),
+
+(7) where Ys<t = ( Ys1 , . . . , Y st−1 ) denotes the random variables at previously selected positions. That is, we assume that the joint influence of the history Ys<t on Yst does not exceed the sum of individual pairwise influences 
+
+Dπ(st),π (sj ) from (4) . In Section 5.4, we provide empirical evidence on the Tulu 3 SFT Mixture dataset demonstrating that this assumption holds in practice. With this assumption in place, we prove that the deviation between the joint and factorized distributions is bounded by τ for the selected set obtained by our greedy algorithm. See Appendix A for the complete proof. 
+
+Theorem 4.2 (Correctness of Algorithm 2) . Suppose that Assumption 4.1 holds and that Algorithm 2 is implemented with the true matrix D and error threshold τ . The selected subset S returned by Algorithm 2 satisfies TV (Pθ (YS | X, Y U ), Q θ (YS |
+
+X, Y U )) ≤ τ .
+
+6Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models                  
+
+> Masked Sequence
+> dLLM Backbone (frozen)
+> H∈R|M|× d
+> WQWK
+> QK ⊤
+> √d
+> σ(·)
+> ˆD∈[0 ,1] |M|×| M|
+> Figure 3. Dependency predictor architecture. Hidden states Hfrom the frozen backbone are projected via learned WQ,WK, then combined via scaled dot-product and sigmoid to predict the pairwise dependency matrix ˆD.
+
+Remark. When using an estimated ˆD, the bound holds approximately, with the additional error depending on the quality of the predictor. 
+
+4.3. Learning the Dependency Predictor 
+
+The greedy selection strategy described above requires access to the pairwise dependency matrix D defined in (4) . Computing this matrix exactly requires O(|M |) additional forward passes—one for each masked position—which would negate the efficiency gains of parallel decoding. We address this by training a lightweight predictor that estimates ˆD from the hidden states of a single forward pass. 
+
+Architecture. Our predictor draws inspiration from scaled dot-product attention (Vaswani et al., 2017). Let d denote the hidden dimension of the backbone. Given final-layer hidden states H ∈ R|M |× d at the masked positions (batch dimension omitted for clarity), we compute query and key representations Q = HW Q and K = HW K , where WQ, WK ∈ Rd×d
+
+are learned projections. The predicted dependency is: 
+
+ˆDi,j = σ
+
+ qi · kj
+
+√d
+
+
+
+(8) where qi, kj are the i-th and j-th rows of Q, K respectively, and σ(·) is sigmoid. The sigmoid ensures outputs lie in [0 , 1] , matching the TV range. We zero out the diagonal since self-dependencies are irrelevant. Note that ˆD is generally asymmetric ( ˆDi,j ̸ = ˆDj,i ), consistent with (4) . We observed empirically that this Q/K factorization yields better optimization performance. Importantly, at inference time, we merge the projections into W = WQW⊤ 
+
+> K
+
+and compute 
+
+ˆDi,j = σ(hiWh ⊤ 
+
+> j
+
+/√d) directly to reduce the two matrix-matrix multiplications (required to compute Q and K) into one. Figure 3 illustrates this architecture. 
+
+Two-Phase Training Pipeline. Training the dependency predictor proceeds in two phases: (i) TV cache generation , where we precompute ground-truth dependency matrices using the full backbone, and (ii) predictor training , where we train only the lightweight predictor on the cached targets. This decoupling offers key advantages: we can run multiple epochs over the cached data without recomputing expensive TV matrices; and we can iterate on predictor architectures and hyperparameters without re-running the costly data generation. 
+
+Phase 1: TV Cache Generation. We generate training data by explicitly computing pairwise TV distances. For each training sample, we apply random masking with ratio t ∼ Uniform (0 , 1) . Recall that (4) defines Di,j as an expectation over 7Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models 
+
+Table 1. Comparison of DEMASK and KLASS on Dream-7B. Each cell shows accuracy (%) with speedup in parentheses, relative to Entropy (1 tok). Bold : best average accuracy (Avg excludes GSM8K). Method MMLU-Pro GSM8K HumanEval MBPP Avg Entropy (1 tok) 43.9 ±0.4 (1.0 ×) 81.2 ±1.1 (1.0 ×) 53.7 ±3.9 (1.0 ×) 58.0 ±2.2 (1.0 ×) 51.8 (1.0 ×)Entropy (2 tok) 39.7 ±0.4 (2.0 ×) 76.7 ±1.2 (2.2 ×) 31.1 ±3.6 (1.1 ×) 43.8 ±2.2 (1.3 ×) 38.2 (1.5 ×)Top-1 (1 tok) 45.5 ±0.4 (1.0 ×) 81.2 ±1.1 (1.0 ×) 53.7 ±3.9 (1.0 ×) 58.0 ±2.2 (1.0 ×) 52.4 (1.0 ×)Top-1 (2 tok) 43.5 ±0.4 (2.0 ×) 76.7 ±1.2 (2.1 ×) 31.1 ±3.6 (1.1 ×) 43.8 ±2.2 (1.4 ×) 39.5 (1.5 ×)Token Order (1 tok) 45.7 ±0.4 (1.3 ×) 80.7 ±1.1 (1.1 ×) 55.5 ±3.9 (1.3 ×) 57.8 ±2.2 (1.5 ×) 53.0 (1.3 ×)Token Order (2 tok) 43.6 ±0.4 (2.8 ×) 73.8 ±1.2 (2.1 ×) 24.4 ±3.4 (1.1 ×) 40.8 ±2.2 (1.5 ×) 36.2 (1.8 ×)KLASS 45.7 ±0.4 (1.3 ×) 82.0 ±1.1 (1.1 ×) 55.5 ±3.9 (1.1 ×) 58.2 ±2.2 (1.6 ×) 53.1 (1.3 ×)DEMASK (ours) 47.5 ±0.4 (1.7 ×) 82.8 ±1.0 (1.8 ×) 54.9 ±3.9 (1.7 ×) 57.6 ±2.2 (2.2 ×) 53.3 (1.9 ×)
+
+Ymj . We define Di,j (ymj ) as the TV distance for a specific realization ymj ∼ Pθ (· | X, Y U ):
+
+Di,j (ymj ) = TV 
+
+
+
+Pθ (Ymi | X, Y U ), P θ (Ymi | X, Y U , y mj )
+
+
+
+so that Di,j = EYmj ∼Pθ (·| X,Y U )[Di,j (Ymj )] . For each masked position mj , we sample a realization ymj and store Di,j (ymj )
+
+for all i. This requires |M | + 1 forward passes per sample: one with all positions masked to obtain Pθ (Ymi | X, Y U ),and one for each revealed token ymj to obtain Pθ (Ymi | X, Y U , y mj ). To increase diversity, we generate 5 samples per response using different random masks and ymj draws. Our training set comprises 100K responses from the Tulu-3 SFT mixture (Lambert et al., 2025), yielding approximately 500K training examples. Generating this cache requires 3.5 hours on 8×H200 GPUs. 
+
+Phase 2: Predictor Training. With the TV cache in hand, we train only the dependency predictor while keeping the backbone frozen. Our objective is to minimize the expected squared error: 
+
+E
+
+ ˆDi,j − Di,j (Ymj )
+
+2
+
+, (9) where the expectation is over the training distribution (X, Y U , M ), uniform sampling of pairs (i, j ) with i̸ = j, and 
+
+Ymj ∼ Pθ (· | X, Y U ). We minimize an unbiased estimate of this objective by averaging over all off-diagonal pairs in a batch: 
+
+L = 1
+
+PBb=1 (|M (b)|2 − | M (b)|)
+
+> B
+
+X
+
+> b=1
+
+X
+
+> i̸=j
+
+ ˆD(b) 
+
+> i,j
+
+− D(b) 
+
+> i,j
+
+(y(b) 
+
+> mj
+
+)
+
+2
+
+(10) where B is the batch size, and y(b) 
+
+> mj
+
+are B realizations of Ymj from Phase 1. Diagonal entries are excluded since self-dependencies are irrelevant. Crucially, the MSE-optimal predictor outputs the conditional mean, so the trained model learns to approximate EYmj ∼Pθ (·| X,Y U )[Di,j (Ymj )] = Di,j , in line with (4) . This is because ymj in (10) are sampled from 
+
+Pθ (· | X, Y U ). The backbone remains frozen in bfloat16, while the predictor is trained in float32 for numerical stability. We use AdamW with learning rate 10 −5, weight decay 0.01 , and cosine schedule with 5% warmup. We train for 5 epochs (approx. 95 minutes on 8 ×H200 GPUs) and select the checkpoint with the lowest validation loss. The predictor adds only 
+
+2d2 ≈ 26 M parameters (for d = 3584 ), negligible compared to the 7B backbone. 
+
+## 5. Experiments 
+
+5.1. Experimental Setup 
+
+We evaluate DEMASK on Dream-7B (Ye et al., 2025), a 7B-parameter dLLM trained on instruction-following data. We compare against several baselines: (i) Entropy : select tokens with lowest entropy (the baseline used in the original Dream paper); (ii) Top-1 : select tokens with highest top-1 probability; (iii) KLASS (Kim et al., 2025): select stable tokens that pass both a KL divergence threshold (between consecutive timesteps) and a top-1 confidence threshold; and (iv) Token Order :unmask tokens left-to-right. For (i), (ii), and (iv), we evaluate with 1 and 2 tokens per step. All methods use temperature 0.1 and top-p sampling with p = 0 .9, following the original Dream evaluation setup. 8Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models 
+
+We report results on four benchmarks: MMLU-Pro (Wang et al., 2024) (reasoning), GSM8K (Cobbe et al., 2021) (math reasoning), HumanEval (Chen, 2021) and MBPP (Austin et al., 2021b) (code generation). We use the lm-evaluation-harness library (Gao et al., 2024) to run the evaluations. All experiments run on 8 ×H200 GPUs with data parallelism (batch size 1 per GPU). We report wall-clock time relative to Entropy with 1 token per forward pass. 
+
+Avoid sampling after EOS tokens. We apply an optimization to all methods: once an end-of-sequence (EOS) token is sampled, all subsequent positions are immediately set to EOS. The model typically fills these positions with EOS tokens on its own, but burns inference time doing so. This optimization avoids that wasted computation and ensures fair comparison across methods. As a result, metrics may differ from those reported in prior work. We discuss the impact of this optimization in Appendix B. 
+
+5.2. Hyperparameter Selection 
+
+DEMASK has two hyperparameters: the dependency threshold τ (lower values enforce stricter independence) and the confidence threshold γ (higher values require more confident predictions). KLASS similarly has two hyperparameters: a KL threshold (unmask only if the predicted distribution is close to that of the previous timesteps) and a confidence threshold. In all experiments, we use a history length of 2 (see Kim et al. (2025) for details). We conduct a grid search on GSM8K for both methods; see Appendix C for the full search grids. Figure 1 shows accuracy vs. mean diffusion steps for DEMASK and KLASS. DEMASK dominates the Pareto frontier across the entire trade-off curve, achieving higher accuracy at comparable step counts. We select τ = 0 .04 and γ = 0 .9 for DEMASK, and KL threshold 0.0003 with a confidence threshold 0.9 for KLASS, as favorable trade-off points. We use these hyperparameters for both methods in all subsequent experiments. To ensure a fair comparison, we re-optimized the hyperparameters for KLASS rather than using the values reported in the original paper, accounting for differences in the temperature parameter and evaluation pipeline. 
+
+5.3. Main Empirical Results 
+
+Table 1 presents our main empirical results. DEMASK achieves the highest average accuracy (53.3%) while providing 1.9 ×
+
+average speedup over the Entropy baseline. Notably, DEMASK improves accuracy on MMLU-Pro (+3.6% over Entropy), suggesting that dependency-aware selection can improve output quality in addition to accelerating generation. We exclude GSM8K from the average accuracy and speedup calculations, as it was used for hyperparameter optimization. 
+
+Baselines degrade with parallelism. All baselines (Entropy, Top-1, and Token Order) suffer significant accuracy drops when unmasking 2 tokens per step instead of 1. This degradation validates our central hypothesis: unmasking multiple tokens without accounting for their dependencies introduces errors that compound through generation. 
+
+5.4. Empirical Validation of Sub-Additivity 
+
+We empirically validate Assumption 4.1 (Sub-Additivity) on the Tulu 3 SFT Mixture dataset (Lambert et al., 2025) using Dream-7B (Ye et al., 2025). This assumption underpins the theoretical guarantees of our greedy selection algorithm (Theorem 4.2). 
+
+Experimental Setup. We evaluate on 5,000 prompt–response pairs from the dataset, drawing 5 independent random masks per response. For each masked sample, we apply the same random masking procedure used during training: sample a mask ratio t ∼ Uniform(0 , 1) and mask the corresponding fraction of response positions to obtain a masked set M . We then uniformly sample a subset size |S| ∼ Uniform {1, . . . , 6} and draw S ⊂ M uniformly at random among subsets of that size. For each target position i ∈ M \ S, we sample token values yS from the model’s conditional distribution and compute: 
+
+LHS i = TV  Pθ (Yi | X, Y U ), P θ (Yi | X, Y U , Y S = yS ),
+
+RHS i = X
+
+> j∈S
+
+TV  Pθ (Yi | X, Y U ), P θ (Yi | X, Y U , Y j = yj ), (11) where Pθ (Yi | X, Y U ) denotes the distribution with all positions in M masked. Computing these quantities requires |S| + 2 
+
+forward passes per sample: one with all tokens masked, one for each single-token reveal in S, and one for the joint reveal. The sub-additivity assumption holds when RHS i ≥ LHS i; we refer to the difference RHS i − LHS i as the slack .9Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models 1 0 1 2 3 4 5 6           
+
+> Slack (RHS LHS)
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Cumulative Probability
+> |S| = 1
+> |S| = 2
+> |S| = 3
+> |S| = 4
+> |S| = 5
+> |S| = 6
+> Slack = 0
+> Figure 4. Empirical CDF of the slack RHS i−LHS istratified by subset size |S|, evaluated on Tulu 3 SFT Mixture with Dream-7B. The
+> |S|= 1 curve (vertical line at zero) is trivially satisfied. For |S| ≥ 2, positive slack indicates the sub-additivity bound holds.
+
+Results. Figure 4 shows the empirical CDF of the slack stratified by subset size |S|. Across all subset sizes, the distribution is concentrated to the right of zero, with violation rates below 6%. Notably, the mean slack increases with |S|, indicating that the bound becomes increasingly slack for larger subsets. These results confirm that violations are rare, supporting Assumption 4.1’s use in Section 4. 
+
+## 6. Conclusion 
+
+We presented DEMASK, a dependency-guided approach to parallel decoding in discrete diffusion language models. Rather than treating token selection as independent decisions, our method learns to predict which positions exhibit weak dependence and can therefore be unmasked simultaneously with minimal distributional error. On Dream-7B, DEMASK delivers speedups of up to 2.2 × without sacrificing output quality; the accuracy even improves on several benchmarks. Our approach achieves performance gains across reasoning, math, and code generation tasks, while requiring only a small auxiliary module ( ∼26 M parameters). 
+
+Future Directions. Several directions merit further investigation. First, the predictor architecture is agnostic to the backbone, requiring only hidden states at masked positions, which should enable extension to other dLLM architectures such as LLaDA and LLaDA 2.0. Second, improved predictor architectures—such as multi-head variants or deeper networks—may capture finer-grained dependencies, though with an accuracy-cost trade-off. Third, combining dependency-guided selection with remasking strategies could leverage dependency structure to decide which tokens to remask. Fourth, tighter theoretical bounds might be achievable by relaxing the sub-additivity assumption. Finally, adaptive thresholds that vary τ and γ based on generation progress or task characteristics could further improve the accuracy-efficiency trade-off. 
+
+## 7. Limitations 
+
+Sub-additivity assumption. Our theoretical guarantee (Theorem 4.2) relies on Assumption 4.1. As shown in Section 5.4, this assumption holds in the vast majority of cases. When violations occur, the TV bound may not hold exactly; however, we observe no corresponding degradation in downstream task performance, suggesting the method is robust to such violations. 
+
+Theory-practice gap in dependency estimation. Theorem 4.2 assumes access to the true dependency matrix D, whereas our implementation uses a learned approximation ˆD. Prediction errors propagate to the TV bound, though we have not formally characterized this relationship. Empirically, the predictor appears sufficiently accurate for the downstream tasks we evaluated. 
+
+Single backbone architecture. We evaluate DEMASK exclusively on Dream-7B. Applying the method to other dLLM architectures requires retraining the dependency predictor on data generated from those backbones, which we have not yet 10 Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models 
+
+performed. 
+
+## Impact Statement 
+
+This paper presents work whose goal is to advance the field of machine learning. There are many potential societal consequences of our work, none of which we feel must be specifically highlighted here. 
+
+## Acknowledgments 
+
+L. R. and Y. R. were supported by the European Union (ERC, SafetyBounds, 101163414). Views and opinions expressed are however those of the authors only and do not necessarily reflect those of the European Union or the European Research Council Executive Agency. Neither the European Union nor the granting authority can be held responsible for them. This research was also partially supported by the Israel Science Foundation (ISF grant 729/21). Y. R. acknowledges additional support from the Career Advancement Fellowship at the Technion. The contribution of the first author is part of a PhD thesis research conducted at the Technion. 
+
+## References 
+
+Austin, J., Johnson, D. D., Ho, J., Tarlow, D., and Van Den Berg, R. Structured denoising diffusion models in discrete state-spaces. Advances in neural information processing systems , 34:17981–17993, 2021a. Austin, J., Odena, A., Nye, M., Bosma, M., Michalewski, H., Dohan, D., Jiang, E., Cai, C., Terry, M., Le, Q., et al. Program synthesis with large language models. arXiv preprint arXiv:2108.07732 , 2021b. Azangulov, I., Pandeva, T., Prasad, N., Zazo, J., and Karmalkar, S. Parallel sampling from masked diffusion models via conditional independence testing. arXiv preprint arXiv:2510.21961 , 2025. Bansal, P. and Sanghavi, S. Enabling approximate joint sampling in diffusion lms. arXiv preprint arXiv:2509.22738 , 2025. Bie, T., Cao, M., Chen, K., Du, L., Gong, M., Gong, Z., Gu, Y., Hu, J., Huang, Z., Lan, Z., et al. Llada2. 0: Scaling up diffusion language models to 100b. arXiv preprint arXiv:2512.15745 , 2025. Brown, T., Mann, B., Ryder, N., Subbiah, M., Kaplan, J. D., Dhariwal, P., Neelakantan, A., Shyam, P., Sastry, G., Askell, A., et al. Language models are few-shot learners. Advances in neural information processing systems , 33:1877–1901, 2020. Chen, M. Evaluating large language models trained on code. arXiv preprint arXiv:2107.03374 , 2021. Chen, Z., Fang, G., Ma, X., Yu, R., and Wang, X. dparallel: Learnable parallel decoding for dllms. arXiv preprint arXiv:2509.26488 , 2025. Cobbe, K., Kosaraju, V., Bavarian, M., Chen, M., Jun, H., Kaiser, L., Plappert, M., Tworek, J., Hilton, J., Nakano, R., et al. Training verifiers to solve math word problems. arXiv preprint arXiv:2110.14168 , 2021. Dubey, A., Jauhri, A., Pandey, A., Kadian, A., Al-Dahle, A., Letman, A., Mathur, A., Schelten, A., Yang, A., Fan, A., et al. The llama 3 herd of models. CoRR , 2024. Gao, L., Tow, J., Abbasi, B., Biderman, S., Black, S., DiPofi, A., Foster, C., Golding, L., Hsu, J., Le Noac’h, A., Li, H., McDonell, K., Muennighoff, N., Ociepa, C., Phang, J., Reynolds, L., Schoelkopf, H., Skowron, A., Sutawika, L., Tang, E., Thite, A., Wang, B., Wang, K., and Zou, A. The language model evaluation harness, 07 2024. URL 
+
+https://zenodo.org/records/12608602 .Israel, D. M., den Broeck, G. V., and Grover, A. Accelerating diffusion LLMs via adaptive parallel decoding. In The Thirty-ninth Annual Conference on Neural Information Processing Systems , 2025. Jazbec, M., Olausson, T. X., B ´ethune, L., Ablin, P., Kirchhof, M., Monterio, J., Turrisi, V., Ramapuram, J., and Cuturi, M. Learning unmasking policies for diffusion language models. arXiv preprint arXiv:2512.09106 , 2025. Kim, S. H., Hong, S., Jung, H., Park, Y., and Yun, S.-Y. KLASS: KL-guided fast inference in masked diffusion models. In 
+
+The Thirty-ninth Annual Conference on Neural Information Processing Systems , 2025. 11 Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models 
+
+Lambert, N., Morrison, J., Pyatkin, V., Huang, S., Ivison, H., Brahman, F., Miranda, L. J. V., Liu, A., Dziri, N., Lyu, X., Gu, Y., Malik, S., Graf, V., Hwang, J. D., Yang, J., Bras, R. L., Tafjord, O., Wilhelm, C., Soldaini, L., Smith, N. A., Wang, Y., Dasigi, P., and Hajishirzi, H. Tulu 3: Pushing frontiers in open language model post-training. In Second Conference on Language Modeling , 2025. URL https://openreview.net/forum?id=i1uGbfHHpH .Levin, D. A. and Peres, Y. Markov chains and mixing times , volume 107. American Mathematical Soc., 2017. Liu, A., Feng, B., Xue, B., Wang, B., Wu, B., Lu, C., Zhao, C., Deng, C., Zhang, C., Ruan, C., et al. Deepseek-v3 technical report. arXiv preprint arXiv:2412.19437 , 2024. Liu, A., Broadrick, O., Niepert, M., and den Broeck, G. V. Discrete copula diffusion. In The Thirteenth International Conference on Learning Representations , 2025. Lou, A., Meng, C., and Ermon, S. Discrete diffusion modeling by estimating the ratios of the data distribution. In Forty-first International Conference on Machine Learning , 2024. Nie, S., Zhu, F., You, Z., Zhang, X., Ou, J., Hu, J., Zhou, J., Lin, Y., Wen, J.-R., and Li, C. Large language diffusion models. 
+
+arXiv preprint arXiv:2502.09992 , 2025. Patel, D., Naseem, T., Pandey, G., Sultan, M. A., McCallum, A., and Astudillo, R. F. Improved sampling from masked diffusion models with position contrastive guidance. In NeurIPS 2025 Workshop on Structured Probabilistic Inference & Generative Modeling , 2025. Radford, A., Narasimhan, K., Salimans, T., Sutskever, I., et al. Improving language understanding by generative pre-training. 2018. Sahoo, S., Arriola, M., Schiff, Y., Gokaslan, A., Marroquin, E., Chiu, J., Rush, A., and Kuleshov, V. Simple and effective masked diffusion language models. Advances in Neural Information Processing Systems , 37:130136–130184, 2024. Shi, J., Han, K., Wang, Z., Doucet, A., and Titsias, M. Simplified and generalized masked diffusion for discrete data. 
+
+Advances in neural information processing systems , 37:103131–103167, 2024. Team, K., Bai, Y., Bao, Y., Chen, G., Chen, J., Chen, N., Chen, R., Chen, Y., Chen, Y., Chen, Y., et al. Kimi k2: Open agentic intelligence. arXiv preprint arXiv:2507.20534 , 2025. Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., Kaiser, Ł ., and Polosukhin, I. Attention is all you need. Advances in neural information processing systems , 30, 2017. Wang, Y., Ma, X., Zhang, G., Ni, Y., Chandra, A., Guo, S., Ren, W., Arulraj, A., He, X., Jiang, Z., et al. Mmlu-pro: A more robust and challenging multi-task language understanding benchmark. Advances in Neural Information Processing Systems , 37:95266–95290, 2024. Yang, A., Li, A., Yang, B., Zhang, B., Hui, B., Zheng, B., Yu, B., Gao, C., Huang, C., Lv, C., et al. Qwen3 technical report. 
+
+arXiv preprint arXiv:2505.09388 , 2025. Ye, J., Xie, Z., Zheng, L., Gao, J., Wu, Z., Jiang, X., Li, Z., and Kong, L. Dream 7b: Diffusion large language models. arXiv preprint arXiv:2508.15487 , 2025. Zeng, A., Xu, B., Wang, B., Zhang, C., Yin, D., Rojas, D., Feng, G., Zhao, H., Lai, H., Yu, H., et al. Chatglm: A family of large language models from glm-130b to glm-4 all tools. CoRR , 2024. Zheng, K., Chen, Y., Mao, H., Liu, M.-Y., Zhu, J., and Zhang, Q. Masked diffusion models are secretly time-agnostic masked models and exploit inaccurate categorical sampling. In The Thirteenth International Conference on Learning Representations , 2025. 12 Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models 
+
+## A. Proof of Theorem 4.2 
+
+Proof. We use a telescoping sum argument. Let k = |S| denote the number of selected positions. Define a sequence of intermediate distributions Q(t) over the random variables YS for t = 1 , . . . , k . Let Q(t) be the distribution that preserves the model’s joint dependency for the first t variables and assumes independence for the remainder. For a specific realization 
+
+yS = ( ys1 , . . . , y sk ), this is defined as: 
+
+Q(t)(yS | X, Y U ) = Pθ (ys1 , . . . , y st | X, Y U )
+
+> k
+
+Y
+
+> j=t+1
+
+Pθ (ysj | X, Y U ).
+
+Observe that Q(k) corresponds to the model’s joint distribution Pθ (YS | X, Y U ). Furthermore, Q(1) corresponds to the factorized approximation Qθ (YS | X, Y U ) defined in (3) , since the first token s1 has no history within S. By the Triangle Inequality: TV (Pθ (YS | X, Y U ), Q θ (YS | X, Y U )) ≤
+
+> k
+
+X
+
+> t=2
+
+TV (Q(t), Q (t−1) ). (12) We now analyze the term TV (Q(t), Q (t−1) ) for t ≥ 2. The distributions Q(t) and Q(t−1) differ only in the generation of the variable yst : in Q(t), yst is drawn from the conditional distribution Pθ (yst | X, Y U , y s<t ), whereas in Q(t−1) , it is drawn from the marginal distribution Pθ (yst | X, Y U ) independent of the history ys<t = ( ys1 , . . . , y st−1 ).To facilitate the calculation, we partition the full realization vector yS into three parts: the history ys<t , the current token 
+
+yst , and the future tokens ys>t = ( yst+1 , . . . , y sk ). We express the TV distance by summing over all possible realizations 
+
+yS ∈ V k:TV (Q(t), Q (t−1) ) = 12
+
+X 
+
+> yS∈V k
+
+Q(t)(yS | X, Y U ) − Q(t−1) (yS | X, Y U )
+
+= 12
+
+X 
+
+> yS∈V k
+
+Pθ (ys<t | X, Y U )Pθ (yst | X, Y U , y s<t )
+
+> k
+
+Y
+
+> j=t+1
+
+Pθ (ysj | X, Y U )
+
+−Pθ (ys<t | X, Y U )Pθ (yst | X, Y U )
+
+> k
+
+Y
+
+> j=t+1
+
+Pθ (ysj | X, Y U ) (13) We observe that the probability of the history Pθ (ys<t | X, Y U ) and the probability of the future tokens Qkj=t+1 Pθ (ysj |
+
+X, Y U ) are common factors. We factor them out, organizing the terms to match the logical order of dependency: (13) = 12
+
+X 
+
+> yS∈V k
+
+Pθ (ys<t | X, Y U ) · | Pθ (yst | X, Y U , y s<t ) − Pθ (yst | X, Y U )| · 
+
+
+
+> k
+
+Y
+
+> j=t+1
+
+Pθ (ysj | X, Y U )
+
+. (14) We now split the summation over yS into three nested sums corresponding to the history ys<t , the current token yst , and the future tokens ys>t :
+
+X 
+
+> yS∈V k
+
+(. . . ) = X 
+
+> ys<t ∈V t−1
+
+X 
+
+> yst∈V
+
+X 
+
+> ys>t ∈V k−t
+
+(. . . ).
+
+Substituting this into (14) , the terms depending on ys>t (the purple block) are clearly separated at the end. Since the vocabulary V is finite, we can rigorously marginalize out the future variables. Specifically, because the future variables are sampled independently, the summation over ys>t and the product over j commute. This allows us to push the sum inside the 13 Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models 
+
+product: (14) = 12
+
+X
+
+> ys<t
+
+Pθ (ys<t | X, Y U ) X
+
+> yst
+
+|Pθ (yst | X, Y U , y s<t ) − Pθ (yst | X, Y U )| · 
+
+ X 
+
+> ys>t ∈V k−t
+> k
+
+Y
+
+> j=t+1
+
+Pθ (ysj | X, Y U )
+
+
+
+(15) 
+
+= 12
+
+X
+
+> ys<t
+
+Pθ (ys<t | X, Y U ) X
+
+> yst
+
+|Pθ (yst | X, Y U , y s<t ) − Pθ (yst | X, Y U )| · 
+
+
+
+> k
+
+Y
+
+> j=t+1
+
+ X 
+
+> ysj∈V
+
+Pθ (ysj | X, Y U )
+
+| {z }
+
+> =1 ×···× 1=1
+
+(16) 
+
+= EYs<t 
+
+h
+
+TV 
+
+
+
+Pθ (Yst | X, Y U ), P θ (Yst | X, Y U , Y s<t )
+
+i 
+
+. (17) The right hand side term in Eq. (16) equals 1 because each inner sum is over the complete support V of a valid probability distribution. Finally, we apply Assumption 4.1 (Sub-Additivity) to (17) , which bounds this expected deviation by the sum of pairwise dependencies: 
+
+EYs<t 
+
+h
+
+TV 
+
+
+
+Pθ (Yst | X, Y U ), P θ (Yst | X, Y U , Y s<t )
+
+i 
+
+≤
+
+> t−1
+
+X
+
+> j=1
+
+Dπ(st),π (sj ).
+
+Substituting this back into (12): TV (Pθ (YS | X, Y U ), Q θ (YS | X, Y U )) ≤
+
+> k
+
+X
+
+> t=2
+
+
+
+> t−1
+
+X
+
+> j=1
+
+Dπ(st),π (sj )
+
+| {z } 
+
+> Cost of adding st
+
+. (18) The inner term corresponds exactly to the cost added by Algorithm 2 when selecting the t-th token. The outer sum represents the total accumulated cost. Since the algorithm initializes the cost to zero for the first token (as there are no prior dependencies in S) and stops before the total exceeds τ , the bound holds. 
+
+## B. Ablation: Avoid sampling after EOS tokens 
+
+In discrete diffusion language models, sampling an end-of-sequence (EOS) token at any position signals that generation should terminate. However, the original Dream implementation continues unmasking subsequent positions even after EOS is sampled. While these positions do not affect the final output, they still require diffusion steps. We apply a natural optimization: once an EOS token is sampled, all subsequent positions are immediately set to EOS. This avoids wasted computation and reflects the intended semantics of EOS. We apply this optimization uniformly to all methods (baselines, KLASS, and DEMASK) for fair comparison. Table 2 shows results without this optimization. Without EOS optimization, KLASS runs much faster (e.g., 6.9 minutes on MBPP vs 19.3 minutes for DEMASK) because its KL-based criterion identifies that positions following an EOS token should also be EOS—a trivially predictable pattern that inflates apparent efficiency gains. This effect is amplified on benchmarks like HumanEval and MBPP, where the evaluation configuration (following the original Dream benchmark) sets max generation length to 768 and 1024 tokens respectively, while the model typically produces much shorter outputs, leaving many positions as EOS tokens that KLASS can trivially unmask in bulk. With the EOS optimization applied uniformly, all methods benefit from early termination, and KLASS’s runtime advantage largely disappears (compare with Table 1). 
+
+## C. Hyperparameter Search Grids 
+
+We conduct grid searches on GSM8K to select hyperparameters for both DEMASK and KLASS. 14 Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models                          
+
+> Table 2. Results without EOS optimization. Runtime in minutes. Best accuracy per benchmark in bold .DEMASK KLASS Benchmark Acc (%) Time (min) Acc (%) Time (min) MMLU-Pro 47.6 89.6 45.7 126.7 GSM8K 83.7 10.1 82.6 14.3 HumanEval 58.5 5.8 54.3 4.1 MBPP 56.6 19.3 57.0 6.9
+
+DEMASK. We search over dependency threshold τ ∈ { 0.5, 0.4, 0.3, 0.2, 0.1, 0.08 , 0.06 , 0.04 , 0.02 , 0.01 , 0.003 , 0.001 }
+
+and confidence threshold γ ∈ { 0.9, 0.7, 0.5, 0.3, 0.1}, yielding 60 configurations. We select τ = 0 .04 and γ = 0 .9.
+
+KLASS. We search over KL threshold ∈ { 0.02 , 0.015 , 0.01 , 0.005 , 0.001 , 0.0003 , 0.0001 , 0.00003 , 0.00001 } and confi-dence threshold ∈ { 0.5, 0.6, 0.7, 0.8, 0.9}, yielding 45 configurations. We select KL threshold = 0 .0003 and confidence threshold = 0 .9.15

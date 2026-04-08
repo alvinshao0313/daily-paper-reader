@@ -1,0 +1,412 @@
+Title: Short Data, Long Context: Distilling Positional Knowledge in Transformers
+
+URL Source: https://arxiv.org/pdf/2604.06070v1
+
+Published Time: Wed, 08 Apr 2026 01:28:11 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# Short Data, Long Context: Distilling Positional Knowledge in Transformers 
+
+Patrick Huber , Ernie Chang , Chinnadhurai Sankar , Rylan Conway , Igor Fedorov , Md Rifat Arefin , Adithya Sagar 
+
+Meta Reality Labs Extending the context window of language models typically requires expensive long-context pre-training, posing significant challenges for both training efficiency and data collection. In this paper, we present evidence that long-context retrieval capabilities can be transferred to student models through logit-based knowledge distillation, even when training exclusively on packed short-context samples within a long-context window. We provide comprehensive insights through the lens of Rotary Position Embedding (RoPE) and establish three key findings. First, consistent with prior work, we show that phase-wise RoPE scaling, which maximizes rotational spectrum utilization at each training stage, also achieves the best long-context performance in knowledge distillation setups. Second, we demonstrate that logit-based knowledge distillation can directly enable positional information transfer. Using an experimental setup with packed repeated token sequences, we trace the propagation of positional perturbations from query and key vectors through successive transformer layers to output logits, revealing that positional information systematically influences the teacher’s output distribution and, in turn, the distillation signal received by the student model. Third, our analysis uncovers structured update patterns in the query state during long-context extension, with distinct parameter spans exhibiting strong sensitivity to long-context training.  
+
+> Date:
+
+April 8, 2026  
+
+> Correspondence:
+
+Patrick Huber at patrickhuber@meta.com 
+
+# 1 Introduction 
+
+The ability to process and reason over long sequences is increasingly critical for modern language model applications, from document summarization to multi-turn dialogues. In this work, we define long-context abilities specifically as the capacity to accurately retrieve and attend to information across extended sequence lengths, as measured by retrieval-oriented benchmarks (Needle-in-a-Haystack, RULER) 1. Training models to handle long contexts presents substantial challenges in two areas: model training, where memory requirements scale quadratically with sequence length, and data curation, where collecting large-scale, high-quality long-context training data remains difficult. While these challenges arise across all model sizes, they are particularly  
+
+> 1We note that this is distinct from broader long-context reasoning competence, which may require additional capabilities beyond positional awareness.
+> Figure 1
+
+The three dimensions we explore in this work: RoPE embeddings, the objective function (knowledge distillation), and the underlying data. By combining these components, the student model acquires long-context abilities despite being trained only on short-context data. 
+
+1
+
+> arXiv:2604.06070v1 [cs.CL] 7 Apr 2026
+
+acute for on-device language models, where data distribution shifts between training phases can cause significant performance regressions. In transformer architectures (Vaswani et al., 2017), positional information is exclusively encoded in the self-attention mechanism. Among the various positional encoding schemes, Rotary Position Embedding (RoPE) (Su et al., 2024) has emerged as the predominant approach in state-of-the-art large language models, including LLaMA (Touvron et al., 2023), Gemma-3 (Team et al., 2025), Qwen-3 (Yang et al., 2025a), and many others. RoPE encodes positional information by applying rotation matrices to query and key vectors, enabling models to capture both absolute and relative positions. Building on RoPE, recent work by Huber et al. (2025a) uncovered an intriguing property in knowledge distillation setups: student models distilled from long-context-capable teachers can exhibit long-context abilities, even when trained exclusively on short-context data. This finding implies that positional information encoded in the teacher’s outputs can transfer to the student, enabling generalization to sequence lengths far exceeding those observed during training. This implicit transfer of positional capabilities beyond the scale of available training data raises a fundamental question about the nature of knowledge distillation and positional encodings: How can the student model, through the distillation objective alone, acquire the ability to handle long-range dependencies? 
+
+We hypothesize that the answer lies in the RoPE positional encoding mechanism, which perturbs query and key representations based on their sequence position. These perturbations are then propagated through the teacher’s forward pass, becoming part of the knowledge distillation objective, which forces the student to match the position-dependent teacher outputs. In this way, the distillation signal carries implicit positional information, even for tokens in different packed samples that do not attend to each other. To confirm this hypothesis, we provide a systematic investigation of implicit positional distillation, examining the interplay of RoPE embeddings, knowledge distillation objectives, and short-context training data in enabling long-context capabilities. The following research questions guide our investigation:  
+
+> RQ (1) – RoPE Scaling for Knowledge Distillation:
+
+What is the optimal approach for scaling the Rotary Position Embedding (RoPE) base parameter θ in knowledge distillation (KD) setups?  
+
+> RQ (2) – Transfer of Positional Information:
+
+Can local positional information, derived from short-context data, be leveraged for long-context learning through knowledge distillation?  
+
+> RQ (3) – Propagation of Positional Perturbations:
+
+While most transformer components are position-invariant, the attention query and key matrices are perturbed by RoPE positional encodings. Do these positional perturbations propagate meaningfully through the teacher model’s forward pass, allowing them to serve as a training signal for the student?  
+
+> RQ (4) – Patterns in Model Updates During Long-Context Extension:
+
+During long-context extension via KD, can we identify specific patterns in the student model’s parameter updates that correlate with positional information? 
+
+# 2 Setup 
+
+2.1 Background: Rotary Position Embeddings 
+
+Rotary Position Embedding (RoPE) (Su et al., 2024) encodes positional information by applying rotation transformations to pairs of dimensions in the query and key vectors during self-attention. Unlike additive positional encodings that directly modify token representations, RoPE integrates position into the attention computation by rotating query and key vectors so that their dot product naturally becomes a function of their relative position, while still encoding absolute position information. For a token at position m in the sequence, RoPE groups the hidden dimension into pairs and applies a 2D rotation to each pair. The rotation matrix for the i-th dimension pair is defined as: 
+
+R(i) 
+
+> m
+
+=
+
+cos( mθ i) − sin( mθ i)sin( mθ i) cos( mθ i)
+
+
+
+(1) 2m = 0                       
+
+> θi
+> m= 1
+> 2θi
+> m= 2
+> 3θi
+> m= 3
+> Position m
+> Angle
+> i= 0
+> i=d
+> i=d
+> 2
+> m
+> Angle
+> θ= 10 k
+> Wraps at ∼64k
+> m
+> Angle
+> θ= 500 k
+> Extends beyond 128k
+> Figure 2 (Top) Each dimension pair undergoes incremental rotation as position mincreases, encoded by a unique rotation angle mθ i.(Center) Different dimension pairs rotate at different frequencies: low-index pairs distinguish nearby tokens, while high-index pairs encode long-range positional relationships. (Bottom) The base parameter θcontrols how quickly angles accumulate: a smaller θcauses faster wrapping (limiting context length), while a larger θspreads rotations across longer sequences.
+
+Each position in the sequence thus corresponds to a unique “angular fingerprint” across all dimension pairs. The base parameter θ controls the rotation frequencies across dimensions through: 
+
+θi = θ−2i/d (2) where d is the hidden dimension size. This formula creates a spectrum of frequencies: low-index dimension pairs rotate quickly and distinguish nearby tokens, while high-index pairs rotate slowly and encode long-range positional relationships. A larger base θ “slows down” all rotations, allowing the model to distinguish positions across longer sequences before angles “wrap around” (i.e., the sinusoidal oscillation repeats). As a result, scaling θ is a crucial component of long-context extensions, as it expands the rotational spectrum and reduces positional ambiguity. Figure 2 provides a schematic visualization of these RoPE components. 
+
+2.2 Models 
+
+In our knowledge distillation training setup, we use the Llama-4 Scout frontier model (AI, 2024) as the teacher to guide the pre-training of our 1 billion parameter student model, following the approach of Huber et al. (2025a) with logit-based KD. Despite the fact that Llama-4 Scout uses an iRoPE approach, interleaving RoPE and NoPE layers, our student model uses RoPE in every layer. More detailed hyperparameters for both the student and teacher are listed in Table 1. 
+
+2.3 Training Stages 
+
+Our training procedure consists of two phases, following the standard practice of progressive context length extension:  
+
+> Stage 1 (Short Context):
+
+In the initial pre-training phase, we train the model for 128,000 steps over 100 billion tokens. Following common practice, we use a short context window of 2,048 tokens per sequence in this stage, 3Student Teacher Model Random Init Llama-4 Scout Layers 30 48 Attn Heads 20 40 KV Heads 4 8Dimension 1,280 5,120 Hidden Dim 6,144 16,384 Vocab Size 202,048 202,048 Feed Forward Dense 16 Experts Context Length 128k tokens 10M tokens Total Params 1.1B 17B / 109B RoPE Flavor RoPE iRoPE   
+
+> Table 1 Student and Teacher Model Specifications
+> Percentile
+
+10 20 30 40 50 60 70 80 90 99  
+
+> Word Count per Sample
+
+154 220 293 375 466 571 710 935 1,441 4,955  
+
+> Table 2 Word count percentiles of our pre-training dataset.
+
+focusing on foundational language understanding.  
+
+> Stage 2 (Long Context):
+
+In the second phase, we continue pre-training the model for an additional 20,000 steps over 10 billion tokens. In this stage, we expand the context window to 128,000 tokens, training the model to handle longer-range dependencies. Critically, even in this long-context phase, the underlying training data remains short-context (see Table 2 for the dataset’s word count distribution), with multiple short documents packed into each 128k sequence. Each packed sequence consists of concatenated, independently sampled short documents separated by EOS tokens, with a self-attention mask that prevents cross-document attention. This ensures that individual samples remain contextually isolated; the only signal that spans beyond a single document boundary is the positional encoding applied at the full sequence level. We emphasize that no long-form documents (e.g., books, lengthy articles) are included in the training data at any stage. 
+
+# 3 RoPE Scaling for Knowledge Distillation 
+
+The topic of RoPE scaling factors, specifically the base parameter θ, has been extensively explored in the literature (Liu et al., 2024). However, two factors distinguish our setting from prior work: (1) We consider on-device sized models, which are one to two orders of magnitude smaller than the frontier-sized models typically studied. (2) In the KD setup, we must additionally consider the teacher model’s θ parameter, which may play a crucial role in enabling the transfer of positional information. 
+
+3.1 Method: Phase-wise RoPE Settings 
+
+Given these differences, we run a set of experiments to establish the optimal RoPE configuration under our constraints. We explore three distinct setups: 
+
+> 1. Consistent, Teacher-Aligned (
+
+θ = 500 k ): In this configuration, we set the RoPE θ parameter to 500 ,000 across both pre-training stages, matching the teacher model’s parameterization. The intuition is to keep rotations aligned between the student and teacher models throughout training. 
+
+> 2. Consistent, Literature-Aligned (
+
+θ = 10 k): Here, we also maintain a consistent θ across both stages, but use the standard value of θ = 10 ,000 that is common in the literature. 
+
+> 3. Phase-wise Scaled (
+
+θ : 10 k → 500 k): In this configuration, we use the standard θ = 10 ,000 during the initial short-context pre-training stage, exposing the model to larger RoPE angles during this phase. We then increase θ to 500 ,000 during the long-context extension phase to ensure that angles do not wrap around 4within the maximum sequence length of 128,000 tokens. Compared to setups (1) and (2), the intuition behind this approach is to maximize the positional information available to the model at each stage, adapting the rotational spectrum to the sequence lengths encountered during training. All three setups are visually represented in Figure 3.    
+
+> Figure 3 Schematic visualization of scaled and unscaled RoPE θin the short-context (Phase 1) and long-context (Phase 2) pre-training stages.
+
+3.2 Findings 
+
+We train the student model under each of the three RoPE θ configurations using both logit-based KD and standard cross-entropy (CE) loss, and compare their performance along three dimensions: general pre-training language modeling ability, long-context ability, and training loss. The results are shown in Figures 4 and 5. We omit Phase 1 evaluation results, as long-context performance is consistently 0% at that stage. The Phase 2 evaluations clearly address RQs (1) and (2):  
+
+> Finding 1: Larger
+
+θ values support long-context abilities. Using a RoPE θ of 10,000 consistently underperforms the 500,000 and phase-wise scaled approaches, in line with the intuition illustrated in Figure 2. The phase-wise scaled method achieves the best average performance. This answers RQ (1): the optimal strategy is to maximize rotational spectrum utilization at each training stage by scaling θ between phases.  
+
+> Finding 2: KD improves over cross-entropy models.
+
+KD consistently outperforms CE-trained models across all 
+
+θ configurations, yielding better long-context understanding and lower training loss. This answers RQ (2): by using a long-context-capable teacher model with logit-based KD, we can instill a meaningful degree of long-context understanding in the student, an ability that cannot emerge from the data alone in the CE setup. Based on these two findings, we proceed with the phase-wise scaled variant ( θ = 10 ,000 in Phase 1, θ = 500 ,000 
+
+in Phase 2) for the analyses in the following sections. 2
+
+# 4 Positional Perturbations in Transformer Architectures 
+
+Having established that knowledge distillation with appropriate RoPE scaling enables long-context capabilities, we now turn to investigating the mechanism underlying this transfer. Specifically, we ask how positional perturbations, introduced by RoPE at the query and key level, propagate through the teacher model’s forward pass, and do they ultimately influence the output logits that serve as the distillation signal? 
+
+> 2While we train our models for a significant number of tokens, they remain under-trained compared to state-of-the-art models at the 1B parameter scale.
+
+510k 
+
+> 19k
+> 28k
+> 37k
+> 46k
+> 55k
+> 64k
+> 74k
+> 83k
+> 92k
+> 101k
+> 110k
+> 119k
+> 128k
+
+0
+
+50 
+
+100 
+
+NIH Needle Distance (2023) 
+
+> Percentage
+> 4k
+> 8k
+> 16k
+> 32k
+> 64k
+> 128k
+
+0
+
+20 
+
+40 
+
+60 
+
+RULER Needle Distance (2024) 
+
+10k θ (KD) 10k-500k θ (KD) 500k θ (KD) 
+
+10k θ (CE) 10k-500k θ (CE) 500k θ (CE)    
+
+> Figure 4 Performance for different RoPE θvalues and training methods (CE vs. KD) across Needle in a Haystack (left) and RULER (right). 10k KD 10k-500k KD 500k KD 10k CE 10k-500k CE 500k CE
+
+0
+
+20 
+
+40 
+
+> Average Score (%)
+> 10k 10k-500k 500k
+
+1.55 
+
+1.55 
+
+> Loss
+
+Knowledge Distilled 
+
+> 10k 10k-500k 500k
+
+2.49 
+
+2.49 
+
+2.49 
+
+2.5
+
+2.5
+
+Cross Entropy    
+
+> Figure 5 Comparison of the average pre-training performance (left, in %) and training loss across different θsettings (right) for KD and CE objectives.
+
+4.1 Method: Isolating Positional Information 
+
+To analyze the propagation of positional information, we design an experiment that isolates positional effects from semantic and syntactic content. We construct an input sequence by repeating a fixed block of 2,048 tokens, a BOS (beginning-of-sequence) token, 2,046 content tokens, and an EOS (end-of-sequence) token, 64 times, filling the model’s full context window of 128,000 tokens. Because every “packed” segment is semantically and syntactically identical, any observed differences in hidden representations between repetitions can be attributed solely to positional perturbations introduced by RoPE. During the forward pass, we systematically log hidden states at key stages: the raw input text, the tokenized sequence, the embedding layer, the query hidden state both before and after RoPE application, the final layer hidden state (post-feedforward), and the output logits from the language modeling head. For analysis, we extract the representation of the final token before each EOS, as it possesses the maximal local context within its segment. This yields an analysis tensor of shape (bsz, 64 , dim ), where bsz = 1 (a single input sample), the sequence dimension contains 64 tokens each separated by 2,048 positions (representing snapshots across the full token sequence), and dim is the hidden-state dimensionality. Figure 6 illustrates this process, and Appendix A provides the input text, token sequence, and resulting analysis sequence used in our experiments. 
+
+4.2 Findings 
+
+Inputs and Embeddings As expected, the input tokens, vocabulary embeddings, and pre-RoPE query hidden states are position-invariant across all 64 repetitions. This validates our experimental design and confirms that 6Figure 6 Schematic visualization of the experimental approach. We repeat a fixed sequence of n = 2 ,048 tokens N = 64     
+
+> times to generate an analysis sequence of shape (bsz, 64 , dim ), filling the complete context of 131 ,072 tokens. By using identical content at every position, we isolate positional perturbations from semantic and syntactic differences.
+
+−5 0 5 10 15 20 25 30 35 40 45 50 55 60 65 
+
+−1.5
+
+−1
+
+−0.5
+
+0
+
+Sequence Position ( ×2048 for absolute position) 
+
+> Distance
+
+Pre-RoPE Post-RoPE  
+
+> Figure 7 Distance between position index 0 and subsequent positions for a single hidden-dimension element in the query hidden state, measured before (Pre-RoPE) and after (Post-RoPE) applying rotary positional embeddings.
+
+any subsequent divergence in representations is attributable to positional encoding rather than input content. 
+
+Query Vectors and RoPE Perturbations Figure 7 shows the distance 
+
+dist (A, B ) = X
+
+> i1,...,i |d|
+
+|Ai1,...,i |d| − Bi1,...,i |d| | (3) between the first sequence element A(at index 0) and each subsequent element B at absolute position indices 
+
+2,048 × N (with N = 1 , . . . , 63 ) for a single hidden-state element d ∈ dim , consistent with the schematic in Figure 2. We compute this single-element distance both before and after applying RoPE perturbations. As expected, the pre-RoPE values are position-invariant, while the post-RoPE values follow the characteristic oscillation pattern described in Figure 2 (top). Moving beyond a single element to the full hidden state H, Figure 8 shows the cosine similarity between complete hidden states at different positions, both before and after RoPE application. The pre-RoPE cosine similarity remains at 1.0 across all positions, confirming position invariance. In contrast, the post-RoPE cosine similarity decreases substantially, indicating that positional perturbations differentiate the representations of otherwise identical tokens. Notably, the similarity does not decrease monotonically with distance; instead, it exhibits a complex, non-monotonic pattern resulting from the superposition of multiple oscillatory components across dimension pairs, as illustrated in Figure 2 (center). 
+
+Hidden States Across Model Layers Tracking these effects across layers (Figure 9), we find that the divergence induced by RoPE is amplified as representations propagate through the model. The representations of the same token at different positions become progressively more distinct with each layer, underscoring the compounding effect of positional encoding in deep transformer stacks. Interestingly, the difference in cosine similarity between positional indices (along the x-axis in Figure 9) is again non-monotonic, consistent with the pattern observed in Figure 8. We believe that this behavior arises because the superposition of multiple oscillatory 7−5 0 5 10 15 20 25 30 35 40 45 50 55 60 65 
+
+0.6
+
+0.8
+
+1
+
+Sequence Position ( ×2048 for absolute position) 
+
+> Cosine Similarity
+
+Pre-RoPE Post-RoPE   
+
+> Figure 8 Cosine similarity between the query hidden state at position index 0 and subsequent positions, measured before (Pre-RoPE) and after (Post-RoPE) applying rotary positional embeddings.
+> Figure 9 Per-layer cosine similarity between position index 0 and subsequent position indices (offset by 2,048 tokens each). Each curve represents a different layer, showing progressive amplification of positional divergence through the model.
+
+components at different frequencies creates a complex interference pattern that does not exhibit a simple distance-dependent decay. 
+
+The Output Layer and Vocabulary Probability Distribution The final, and most consequential, question concerns the impact of positional perturbations on the output distribution of the language modeling head, which serves as the training signal in logit-based KD. Analysis of the output layer (Figure 10) reveals that while the top-10 tokens by rank remain largely consistent across positions, both their associated probability mass and their ranking order exhibit position-dependent fluctuations. These subtle but systematic changes demonstrate that the distillation target is not solely a function of the input tokens’ semantic and syntactic content; it is also modulated by the positional encoding, even across packed samples within the input sequence. This finding has a direct and important implication: the teacher model’s output distribution encodes position-dependent signals that are transmitted to the student through the distillation loss. This occurs even across sample boundaries within a packed sequence, where individual segments do not attend to one another. The positional perturbations introduced by RoPE are therefore not merely local modifications to query and key states, they are propagated and amplified throughout the entire transformer architecture, ultimately influencing the model’s output logits. This analysis directly answers RQ (3): positional perturbations do propagate meaningfully through the teacher model’s forward pass, and the resulting position-dependent output distributions serve as an implicit training signal for positional information in the student model. Combined with the KD-over-CE gap observed in Section 3, this provides evidence that KD enables student models to acquire stronger long-context retrieval 8Figure 10 Output layer top-10 token ranking and probability mass distribution across sequence positions. Letters represent token indices and their rank. 
+
+capabilities than CE training alone, even when both use identical packed short-context data 3.
+
+# 5 Hidden State Pattern Evolution During Long-Context Extension 
+
+Having established that positional perturbations propagate through the teacher’s forward pass and influence the distillation signal (Section 4), we now investigate how the student model’s internal representations change during long-context extension. This analysis directly addresses RQ (4): can we identify specific patterns in the student model’s parameter updates that correlate with positional information? 
+
+5.1 Method: Checkpoint Comparison 
+
+To this end, we compare hidden states produced by two checkpoints: the Phase 1 checkpoint (trained with short context of 2,048 tokens per sequence) and the Phase 2 checkpoint (further trained with extended context of 128,000 tokens per sequence). To isolate the effects of long-context training from other sources of variation, we evaluate both checkpoints on the same input sample using the repeated-token methodology described in Section 4. This allows us to examine changes along two axes: Hidden-state dimensions and sequence positions, while controlling for semantic and syntactic content. 
+
+5.2 Findings 
+
+Dimension-Specific Adaptation Figures 11 and 12 show the Euclidean distance between query hidden states produced by the Phase 1 and Phase 2 checkpoints. Figure 11 reveals a striking pattern: certain dimensions within the hidden-state vector ( dim = 1 ,280 ) exhibit significantly larger differences between training phases than others. Distinct spans of parameters undergo substantial modification during long-context training, while intervening spans remain relatively unchanged. Notably, the most pronounced adaptation occurs in higher-index dimension pairs (corresponding to lower RoPE frequencies, i.e., larger i in Eq. 2), which are precisely the dimensions responsible for encoding long-range positional relationships as illustrated in Figure 2. This alignment between the adapted dimensions and the RoPE frequency spectrum suggests that long-context extension selectively refines the rotational components most relevant for distinguishing distant positions. 
+
+Position-Independent Adaptation When examining the Euclidean distance across sequence positions (Fig-ure 12), we observe that the adaptation magnitude does not meaningfully increase for later positions in the sequence. This indicates that the model’s ability to handle long contexts is not achieved by memorizing position-specific representations; rather, it is accomplished by refining dimension-specific positional features that generalize across all positions. 
+
+Implications Together, these observations suggest that long-context extension does not require wholesale relearning of representations. Instead, it selectively refines a subset of dimensions responsible for encoding     
+
+> 3Our results demonstrate that KD enhances long-context extension on packed short data, rather than that KD is the sole source of long-context ability.
+
+9Figure 11 Euclidean distance between Phase 1 and Phase 2 pre-trained hidden states per hidden-state element for Layer 0 (top) and Layer 30 (bottom).  
+
+> Figure 12 Euclidean distance between Phase 1 and Phase 2 pre-trained hidden states per sequence element for Layer 0 (top) and Layer 30 (bottom).
+
+long-range positional relationships. This answers RQ (4) and reinforces our hypothesis about implicit positional distillation: the teacher model’s output distribution encodes positional information through RoPE-induced perturbations (as demonstrated in Section 4), and during long-context extension, this positional signal drives targeted updates to the rotational components in the student model that are most relevant for long-range position encoding. 
+
+# 6 Related Work 
+
+6.1 Positional Encoding in Transformers 
+
+Positional encoding is fundamental to transformer architectures (Vaswani et al., 2017), with RoPE (Su et al., 2024) emerging as the predominant approach in modern LLMs (see Section 2.1 for background). Several works have explored the scaling properties of RoPE. Liu et al. (2024) established scaling laws for RoPE-based extrapolation. Peng et al. (2024) proposed YaRN, introducing frequency-domain modifications to improve context scaling, while Shang et al. (2025) developed LongRoPE2 for near-lossless context window expansion. Yang et al. (2025b) explored hybrid strategies combining RoPE with other encoding methods, and Gopalakrishnan et al. (2025) offered an alternative geometric perspective through polar coordinate embeddings. Our work differs from these approaches by focusing on how positional information can be transferred through knowledge distillation, rather than directly extending positional encoding capabilities. 10 6.2 Long-Context Training and Extension 
+
+Extending the context window of language models has been pursued through multiple strategies. Direct long-context pre-training, as implemented in models like Gemma-3 (Team et al., 2025) and Qwen-3 (Yang et al., 2025a), requires substantial computational resources and carefully curated long-document corpora. Continued pre-training approaches fine-tune models on longer sequences after initial training, but often suffer from catastrophic forgetting of short-context capabilities. Alternative strategies include sparse attention mechanisms that reduce the quadratic complexity of self-attention, memory-augmented architectures that externalize context storage, and sliding window approaches. However, these architectural modifications often require significant changes to the model structure and may not transfer easily across different model families. Our approach is orthogonal to these methods: we demonstrate that long-context capabilities can emerge through the training objective alone, without architectural modifications or long-context training data. 
+
+6.3 Knowledge Distillation for Language Models 
+
+Knowledge distillation (KD), originally proposed for model compression (Hinton et al., 2015), transfers knowledge from a larger teacher to a smaller student model through soft label matching. In language modeling, logit-based KD has proven effective for training compact models that approach the performance of larger counterparts. Recent work on on-device language models has demonstrated that KD can enable student models to acquire capabilities not explicitly present in the training data (Huber et al., 2025a,b). Huber et al. (2025a) first observed that student models distilled from long-context teachers exhibit long-context abilities even when trained exclusively on short sequences. However, this phenomenon was reported without a mechanistic explanation. Our work provides the first systematic investigation of why this transfer occurs, tracing the propagation of positional perturbations through the teacher’s forward pass and into the distillation signal. This mechanistic understanding enables principled design choices for RoPE scaling strategies in the knowledge distillation setting. 
+
+# 7 Conclusion 
+
+This work provides a systematic investigation into how positional information is transferred through knowledge distillation and how model representations evolve during long-context extension in transformer language models using RoPE. Our findings, obtained in the specific setting of a 1.1B student distilled from a Llama-4 Scout teacher using packed short-context data, can be summarized along three axes:  
+
+> Optimal RoPE scaling for KD (RQ 1):
+
+Phase-wise scaling of the RoPE base parameter θ, using a smaller value during short-context pre-training and a larger value during long-context extension, maximizes rotational spectrum utilization at each stage and achieves the best long-context distillation performance. This strategy consistently outperforms both fixed low and fixed high θ configurations.  
+
+> Implicit positional transfer through KD (RQs 2 and 3):
+
+Long-context retrieval abilities are significantly stronger under KD than under CE training, even when both use exclusively packed short-context data at 128k sequence length. We trace a plausible mechanism: RoPE perturbations applied to query and key vectors propagate through the teacher’s forward pass, systematically influencing the output probability distribution. These position-dependent output distributions serve as the distillation signal, carrying implicit positional information to the student model. While the current evidence is correlational, the consistent KD-over-CE gap across all RoPE configurations supports the hypothesis that the teacher’s positional signal is a contributing factor.  
+
+> Structured parameter updates during long-context extension (RQ 4):
+
+Model updates during long-context extension are dimension-specific rather than position-specific. Certain spans of hidden-state dimensions exhibit pronounced adaptation, while others remain largely unchanged. No clear monotonic trend is observed across sequence positions, suggesting that long-context generalization is driven by targeted refinement of specific rotational components rather than global shifts in representation. These insights have practical implications for the design and training of compact and on-device language models in this specific KD setting. 11 8 Limitations 
+
+We identify several limitations of the current study that should be considered when interpreting our findings:  
+
+> Single teacher-student configuration.
+
+All experiments use a single teacher (Llama-4 Scout, 17B active / 109B total) and a single student (1.1B parameters). The generalization of our findings to other model scales, architectures, or teacher-student pairings remains to be established.  
+
+> Causal ambiguity.
+
+Because Stage 2 trains at 128k context length for both KD and CE conditions, our experimental design does not fully isolate KD as the sole source of long-context ability. The observed KD-over-CE advantage is consistent with our hypothesis, but targeted ablation experiments (e.g., using a short-context teacher or position-invariant distillation targets) are necessary to establish definitive causality.  
+
+> Evaluation scope.
+
+Our long-context evaluations rely on Needle-in-a-Haystack and RULER, both of which are synthetic retrieval-style benchmarks. Performance on additional long-context tasks such as long-document QA, multi-document summarization, or multi-turn dialogue can likely shed further light on the long-context abilities instilled from logit distillation.  
+
+> Correlational mechanistic analysis.
+
+The propagation analysis in Section 4 demonstrates that positional perturbations reach the output layer, but does not include causal interventions (e.g., freezing or ablating specific dimensions) that would further establish the observed transfer. 
+
+# References 
+
+Meta AI. Llama 4: Advancing multimodal intelligence. https://ai.meta.com/blog/llama-4-multimodal-intelligence/ ,2024. Accessed: 2026-01-08. Anand Gopalakrishnan, Robert Csordás, Jürgen Schmidhuber, and Michael C. Mozer. Decoupling the "what" and "where" with polar coordinate positional embeddings, 2025. https://arxiv.org/abs/2509.10534 .Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. Distilling the knowledge in a neural network. In NIPS Deep Learning and Representation Learning Workshop , 2015. https://arxiv.org/abs/1503.02531 .Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shantanu Acharya, Dima Rekesh, Fei Jia, Yang Zhang, and Boris Ginsburg. Ruler: What’s the real context size of your long-context language models?, 2024. https://arxiv.org/abs/ 2404.06654 .Patrick Huber, Ernie Chang, Wei Wen, Igor Fedorov, Tarek Elgamal, Hanxian Huang, Naveen Suda, Chinnadhurai Sankar, Vish Vogeti, Yanghan Wang, Alex Gladkov, Kai Sheng Tai, Abdelrahman Elogeel, Tarek Hefny, Vikas Chandra, Ahmed Aly, Anuj Kumar, Raghuraman Krishnamoorthi, and Adithya Sagar. Mobilellm-pro technical report, 2025a. https://arxiv.org/abs/2511.06719 .Patrick Huber, Akshat Shrivastava, Ernie Chang, Chinnadhurai Sankar, Ahmed Aly, and Adithya Sagar. Cosmoes: Compact sparse mixture of experts, 2025b. https://arxiv.org/abs/2503.00245 .Gregory Kamradt. Needle in a haystack - pressure testing llms, 2023. https://github.com/gkamradt/LLMTest_ NeedleInAHaystack .Xiaoran Liu, Hang Yan, Shuo Zhang, Chenxin An, Xipeng Qiu, and Dahua Lin. Scaling laws of rope-based extrapolation. In International Conference on Learning Representations , 2024. https://openreview.net/pdf?id=JO7k0SJ5V6 .Bowen Peng, Jeffrey Quesnelle, Honglu Fan, and Enrico Shippole. Yarn: Efficient context window extension of large language models. In International Conference on Learning Representations , 2024. https://openreview.net/forum? id=wHBfxhZu1u .Ning Shang, Li Lyna Zhang, Siyuan Wang, Gaokai Zhang, Gilsinia Lopez, Fan Yang, Weizhu Chen, and Mao Yang. Longrope2: Near-lossless llm context window scaling. In International Conference on Machine Learning , 2025. 
+
+https://openreview.net/forum?id=jwMjzGpzi4 .Jianlin Su, Yu Lu, Shengfeng Pan, Ahmed Murtadha, Bo Wen, and Yunfeng Liu. Roformer: Enhanced transformer with rotary position embedding. Neurocomputing , 2024. doi: 10.1016/j.neucom.2023.127063. https://arxiv.org/abs/ 2104.09864 .
+
+12 Gemma Team, Aishwarya Kamath, Johan Ferret, Shreya Pathak, Nino Vieillard, Ramona Merhej, Sarah Perrin, Tatiana Matejovicova, Alexandre Ramé, Morgane Rivière, Louis Rouillard, Thomas Mesnard, Geoffrey Cideron, Jean bastien Grill, Sabela Ramos, Edouard Yvinec, Michelle Casbon, Etienne Pot, Ivo Penchev, Gaël Liu, Francesco Visin, Kathleen Kenealy, Lucas Beyer, Xiaohai Zhai, Anton Tsitsulin, Robert Busa-Fekete, Alex Feng, Noveen Sachdeva, Benjamin Coleman, Yi Gao, Basil Mustafa, Iain Barr, Emilio Parisotto, David Tian, Matan Eyal, Colin Cherry, Jan-Thorsten Peter, Danila Sinopalnikov, Surya Bhupatiraju, Rishabh Agarwal, Mehran Kazemi, Dan Malkin, Ravin Kumar, David Vilar, Idan Brusilovsky, Jiaming Luo, Andreas Steiner, Abe Friesen, Abhanshu Sharma, Abheesht Sharma, Adi Mayrav Gilady, Adrian Goedeckemeyer, Alaa Saade, Alex Feng, Alexander Kolesnikov, Alexei Bendebury, Alvin Abdagic, Amit Vadi, András György, André Susano Pinto, Anil Das, Ankur Bapna, Antoine Miech, Antoine Yang, Antonia Paterson, Ashish Shenoy, Ayan Chakrabarti, Bilal Piot, Bo Wu, Bobak Shahriari, Bryce Petrini, Charlie Chen, Charline Le Lan, Christopher A. Choquette-Choo, CJ Carey, Cormac Brick, Daniel Deutsch, Danielle Eisenbud, Dee Cattle, Derek Cheng, Dimitris Paparas, Divyashree Shivakumar Sreepathihalli, Doug Reid, Dustin Tran, Dustin Zelle, Eric Noland, Erwin Huizenga, Eugene Kharitonov, Frederick Liu, Gagik Amirkhanyan, Glenn Cameron, Hadi Hashemi, Hanna Klimczak-Plucińska, Harman Singh, Harsh Mehta, Harshal Tushar Lehri, Hussein Hazimeh, Ian Ballantyne, Idan Szpektor, Ivan Nardini, Jean Pouget-Abadie, Jetha Chan, Joe Stanton, John Wieting, Jonathan Lai, Jordi Orbay, Joseph Fernandez, Josh Newlan, Ju yeong Ji, Jyotinder Singh, Kat Black, Kathy Yu, Kevin Hui, Kiran Vodrahalli, Klaus Greff, Linhai Qiu, Marcella Valentine, Marina Coelho, Marvin Ritter, Matt Hoffman, Matthew Watson, Mayank Chaturvedi, Michael Moynihan, Min Ma, Nabila Babar, Natasha Noy, Nathan Byrd, Nick Roy, Nikola Momchev, Nilay Chauhan, Noveen Sachdeva, Oskar Bunyan, Pankil Botarda, Paul Caron, Paul Kishan Rubenstein, Phil Culliton, Philipp Schmid, Pier Giuseppe Sessa, Pingmei Xu, Piotr Stanczyk, Pouya Tafti, Rakesh Shivanna, Renjie Wu, Renke Pan, Reza Rokni, Rob Willoughby, Rohith Vallu, Ryan Mullins, Sara Smoot, Sertan Girgin, Shariq Iqbal, Shashir Reddy, Shruti Sheth, Siim P oder, Sijal Bhatnagar, Sindhu Raghuram Panyam, Sivan Eiger, Susan Zhang, Tianqi Liu, Trevor Yacovone, Tyler Liechty, Uday Kalra, Utku Evci, Vedant Misra, Vincent Roseberry, Vlad Feinberg, Vlad Kolesnikov, Woohyun Han, Woosuk Kwon, Xi Chen, Yinlam Chow, Yuvein Zhu, Zichuan Wei, Zoltan Egyed, Victor Cotruta, Minh Giang, Phoebe Kirk, Anand Rao, Kat Black, Nabila Babar, Jessica Lo, Erica Moreira, Luiz Gustavo Martins, Omar Sanseviero, Lucas Gonzalez, Zach Gleicher, Tris Warkentin, Vahab Mirrokni, Evan Senter, Eli Collins, Joelle Barral, Zoubin Ghahramani, Raia Hadsell, Yossi Matias, D. Sculley, Slav Petrov, Noah Fiedel, Noam Shazeer, Oriol Vinyals, Jeff Dean, Demis Hassabis, Koray Kavukcuoglu, Clement Farabet, Elena Buchatskaya, Jean-Baptiste Alayrac, Rohan Anil, Dmitry, Lepikhin, Sebastian Borgeaud, Olivier Bachem, Armand Joulin, Alek Andreev, Cassidy Hardin, Robert Dadashi, and Léonard Hussenot. Gemma 3 technical report, 2025. https://arxiv.org/abs/2503.19786 .Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timothée Lacroix, Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, Aurelien Rodriguez, Armand Joulin, Edouard Grave, and Guillaume Lample. Llama: Open and efficient foundation language models, 2023. https://arxiv.org/abs/2302.13971 .A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez, Ł. Kaiser, and I. Polosukhin. Attention is all you need. In Advances in Neural Information Processing Systems , 2017. https://dl.acm.org/doi/10.5555/3295222. 3295349 .An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, Chujie Zheng, Dayiheng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jialong Tang, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jing Zhou, Jingren Zhou, Junyang Lin, Kai Dang, Keqin Bao, Kexin Yang, Le Yu, Lianghao Deng, Mei Li, Mingfeng Xue, Mingze Li, Pei Zhang, Peng Wang, Qin Zhu, Rui Men, Ruize Gao, Shixuan Liu, Shuang Luo, Tianhao Li, Tianyi Tang, Wenbiao Yin, Xingzhang Ren, Xinyu Wang, Xinyu Zhang, Xuancheng Ren, Yang Fan, Yang Su, Yichang Zhang, Yinger Zhang, Yu Wan, Yuqiong Liu, Zekun Wang, Zeyu Cui, Zhenru Zhang, Zhipeng Zhou, and Zihan Qiu. Qwen3 technical report, 2025a. 
+
+https://arxiv.org/abs/2505.09388 .Bowen Yang, Bharat Venkitesh, Dwarak Talupuru, Hangyu Lin, David Cairuz, Phil Blunsom, and Acyr Locatelli. Rope to nope and back again: A new hybrid attention strategy, 2025b. https://arxiv.org/abs/2501.18795 .
+
+13 A Experimental Datapoint and Token Sequence 
+
+Randomly Chosen Example to Show Positional Impact 
+
+<BOS>Taking cereals for breakfast has become a culture especially in the US. The average person takes cereals at least once a day. The reason might be because they all taste good, but one thing that many people might be aware of is the numerous health benefits that they have. [...]. Therefore, it is evident to claim that cereals have a lot of advantages. Below are some of the known benefits of taking breakfast cereals. Why you and your kids should take <EOS> 
+
+Resulting Token Sequence 
+
+200000, 86256, 23904, 1331, 393, 32044, 947, 7375, 262, 11773, 9924, 310, 290, 2792, 26, 589, 4745, 2084, 7790, 23904, 1331, 552, 5281, 6837, 262, 3364, 26, 589, 6379, 4824, 446, 2895, 1451, 806, 25405, 3049, 24, 1108, 1085, 7744, 511, 2233, 2721, 4824, 446, 21758, 323, 373, 290, 22427, 4500, 12093, 511, 1451, 847, 26, [...], 24, 536, 373, 34727, 328, 7292, 511, 23904, 1331, 847, 262, 5693, 323, 26286, 26, 34635, 583, 1696, 323, 290, 5711, 12093, 323, 9096, 32044, 23904, 1331, 335, 17375, 650, 341, 913, 16767, 2036, 3373, 220, 200001 (Repeated 64x to fill seq_len of 128k tokens.) 
+
+Resulting Analysis Sequence 
+
+220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220, 220 (Each with 2,048 tokens in between) 
+
+14
