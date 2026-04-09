@@ -1,0 +1,757 @@
+Title: STQuant: Spatio-Temporal Adaptive Framework for Optimizer Quantization in Large Multimodal Model Training
+
+URL Source: https://arxiv.org/pdf/2604.06836v1
+
+Published Time: Thu, 09 Apr 2026 00:54:26 GMT
+
+Number of Pages: 9
+
+Markdown Content:
+# STQuant: Spatio-Temporal Adaptive Framework for Optimizer Quantization in Large Multimodal Model Training 
+
+## Minglu Liu 
+
+Xidian University Xian, Shaanxi, China 25071213205@stu.xidian.edu.cn 
+
+## Cunchen Hu ∗
+
+China Telecom Cloud Computing Research Institute Beijing, China hucunchen21@mails.ucas.ac.cn 
+
+## Liangliang Xu ∗
+
+Xidian University Xian, Shaanxi, China llxu@mail.ustc.edu.cn 
+
+## Fengming Tang 
+
+Xidian University Xian, Shaanxi, China fm.tang@stu.xidian.edu.cn 
+
+## Ruijia Wang 
+
+China Telecom Cloud Computing Research Institute Beijing, China wangrj12@chinatelecom.cn 
+
+## Fu Yu 
+
+China Telecom Cloud Computing Research Institute Beijing, China yufubupt@163.com 
+
+## Abstract 
+
+Quantization is an effective way to reduce the memory cost of large-scale model training. However, most existing methods adopt fixed-precision policies, which ignore the fact that optimizer-state distributions vary significantly across layers and training steps. Such uniform designs often introduce noticeable accuracy degra-dation. To move beyond fixed quantization, we propose STQuant ,a distributed training framework that reduces the memory foot-print of optimizer states via dynamic precision allocation across layers, state variables, and training steps, while maintaining model quality. Naively applying dynamic quantization during training is challenging for two reasons. First, optimizer states are numerically sensitive, and quantization noise can destabilize quality. Second, jointly considering multiple states and layers induces a large combi-natorial search space. STQuant addresses these challenges with two key techniques: 1) a provably near-optimal factor selection strategy that accurately identifies the most influential factors for precision adaptation. 2) a dynamic transition decision algorithm that reduces the search cost from exponential to linear complexity. Experiments on GPT-2 and ViT show that STQuant reduces optimizer-state mem-ory by 84.4%, achieving an average bit-width of as low as 5.1 bits, compared with existing solutions. Moreover, STQuant incurs only 
+
+𝑂 (𝑁 /𝐾 ) computational overhead and requires 𝑂 (1) extra space. 
+
+## CCS Concepts 
+
+• Computing methodologies → Neural networks .
+
+## Keywords 
+
+Optimizer Quantization, Mixed-Precision Quantizaiton, Multimodal models, Large-Scale Model Training 
+
+## 1 Introduction 
+
+As Large Foundation Models are widely applied in fields such as natural language processing [ 35 ], image generation [ 21 ], and code generation [ 22 ], the demand for model quality has increased, lead-ing to explosive growth in parameter scale [ 2]. Simultaneously, the storage requirements for model parameters and high-precision optimizer states have substantially increased memory consumption, 
+
+> ∗Cunchen Hu and Liangliang Xu are the corresponding authors.
+
+becoming a major bottleneck for large-scale training. For exam-ple, in typical BF16 training, Adam optimizer states, consisting of first-order moment 𝑚 and second-order moment 𝑣 , usually oc-cupy 4× to 6× more memory than the model weights [ 20 ]. With the adoption of FP8 and lower-bit quantization for model weights, this ratio further increases to 8× to 12 × [ 34 ]. However, optimizer states are critical to training stability and model accuracy because they are extremely sensitive to quantization errors, where even minor discrepancies can lead to gradient explosion or loss diver-gence. Therefore, designing high-compression and low-precision loss quantization strategies for optimizer states is crucial for im-proving training efficiency and scalability. In recent years, a large body of work has explored optimizer-state quantization. For example, 8-bit Adam [ 5 ] and FP8 [ 17 ] primarily rely on static uniform quantization. AnyPrecision [ 19 ] introduces mixed-precision quantization for greater flexibility. In addition, Lion [ 3] and Adam-mini [ 32 ] improve efficiency through light-weight optimizer designs. However, optimizer-state quantization still faces limitations in training dynamics and search complexity. Static quantization schemes [ 5, 17 ] fail to capture the spatiotem-poral non-stationarity of gradients during training, while fixed bit-width allocation or static block structures limit adaptability to training dynamics. Search-based mixed-precision methods [19] suffer from exponentially growing search spaces and parameter coupling, making them difficult to apply to large-scale pretraining. We observe that the sensitivity of optimizer states to quantiza-tion errors depends on the distribution of gradients during training. As shown in Figure. 1(a), gradients exhibit large fluctuations in the early stages of training (training sampled steps < 20 ), which gradually stabilize in later stages (training sampled steps > 20 ). Moreover, we also observe periodic horizontal stripes across layers, indicating that different layers exhibit varying tolerance to quan-tization errors. To quantitatively assess whether optimizer states inherit the spatiotemporal characteristics of gradients, we compute the 1Pearson correlation coefficients between the gradients and the first-order moment 𝑚 and second-order moment 𝑣 of the optimizer               
+
+> 1The Pearson correlation coefficient measures the linear correlation between two variables and is defined as the covariance normalized by the product of their standard deviations.
+> arXiv:2604.06836v1 [cs.LG] 8 Apr 2026 Minglu Liu, Cunchen Hu, Liangliang Xu, Fengming Tang, Ruijia Wang, and Fu Yu 020 40 60 80
+> Training Sampled Steps
+> 04812 16 20 24 28 32 36 40 44
+> Layer Index
+> (a) Gradient Sharpness Dynamics
+> 1.4 1.6 1.8 2.0 2.2 2.4
+> Gradient CV ( rl)
+> 1.2
+> 1.4
+> 1.6
+> 1.8
+> 2.0
+> 2.2
+> 2.4
+> Momentum  m CV ( rl)
+> (b) Momentum Inheritance
+> (Pearson R = 0.9777)
+> 1.4 1.6 1.8 2.0 2.2 2.4
+> Gradient CV ( rl)
+> 1
+> 2
+> 3
+> 4
+> 5
+> Second Moment  v CV ( rl)
+> (c) Second Moment Inheritance
+> (Pearson R = 0.7169)
+> 1.4
+> 1.6
+> 1.8
+> 2.0
+> 2.2
+> 2.4
+> 2.6
+> Sharpness ( rl)
+
+Figure 1: Spatiotemporal evolution and correlation analysis of gradients and Adam optimizer states. (a) Sharpness of the gradient distribution (CV) across 48 core weight layers in 12 Transformer blocks, including QKV projections, attention projections, MLP expansion layers, and MLP compression layers, sampled every 50 training steps over 5000 total steps; (b) Correlation between gradients and the coefficient of variation (CV) of the first-order moment 𝑚 , showing a very strong linear relationship (Pearson 𝑅 = 0.9777 ); (c) Correlation between gradients and the second-order moment 𝑣 , where, despite the squaring operation introducing nonlinear mapping and noise amplification, the correlation remains strong ( 𝑅 = 0.7169 ). 
+
+states (Figure. 1(b) and 1(c)). We find a strong spatiotemporal corre-lation between optimizer states and gradients, suggesting that the optimizer states are not randomly distributed but are determined by the gradients’ intrinsic physical properties. Consequently, the optimal optimizer quantization requires considering the dynamism across training steps (temporal adaptivity) and the sensitivity to layer-specific structures (layer-wise adaptivity). To address the above challenges, we propose STQuant , a general 
+
+spatio-temporal adaptive framework for optimizer quant ization in model training, designed to reduce memory consumption while pre-serving training stability with low overhead. The key idea behind 
+
+STQuant is to capture optimizer-state heterogeneity along both temporal and spatial dimensions. (1) temporal: Low-bit quantiza-tion can be unstable early in training and redundant later. STQuant 
+
+introduces an adaptive, stages-aware quantization strategy inspired by simulated annealing and alleviates quantization-induced degra-dation on the convergence trajectory. (2) spatial: To account for the heterogeneous sensitivity of different layers to accumulated errors, STQuant adopts a heuristic scoring mechanism that reframe complex global optimization as gradient-statistics-based bit-width selection, enabling real-time identification and protection of critical layers. Specifically, STQuant comprises three engines: 1) a score engine for computing gradient statistics; 2) a distributed engine 
+
+for synchronizing them across GPUs and determining layer-wise bit-widths; and 3) a quantization engine for applying block-wise quantization to optimizer states. In summary, we make the follow-ing contributions. 
+
+• We systematically characterize the spatio-temporal hetero-geneity of Adam optimizer states during training, and pro-vide both calculable metrics and empirical evidence, thereby establishing a quantitative basis for quantization strategy. 
+
+• We propose STQuant , an efficient spatio-temporal-aware framework that performs training-stage-aware score modu-lation and real-time identification of critical layers, enabling scalable and memory-efficient optimization in large-scale training with minimal online decision overhead. 
+
+• We validate STQuant on benchmark models with up to tens of billions of parameters. Compared with industry-standard baselines such as bitsandbytes , our method reduces opti-mizer memory usage by approximately 84.4% with an aver-age bit-width of only 5.1 bits, while maintaining comparable or superior convergence stability. 
+
+## 2 Related Work 
+
+Fixed-Bit Strategies . Low-bit quantization has become a key tech-nique for alleviating the memory bottleneck in ultra-large-scale model training. Early work such as 8-bit Adam[ 5] demonstrated the feasibility of compressing optimizer states with negligible accu-racy loss via block-wise quantization. Subsequent efforts, includ-ing Jetfire [ 27 ], further improved low-bit training by optimizing INT8 dataflow for Transformer architectures. With the evolution of hardware-native support, FP8 formats (E4M3/E5M2)[ 17 ] and the Transformer Engine library[ 18 ] have gradually become an indus-trial standard for trillion-parameter pretraining. In parallel, the OCP microscaling data format standard[ 1 ] introduced a finer-grained scaling mechanism to further reduce memory usage. However, most of these methods still follow a fixed-bit strategy. In essence, this design tends to sacrifice flexibility in exchange for deterministic operator execution efficiency. As a result, it fails to capture the complex spatiotemporal non-stationarity in gradient evolution. This limitation often leads to significant precision re-dundancy in the later stage of training. Moreover, such methods cannot easily achieve sub-bit-level deep compression on existing hardware platforms without native FP8 support. 
+
+Mixed-Bit Strategies . Mixed-precision quantization exploits struc-tural redundancy by assigning different bit widths to different lay-ers. For example, AnyPrecision [ 19 ] investigated the sensitivity differences of optimizer states under different bit widths. However, its bit-allocation strategy still mainly relies on manually designed heuristic rules. In the area of automated search, earlier studies such as HAQ [ 26 ] used reinforcement learning to search for bit widths, while the HAWQ series [ 8 , 30 ] further introduced Hessian trace analysis to guide quantization. Later, methods such as SEAM [ 24 ], BSQ [ 29 ], and ZeroQuant [ 31 ] for large-scale models further improved the automation of mixed-precision allocation. STQuant: Spatio-Temporal Adaptive Framework for Optimizer Quantization in Large Multimodal Model Training 
+
+Although these search-based methods adopt mixed-precision quantization, the search space still grows rapidly with increas-ing model depth. In general, the complexity can be expressed as bits Layers . Moreover, offline search algorithms usually make deci-sions based on static snapshots from the early stage of training. Therefore, they cannot effectively capture the dynamic evolution of gradients, which change from strong fluctuations in the early stage to high sparsity in the later stage. As a result, these methods ignore the continuous shift of spatiotemporal sensitivity and fail to maintain the optimal compression ratio throughout the entire training process. 
+
+Architectural Optimization Strategies . Beyond bit-width alloca-tion, another line of research reduces memory overhead by reformu-lating the mathematical structure of the optimizer itself. Represen-tative methods include Lion [ 3 ], which removes the second-order moment in Adam-style optimizers by keeping only momentum and using sign-based updates; GaLore [ 34 ] and its quantized version Q-GaLore [ 33 ], which constrain the optimization process to a low-dimensional subspace through low-rank gradient projection; and Adam-mini [ 32 ], which exploits the approximately block-diagonal Hessian structure in Transformers to compress second-order mo-ments or learning-rate scales from the parameter level to the block level, thereby significantly reducing memory usage. In addition, Sophia [ 11 ], A-LOMO [ 14 ], and MeZO [ 16 ] explore optimizer-state compression from the perspectives of second-order approximation, training-process fusion, and zeroth-order optimization, respectively. Meanwhile, in the broader low-bit training ecosystem, methods such as QLoRA [ 6], DoRA [ 12 ], BitNet [ 15 , 25 ], OneBit [ 28 ], and AWQ [ 10 ] continue to push training and fine-tuning toward lower-bit model representations. However, these methods generally rely on predefined structural or heuristic rules, which limits their flexibility and fine-grained adaptability throughout training. As training dynamics evolve, they cannot promptly adjust to changing precision requirements. 
+
+## 3 Methods 3.1 Problem Formulation 
+
+We formulate memory optimization in large-scale training as a spatio-temporally constrained discrete precision allocation prob-lem. Consider a model 𝑊 = {𝑤 𝑙 }𝐿 𝑙 =1 with 𝐿 layers. Under adaptive optimizers such as AdamW, each layer 𝑙 at step 𝑡 maintains two momentum states: the first moment 𝑚 𝑙,𝑡 and the second moment 
+
+𝑣 𝑙,𝑡 . In standard training, both states are stored in full precision (32-bit) in training, which incurs a substantial memory overhead, as shown in Equation (1) 
+
+𝑀 𝑓 𝑢𝑙𝑙  
+
+> t
+
+=
+
+> 𝐿
+
+∑︁ 
+
+> 𝑙 =1
+
+2 · 𝑁 𝑙 · 𝐵 full , (1) where 𝑀 full  
+
+> 𝑡
+
+denotes the full-precision memory overhead at setp 𝑡 ,
+
+𝑁 𝑙 is the number of parameters in layer 𝑙 , and 𝐵 full = 32 is the full precision bit-width. To reduce this overhead, STQuant stores optimizer states in mixed precision and selects bit-widths dynamically throughout training. Let B = {4, 8, 16 , 32 } denote the set of candidate bit-widths. 
+
+STQuant aims to learn an adaptive mapping function F that, at each training step 𝑡 , assigns a layer-wise bit-width 𝑏 𝑙,𝑡 ∈ B based Input Prediction      
+
+> Forward Forward
+> loss function Loss function
+> Backward Backward
+> Compute
+> Gradients
+> STREAM
+> AdamW
+> STAF-Q
+> AdamW
+> All-Reduce
+> 𝐀 𝐀 ,𝐀 =ℱ(𝐀 𝐀 ,𝐀 ,𝐀 𝐀 ,𝐀 ,𝐀 𝐀 ,𝐀 𝐀 ,𝐀 )
+> 4 bit
+> 8 bit
+> 16 bit
+> 32 bit
+> 𝐀 (𝐀 )
+> Distributed Engine
+> Score Engine
+
+... 𝐀 𝐀 ,𝐀   
+
+> 𝐀 𝐀
+> 𝐀 𝐀 ,𝐀
+> 𝐀 𝐀 ,𝐀
+> GPU 0 GPU 1 GPU n
+> STAF-Q (ours)
+> AdamW(baseline)
+> Quantization Engine
+> Block-wise
+> Strategy
+> m
+> v
+> linear
+> logarithmic
+> next iteration
+> VRAM
+> savings
+> 𝐀 𝐀 ,𝐀
+> 𝐀 𝐀
+> 𝐀 𝐀 ,𝐀
+> 𝐀 𝐀 ,𝐀
+> 𝐀 𝐀 ,𝐀
+> 𝐀 𝐀
+> 𝐀 𝐀 ,𝐀
+> 𝐀 𝐀 ,𝐀
+> R
+> N
+> Update
+
+Figure 2: Overview of the STQuant framework: The system consists of three collaborative engines: (1) the Score Engine extracts spatio-temporal gradient features across GPUs; (2) the Distributed Engine synchronizes global statistics to de-termine optimal bit-widths; and (3) the Quantization Engine executes dual-mode block-wise compression (for 𝑚 and 𝑣 ). 
+
+on current gradient statistics, thereby minimizing the memory foot-print of optimizer states while maintaining stable convergence. Let 
+
+𝑀 𝑡 denote the memory overhead at training step 𝑡 under adaptive bit-width allocation over B. The problem can then be formulated as follows. 
+
+min  
+
+> F
+
+𝑀 𝑡 =
+
+> 𝐿
+
+∑︁ 
+
+> 𝑙 =1
+
+2 · 𝑁 𝑙 · 𝑏 𝑙,𝑡 (2) subject to 
+
+|L( 𝑊 , 𝐵 full ) − L( 𝑊 , F )| < 𝜖, (3) where L( 𝑊 , F ) denotes the loss associated with the precision allocation strategy specified by the mapping function F .
+
+## 3.2 The Overview of STQuant 
+
+Figure 2 illustrates the overall workflow of STQuant , which primar-ily comprises three coordinated engines: (1) Score Engine com-putes multi-dimensional gradient statistics, including 𝑛 𝑙,𝑡 , 𝑟 𝑙,𝑡 , 𝑠 𝑡 ,
+
+and 𝑣 𝑙,𝑡 , in parallel across all GPU nodes; (2) Distributed Engine 
+
+is responsible for synchronizing gradient statistics and utilize the mapping function F to dynamically determine the optimal bit-width 𝑏 𝑙,𝑡 ∈ B for each layer, thereby ensuring consistency across the distributed environment; (3) Quantization Engine performs block-wise quantization of the optimizer states based according to the assigned bit-widths. Specifically, STQuant applies linear map-ping to the first moment, while using logarithmic quantization for the second moment to accommodate its larger numerical range. Notably, STQuant introduces only O( 1) auxiliary memory over-head, which means the storage overhead does not grow linearly with the number of parameters 𝑁 or layers 𝐿 . Moreover, despite the complexity of the search space, the decision-making overhead remains negligible compared with the total training time, even for trillion-parameter models. Minglu Liu, Cunchen Hu, Liangliang Xu, Fengming Tang, Ruijia Wang, and Fu Yu 
+
+## 3.3 Score Engine 
+
+3.3.1 Bi-factor Sensitivity Proxy. To construct an efficient preci-sion mapping function, STQuant avoids the massive computational overhead associated with the Hessian matrix. Instead, it leverages first-order gradient statistics as a lightweight proxy for second-order sensitivity. For each layer 𝑙 , we define two complementary feature descriptors at the current time step 𝑡 : the Intensity Factor (𝑛 ) and the Variation Factor ( 𝑟 ). 
+
+• Intensity Factor: We define 𝑛 𝑙,𝑡 in Equation (4) as the Root Mean Square (RMS) of the gradient elements, characterizing the overall gradient magnitude and the sensitivity scale of the gradient by layer: 
+
+𝑛 𝑙,𝑡 =
+
+vut 1
+
+𝑁 𝑙 𝑁 𝑙 ∑︁ 
+
+> 𝑖 =1
+
+(𝑔 𝑖 )2 (4) 
+
+• Variation Factor: We define 𝑟 𝑙,𝑡 in Equation (5) as the Coeffi-cient of Variation (CV) of the gradient magnitudes, measuring the dispersion and heterogeneity of the gradient distribution: 
+
+𝑟 𝑙,𝑡 = 𝜎 (| 𝑔 𝑙,𝑡 |) 
+
+𝜇 (| 𝑔 𝑙,𝑡 |) + 𝜖 (5) To eliminate instantaneous random fluctuations during training and capture long-term statistical patterns, we introduce the Expo-nential Moving Average (EMA) to maintain historically smoothed estimate statistics 𝑁 ema and 𝑅 ema :
+
+𝑁 (𝑡 ) 
+
+> ema
+
+= 𝛼 · Mean ({ 𝑛 𝑙,𝑡 }𝐿 𝑙 =1) + ( 1 − 𝛼 )𝑁 (𝑡 −1) 
+
+> ema
+
+(6) 
+
+𝑅 (𝑡 ) 
+
+> ema
+
+= 𝛼 · Mean ({ 𝑟 𝑙,𝑡 }𝐿 𝑙 =1) + ( 1 − 𝛼 )𝑅 (𝑡 −1) 
+
+> ema
+
+(7) 
+
+Theoretical Analysis: STQuant adopts 𝑛 and 𝑟 as the decision basis. The core idea lies in using the Fisher Information Matrix (FIM) theory to perform a lightweight approximation of Hessian-trace-based sensitivity metrics (e.g., HAWQ-V2 [ 7]). Specifically, under standard FIM theory, the expected Hessian can be approximated by the expected outer product of gradients during training, i.e., 
+
+E[H] ≈ E[gg 𝑇 ]. Therefore, we take the trace of both sides as Equation (8) , indicating that the second-order sensitivity of a layer is proportional to the square of the Frobenius norm of its gradient: 
+
+E[Tr (H)] ∝ E[∥ 𝑔 ∥2 
+
+> 𝐹
+
+] (8) FurtherMore, for a fully connected layer 𝑦 = 𝑊 𝑥 , the gradient is define as ∇𝑊 L = 𝜕 L 
+
+> 𝜕𝑦
+
+· 𝑥 𝑇 , and the Frobenius norm satisfies: 
+
+∥∇ 𝑊 L∥ 2 
+
+> 𝐹
+
+= 𝜕 L
+
+𝜕𝑦 
+
+> 22
+
+· ∥ 𝑥 ∥22 (9) Equation (9) implies that the weight gradient norm captures the joint scale evolution of activation magnitudes and error signals. The intensity factor 𝑛 , as a normalized expression of the gradient norm, characterizes the overall scale of the Hessian trace. How-ever, 𝑛 alone cannot reflect the distribution characteristics of the 
+
+Hessian Spectrum . Thus, we introduce the variation factor 𝑟 to further depict intra-layer heterogeneity in parameter sensitivity. As illustrated in Figure 3, we map each layer into the 𝑛 -𝑟 deci-sion quadrants to determine the corresponding bit-width allocation logic. Consequently, the combination of 𝑛 and 𝑟 enables a high-fidelity approximation consistent with HAWQ-V2 [ 7] with minimal computational cost. r    
+
+> n𝐀 𝐀 𝐀 𝐀
+> 𝐀 𝐀 𝐀 𝐀
+> n↑ r↓
+> Magnitude-Dominant
+> Region
+> 8-bit
+> n↑ r ↑
+> Critical Region
+> 32-bit
+> n↓r↓
+> Redundant
+> Region
+> 4-bit
+> n↓r↑
+> Structural Complexity
+> Region
+> 16-bit
+
+Figure 3: The 𝑛 -𝑟 decision quadrants for bit-width alloca-tion. The decision space is partitioned into four zones based on global EMA statistics ( 𝑁 ema and 𝑅 ema ): (1) Critical Zone 
+
+(top-right), (2) Magnitude-Dominant Zone (top-left), (3) Struc-tural Complexity Zone (bottom-right), and (4) Redundant Zone (bottom-left). 
+
+3.3.2 Temporal Annealing Factor. While the bi-factor descriptors effectively capture spatial sensitivity, they remain inherently in-stantaneous and local observations. To improve the robustness of our decisions, we further incorporate prior knowledge of training dynamics into the STQuant framework. As illustrated in Figure 1, deep learning training is a non-stationary process that evolves from chaotic exploration toward local convergence. In the early stages of pre-training, parameters are randomly initialized, leading to unstable gradient directions and severe amplitude fluctuations. Applying low-bit quantization at this stage may cause quantization noise to be amplified layer by layer through non-linear mappings, potentially interfering with the convergence trajectory or even causing numerical divergence. To mitigate this, we introduce the temporal annealing factor ( 𝑆 𝑡 ) as a numerical stability buffer during the initial phase of training, and parameterize its schedule using the hyperbolic secant function, defined as Equation (10): 
+
+𝑆 𝑡 = 1 + sech 
+
+ 𝑡 𝜏 
+
+
+
+(10) where 𝑡 is the current training step and 𝜏 is an adaptive time con-stant that controls the decay rate of 𝑆 𝑡 , i.e., the length of the high-precision protection window. We set 𝜏 adaptively to account for variations across architectures and training settings: deeper models with 𝐿 layers typically accumulate errors more strongly and require more iterations for gradients to stabilize, whereas larger batch sizes reduce the variance of gradient estimates under the square-root scaling rule [ 9], changing the effective information gain per step. Consequently, Equation (10) exhibits several desirable properties that match the requirements of precision scheduling: 
+
+• Initial Inertia: Around 𝑡 = 0, 𝑆 ′ (0) = 0, the derivative 𝑆 ′ (0) = 0,which enables a smooth warm-up of the bit-width policy during the startup phase and prevents precision mutations from undermining cold-start stability. 
+
+• High-order Continuity: 𝑆 𝑡 is twice-differentiable, guarantee-ing that bit-width switching boundaries evolve continuously and smoothly over time. 
+
+• Asymptotic Decay: As 𝑡 increases, sech (𝑡 /𝜏 ) decays exponen-tially toward 0, allowing 𝑠 𝑡 to naturally transition from the protec-tion mode back to the feature-driven mode. 
+
+3.3.3 Hierarchical Feature Factor. From a spatial perspective, to characterize the varying sensitivity of different layers to quanti-zation errors, we introduce the hierarchical sensitivity factor as STQuant: Spatio-Temporal Adaptive Framework for Optimizer Quantization in Large Multimodal Model Training 
+
+an evaluation metric. Let 𝑔 𝑖,𝑡 denote the gradient of parameter 𝑖 at step 𝑡 . We quantify the the 𝑙 -th layer gradient scale at the current update step, 𝑣 𝑙,𝑡 , as follows: 
+
+𝑣 𝑙,𝑡 = Mean ({ 𝑔 2 
+
+> 𝑖,𝑡
+
+}𝑖 ∈Layer 𝑙 ) (11) Equation (11) intuitively reflects the overall gradient strength and parameter activity within the layer. However, functional modules in deep neural networks (e.g., Transformers), such as self-attention and MLP, exhibit inherent magnitude heterogeneity in their gradi-ent distributions. Consequently, relying solely on raw magnitude statistics fails to achieve equitable precision allocation across the entire model. To address this, we maintain a dynamic, historically smoothed estimate, 𝑉 global_ema , which effectively eliminates inter-layer mag-nitude discrepancies. Specifically, we first aggregate the layer-wise magnitude statistics across all 𝐿 layers and apply the Exponential Moving Average (EMA): 
+
+𝑉 (𝑡 ) 
+
+> global_ema
+
+= 𝛼 · 1
+
+𝐿 
+
+> 𝐿
+
+∑︁ 
+
+> 𝑙 =1
+
+𝑣 𝑙,𝑡 + ( 1 − 𝛼 )𝑉 (𝑡 −1) 
+
+> global_ema
+
+(12) By introducing a historically smoothed, we further define the ratio 
+
+𝑣 𝑙,𝑡 /𝑉 global_ema as an evaluation of the relative importance of a layer compared to the entire model. As a result, STQuant can ensure that limited memory resources are optimally scheduled across lay-ers, prioritizing those critical layers whose magnitude fluctuations significantly exceed the global average. 
+
+## 3.4 Distributed Engine 
+
+As defined in Section 3.3, the four statistical features 𝑛 𝑙,𝑡 , 𝑟 𝑙,𝑡 , 𝑠 𝑡 ,and 𝑣 𝑙,𝑡 jointly characterize the quantization sensitivity of each layer. Since the final bit-width allocation requires a unified ranking criterion, we aggregate these features into a single scalar score. Motivated by Rate-Distortion theory[ 4, 23 ],we follow a simple prin-ciple. The additional bit-width assigned to each layer depends on its relative sensitivity with respect to a global reference. In particular, rate-distortion analysis indicates that the required increase in bit precision is proportional to the logarithm of the signal variance or sensitivity. Therefore, if a layer is 𝑘 times more sensitive than the global average, its bit-allocation score should increase by ap-proximately log 2 (𝑘 ). Following this intuition, we first normalize layer-wise statistics by their corresponding global running esti-mates, so that each term measures a relative amplification factor rather than an absolute magnitude. We then apply the logarithm to convert multiplicative deviations into additive contributions, yielding the unified scoring function: score 𝑙,𝑡 = Φ + log 2
+
+𝑟 𝑙,𝑡 
+
+𝑅 (𝑡 )
+
+> ema
+
++ log 2
+
+𝑛 𝑙,𝑡 
+
+𝑁 (𝑡 )
+
+> ema
+
++ log 2 𝑆 (𝑡 ) + log 2
+
+𝑣 𝑙,𝑡 
+
+𝑉 (𝑡 )
+
+> global_ema
+
+(13) This scoring function has two advantages. First, each term has a clear interpretation: a larger ratio indicates that the current layer is more sensitive than the global baseline in that aspect. Second, the logarithmic form makes the contributions additive, which enables a simple and interpretable fusion of multiple heterogeneous statistics. 
+
+Algorithm 1 Spatio-Temporal Adaptive Bit-Width Allocation 
+
+Require: Learning rate 𝜂 , weight decay 𝜆 , coefficients 𝛽 1, 𝛽 2, EMA factor 𝛼 , decay period 𝜏 , update frequency 𝑈 , block size 𝐵 , small constant 𝜖 . 
+
+> 1:
+
+Initialize step 𝑡 ← 0, global EMA stats ¯𝑛, ¯𝑟, ¯𝑣 𝑔𝑙𝑜𝑏𝑎𝑙 ← 0. 
+
+> 2:
+
+Initialize layer states 𝑚 0, 𝑣 0,𝑠𝑞 ← 0, initial bit-width 𝑏 𝑙 ← 16 
+
+for each layer 𝑙 . 
+
+> 3:
+
+while training not converged do  
+
+> 4:
+
+𝑡 ← 𝑡 + 1 𝑔 𝑡 = ∇𝑓 𝑡 (𝜃 𝑡 −1) 
+
+> 5:
+
+if (𝑡 mod 𝑈 = 0) or (𝑡 < 5) then  
+
+> 6:
+
+for each layer 𝑙 = 1, . . . , 𝐿 do  
+
+> 7:
+
+𝑛 𝑙 =√︃ E[𝑔 2 
+
+> 𝑙,𝑡
+
+], 𝑟 𝑙 = 𝜎 (𝑔 𝑙,𝑡 )/( E[| 𝑔 𝑙,𝑡 |] + 𝜖 ), 𝑣 𝑙 = E[𝑔 2 
+
+> 𝑙,𝑡
+
+] 
+
+> 8:
+
+end for  
+
+> 9:
+
+¯𝑛 ← 𝛼 · avg (𝑛 𝑙 ) + ( 1 − 𝛼 ) ¯𝑛  
+
+> 10:
+
+¯𝑟 ← 𝛼 · avg (𝑟 𝑙 ) + ( 1 − 𝛼 ) ¯𝑟  
+
+> 11:
+
+¯𝑣 𝑔𝑙𝑜𝑏𝑎𝑙 ← 𝛼 · avg (𝑣 𝑙 ) + ( 1 − 𝛼 ) ¯𝑣 𝑔𝑙𝑜𝑏𝑎𝑙  
+
+> 12:
+
+for each layer 𝑙 do  
+
+> 13:
+
+𝑠 𝑡 = 1 + sech (𝑡 /𝜏 ) 
+
+> 14:
+
+𝑆𝑐𝑜𝑟𝑒 𝑙 = 7.2+log 2  
+
+> 𝑟 𝑙
+> ¯𝑟 +𝜖
+
++log 2 
+
+> 𝑛 𝑙
+> ¯𝑛 +𝜖
+
++log 2 𝑠 𝑡 +log 2  
+
+> 𝑣 𝑙
+> ¯𝑣 𝑔𝑙𝑜𝑏𝑎𝑙 +𝜖
+> 15:
+
+𝑏 𝑙 = Map (𝑆𝑐𝑜𝑟𝑒 𝑙 ) (Thresholds: 6.8, 12, 24)  
+
+> 16:
+
+end for  
+
+> 17:
+
+end if  
+
+> 18:
+
+for each layer 𝑙 do  
+
+> 19:
+
+𝑚 𝑡 = 𝛽 1𝑚 𝑡 −1 + ( 1 − 𝛽 1)𝑔 𝑡  
+
+> 20:
+
+𝑣 𝑡,𝑠𝑞 = 𝛽 2𝑣 𝑡 −1,𝑠𝑞 + ( 1 − 𝛽 2)𝑔 2 
+
+> 𝑡
+> 21:
+
+ˆ𝑚 𝑡 = Quantize (𝑚 𝑡 , 𝑏 𝑙 , mode=’linear’ , block = 𝐵 ) 
+
+> 22:
+
+ˆ𝑣 𝑡,𝑠𝑞 = Quantize (𝑣 𝑡,𝑠𝑞 , 𝑏 𝑙 , mode=’log’ , block = 𝐵 ) 
+
+> 23:
+
+˜𝑚 𝑡 = ˆ𝑚 𝑡 /( 1 − 𝛽 𝑡 
+
+> 1
+
+), ˜𝑣 𝑡,𝑠𝑞 = ˆ𝑣 𝑡,𝑠𝑞 /( 1 − 𝛽 𝑡 
+
+> 2
+
+) 
+
+> 24:
+
+𝜃 𝑡 = 𝜃 𝑡 −1 · ( 1 − 𝜂𝜆 ) − 𝜂 · ˜𝑚 𝑡 √ ˜𝑣 𝑡,𝑠𝑞 +𝜖  
+
+> 25:
+
+end for  
+
+> 26:
+
+end while 
+
+As a result, layers with consistently larger relative sensitivity obtain higher scores and are assigned higher bit-widths. Finally, the continuous score is projected into a discrete bit-width space through a step-wise mapping function Map (·) :
+
+𝑏 𝑙,𝑡 = Map (score 𝑙,𝑡 ) ∈ { 4, 8, 16 , 32 } (14) The hyperparameters within the mapping function Map (·) are determined through sensitivity distribution profiling across repre-sentative multimodal models. The base bias Φ = 7.2 is utilized to anchor the 8-bit reference precision. The thresholds {6.8, 12 , 24 }
+
+are established based on the quantile statistics of gradients during the training process. This design enables differentiated resource scheduling: non-critical layers at the lower end of the sensitivity distribution are compressed to 4-bit to maximize VRAM savings, whereas the critical layers—characterized by violent gradient dy-namics and high sensitivity to long-term cumulative errors—are assigned higher bit-widths to ensure training stability. 
+
+## 3.5 Quantization Engine 
+
+After determining the specific bit-width 𝑏 𝑙,𝑡 for each layer, we adopt a block-wise quantization strategy that partitions parameter ten-sors into several contiguous sub-blocks. By localizing the scaling Minglu Liu, Cunchen Hu, Liangliang Xu, Fengming Tang, Ruijia Wang, and Fu Yu 
+
+Table 1: Overview of experimental settings.                                  
+
+> Stage Task Data Model Metric
+> Pre-train LM OpenWebText GPT2-XL Loss Pre-train VRecon COCO 2017 ViT-Base Loss / Top-1 Fine-tune NLU MNLI RoBERTa-Large Accuracy Fine-tune Vision COCO 2017 ViT-Base mAP Fine-tune LM Wikitext-103 GPT2-Medium PPL Fine-tune ITR COCO 2017 ViT-B/32 Recall@1 Ablation LM Wikitext-103 12-layer GPT Trans. PPL
+> Note: LM = Language Modeling; VRecon = Visual Reconstruction; NLU = Natural Language Understanding; Vision = Visual Recognition; ITR = Image-Text Retrieval.
+
+factors, we can effectively suppress quantization noise and prevent numerical outliers from distorting the global quantization scale. To match the different statistical characteristics of optimizer states, we use a dual-mode quantization scheme: 
+
+• First Moment ( 𝑚 ): We apply linear symmetric quantization. Since the first moment carries the directional information of gradi-ent descent, linear mapping preserves the integrity of the optimiza-tion trajectory. 
+
+• Second Moment ( 𝑣 ): In contrast, we apply logarithmic quan-tization to the second moment. Because squared gradients typically exhibit a vast dynamic range and a heavy-tailed distribution, map-ping them into the logarithmic domain effectively compresses the numerical span. This method allows us to capture fine changes in small values even at very low bit-widths. Through a spatio-temporally adaptive mechanism, STQuant en-ables an intelligent quantization strategy. Algorithm 1 summarizes how STQuant works during training. First, we compute the gradi-ent and periodically collect layer-wise statistics(Line 4-7). These statistics are aggregated across GPUs and smoothed by EMA to obtain the historically smoothed estimate. Then, we use them to assign a bit-width to each layer(Line 9-11). The allocation score combines spatial differences across layers and temporal changes over training. The resulting bit-width is selected from {4, 8, 16 , 32 }
+
+(Line 13-15). After that, we update the first and second-order states of the optimizer. The first moment 𝑚 is quantized with a linear scheme, while the second moment 𝑣 is quantized with a logarithmic scheme(Line 19-22). Finally, we use the quantized states to update bias and model parameters (Line 23-24). 
+
+## 4 Experiments 4.1 Baselines and settings 
+
+Baselines. We evaluate STAF-Q against 32-bit AdamW [ 13 ] and bitsandbytes 8-bit AdamW [ 5 ] across pre-training, fine-tuning, and ablation experiments in language, vision, and image-text retrieval. The former serves as a full-precision baseline and the latter as a practical low-bit baseline. Benchmarks, models, and evaluation metrics are summarized in Table 1. 
+
+Settings. All experiments are conducted on NVIDIA A800 (80GB) GPUs with FP16 training. Pre-training uses four GPUs, while fine-tuning and ablation studies use a single GPU. To ensure a fair comparison, we keep all training settings identical across optimiz-ers, including random seeds and hyperparameters, and vary only the optimizer-state representation. 0.0 0.2 0.4 0.6 0.8 1.0      
+
+> Tokens (Billion)
+> 2
+> 3
+> 4
+> 5
+> 6
+> 7
+> Loss
+> AdamW
+> 8-bit AdamW(bnb)
+> STAF-Q
+> 0100 200 300 400
+> Epochs
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Loss
+> AdamW
+> 8-bit AdamW(bnb)
+> STAF-Q
+> (a) Pre-training on GPT2-1.5B (XL) (b) Pre-training on ViT-Base
+
+Figure 4: Pre-training on GPT2-1.5B (XL) and ViT-Base. 12.00GB         
+
+> 3.00GB
+> 1.86GB
+> 7.45GB
+> 1.86GB
+> 1.19GB
+> AdamW 8-bit AdamW STAF -QAdamW 8-bit AdamW STAF -Q
+> GPT2 -XL ViT -Base
+> 84.50%
+> 38.00%
+> 84.03%
+> 36.02%
+
+Figure 5: Comparison of optimizer-state memory on GPT2-XL and ViT-Base. STQuant achieves the lowest memory over-head among all compared optimizers. 
+
+## 4.2 Pre-training Analysis 
+
+In the pre-training stage, we focus on four key aspects of STQuant :convergence stability, cross-modal generalization, the quality of pre-trained representations, and the memory efficiency of optimizer states. To this end, we analyze its convergence behavior on both language and vision pre-training tasks. In addition, we use linear probing results, memory comparisons, and bit-width evolution plots to examine its performance. Through these evaluations, we verify whether STQuant can maintain both training quality and resource efficiency under an extremely low average bit-width. 
+
+4.2.1 Convergence in Language and Vision Pre-Training Tasks. We first study the convergence behavior of STQuant under different pre-training tasks. Figure 4 shows that the training loss curve of 
+
+STQuant closely matches that of full-precision AdamW during pre-training. This result indicates that STQuant maintains an opti-mization trajectory highly consistent with that of the full-precision baseline, despite significant compression of the optimizer states. By comparison, 8-bit AdamW shows larger loss fluctuations in the early training stage and slightly weaker overall stability. This in-dicates that the dynamic bit-width allocation of STQuant is better suited to the numerical stability requirements of early pre-training, thereby reducing the optimization disturbances introduced by static low-bit quantization at critical stages. To examine whether this advantage extends to the visual modal-ity, we further analyze the vision pre-training task. As shown in Figure 4, even for the vision reconstruction task, which demands stronger optimizer stability, STQuant remains highly consistent with full-precision AdamW in terms of convergence behavior, while using an average state bit-width of only 5.1 bits. These results show that the adaptive bit-width of STQuant is not limited to language models. Instead, it remains effective across different modalities and training objectives. STQuant: Spatio-Temporal Adaptive Framework for Optimizer Quantization in Large Multimodal Model Training 0 5 10 15 20 25 
+
+> Training Epochs
+> Head
+> Block 11
+> Block 10
+> Block 9
+> Block 8
+> Block 7
+> Block 6
+> Block 5
+> Block 4
+> Block 3
+> Block 2
+> Block 1
+> Block 0
+> Embedding
+> Model Architecture (Bottom  Top)
+> Layer-wise Bit-width Evolution (Initial 30 Epochs)
+> 4
+> 6
+> 8
+> 10
+> 12
+> 14
+> Average Bit-width per Layer
+
+(a) Macro-level layer-wise bit-width evolution. 0 5 10 15 20 25  
+
+> Training Epochs
+> norm1.weight
+> norm1.bias
+> attn.qkv.weight
+> attn.qkv.bias
+> attn.proj.weight
+> attn.proj.bias
+> norm2.weight
+> norm2.bias
+> mlp.fc1.weight
+> mlp.fc1.bias
+> mlp.fc2.weight
+> mlp.fc2.bias
+> Internal Parameters
+> Detailed Bit-width Evolution: Block 0
+> 4
+> 8
+> 16
+> 32
+> Bit-width (Discrete Levels)
+
+(b) Micro-level bit-width evolution within a Transformer block. 
+
+Figure 6: Bit-width evolution of STQuant during pre-training. (a) shows the dynamic bit-width allocation across layers over training epochs, and (b) presents the bit-width evolution of different parameter groups within a Transformer block. Table 2: Linear probing of ViT-Base with different optimizers. 
+
+Optimizer State Avg. Top-1 (%) 32-bit AdamW 32-bit 32.0 31.44 8-bit AdamW (bnb) 8-bit 8.0 31.68 
+
+STAF-Q Dynamic 5.1 31.64 
+
+4.2.2 Quality of Pre-trained Representations. Loss curves alone are not sufficient to demonstrate that a model has learned high-quality representations during pre-training. To further evaluate the repre-sentation quality after pre-training, we examine the downstream performance of the vision model using linear probing. Table 2 shows that the model pre-trained with STQuant achieves a Top-1 accuracy of 31.64%, which is on par with full-precision AdamW at 31.44% and 8-bit AdamW at 31.68%. This result indicates that STQuant substantially reduces the bit-width of optimizer states without impairing the model’s semantic representation ability. In other words, STQuant removes redundant precision in optimizer states rather than information that is essential for downstream performance. Therefore, the benefit of STQuant is reflected not only in its training dynamics, where the loss curve closely matches the full-precision baseline, but also in the quality of its final learned representations. This is important because it shows that STQuant 
+
+does not simply achieve an appealing training loss; it also preserves the model’s representational strength. 
+
+4.2.3 Memory Efficiency. In addition to maintaining training qual-ity and representation capability, STQuant also brings significant savings in the memory overhead of optimizer states. As shown in Figure 5, STQuant uses much less optimizer-state memory than full-precision AdamW on both GPT2-XL and ViT-Base. Moreover, it further reduces memory usage compared with 8-bit AdamW(bnb). Specifically, on GPT2-XL, STQuant reduces the optimizer-state memory from 12.00 GB with AdamW to 1.86 GB. On ViT-Base, it reduces the memory from 7.45 GB to 1.19 GB. Overall, STQuant 
+
+requires only about 1/6 of the optimizer-state memory of full-precision AdamW; Compared to 8-bit AdamW (bnb), it further reduces memory overhead by 38% on GPT2-XL and 36.02% on ViT-Base. These results demonstrate that STQuant achieves more aggres-sive memory compression than static 8-bit quantization while intro-ducing almost no degradation in training performance. In particular, in GPU memory-constrained training environments, STQuant can significantly enhance the feasibility of large-scale pre-training. 
+
+4.2.4 Bit-width Evolution Analysis. To understand why STQuant 
+
+remains effective under an extremely low average bit-width, we analyze the evolution of its bit-width allocation during pre-training. From a layer-wise view, Figure 6a shows that the Embedding and Head layers usually keep higher bit-widths throughout training, while the intermediate Transformer blocks are compressed more aggressively. This reveals a clear pattern: the layers at both ends are more sensitive, whereas the middle layers are more redundant. Hence, different layers have different precision requirements, and 
+
+STQuant can automatically reserve more precision for the critical ones. From a temporal view, the bit-width of each layer does not decrease monotonically. Instead, it changes dynamically, with mul-tiple rebounds and reallocations during training. This means that 
+
+STQuant does not rely on a fixed one-shot compression strategy. Rather, it continuously adjusts precision allocation according to the needs of different training stages. Compared with static quanti-zation, this dynamic mechanism helps avoid over-compression at critical moments and thus improves training stability. A closer examination of a single Transformer block further shows that STQuant is component-aware. As shown in Figure 6b, LayerNorm-related parameters usually retain higher bit-widths, while many parameters in the MLP can be compressed more ag-gressively. This indicates that precision sensitivity varies not only across layers, but also across operator-level within the same layer. Therefore, the strength of STQuant is not merely that it lowers the average bit-width. Instead, it dynamically allocates precision across layers, stages, and components, so that the limited precision budget is used where it matters most. As a result, STQuant can greatly reduce the memory overhead of optimizer states while preserving convergence behavior and representation quality close to full-precision AdamW. Minglu Liu, Cunchen Hu, Liangliang Xu, Fengming Tang, Ruijia Wang, and Fu Yu 
+
+Table 3: Performance and optimizer-state memory savings of STQuant AdamW compared with full-precision and 8-bit AdamW(bnb) baselines across core fine-tuning tasks. Task Setting Optimizer Task Data Model Metric Value Opt.State Mem Saved 
+
+32-bit AdamW GLUE MNLI RoBERTa-Large Accuracy( ↑) 0.9060 reference 8-bit AdamW(bnb) GLUE MNLI RoBERTa-Large Accuracy( ↑) 0.9002 75.0% 
+
+STQuant GLUE MNLI RoBERTa-Large Accuracy( ↑) 0.9032 84.4% 
+
+32-bit AdamW Classification COCO 2017 ViT-Base mAP( ↑) 0.72669 reference 8-bit AdamW(bnb) Classification COCO 2017 ViT-Base mAP( ↑) 0.73082 75.0% 
+
+STQuant Classification COCO 2017 ViT-Base mAP( ↑) 0.72434 83.0% 
+
+32-bit AdamW LM wikitext-103 GPT2-Medium PPL( ↓) 20.02 reference 8-bit AdamW(bnb) LM wikitext-103 GPT2-Medium PPL( ↓) 20.22 75.0% 
+
+STQuant LM wikitext-103 GPT2-Medium PPL( ↓) 20.1 82.5% 
+
+32-bit AdamW IT Retrieval COCO 2017 ViT-B/32 Recall@1( ↑) 0.7240 reference 8-bit AdamW(bnb) IT Retrieval COCO 2017 ViT-B/32 Recall@1( ↑) 0.7220 75.0% 
+
+STQuant IT Retrieval COCO 2017 ViT-B/32 Recall@1( ↑) 0.7320 87.5% 
+
+## 4.3 Fine-tuning 
+
+To evaluate the effectiveness of STQuant on downstream tasks, we further perform fine-tuning experiments on natural language, vision, and multimodal benchmarks, as summarized in Table 3 
+
+Natural language tasks. STQuant obtains an accuracy of 0.9032 on MNLI. This result is close to the 0.9060 achieved by full-precision AdamW and higher than the 0.9002 of 8-bit AdamW. On the wikitext-103 language modeling task, STQuant reaches a perplexity of 20.1. This is also close to the full-precision baseline of 20.02 and better than the 20.22 of 8-bit AdamW. These results indicate that STQuant 
+
+can maintain stable optimization performance in both discrimina-tive and generative language tasks. 
+
+Vision tasks. STQuant achieves an mAP of 0.72434 on the COCO 2017 classification task. This result remains close to both full-precision AdamW, which obtains 0.72669, and 8-bit AdamW, which reaches 0.73082. Therefore, the dynamic quantization strat-egy of STQuant also generalizes well to vision models, without causing obvious performance degradation. 
+
+For multimodal tasks. STQuant achieves a Recall@1 of 0.7320 on the COCO 2017 image-text retrieval task. Not only is this result higher than the 0.7220 of 8-bit AdamW, but it also surpasses the 0.7240 of full-precision AdamW. This indicates that STQuant can preserve stable optimization in unimodal tasks. Moreover, it can also support more complex multimodal representation learning. In terms of memory overhead, fixed 8-bit AdamW consistently saves 75.0% of optimizer-state memory across all tasks. In contrast, 
+
+STQuant further increases this saving to 82.5%–87.5%. Specifically, it achieves 84.4%, 83.0%, 82.5%, and 87.5% on MNLI, visual classifi-cation, language modeling, and image-text retrieval, respectively. Taken together, these results show that STQuant can systematically surpass the compression limit of static 8-bit quantization through dynamic bit-width allocation. 
+
+Table 4: Ablation study of STQuant on WikiText-103 with GPT-2. Lower AvgBit and PPL indicate better compression and language modeling performance, respectively.                        
+
+> Method AvgBit ↓ΔAvgBit PPL ↓ΔPPL
+> STQuant (Full) 6.3 0.0 127.3 0.0 w/o Dual Factor 6.4 +0.1 130.2 +2.9 w/o Temporal Factor 5.8 -0.5 128.7 +1.4 w/o Spatial Factor 8.0 +1.7 125.6 -1.7
+
+## 4.4 Ablation Study 
+
+To analyze the role of each component in STQuant , we conduct an ablation study on WikiText-103 with GPT-2. Table 4 reports the av-erage AvgBit and PPL of different variants during the convergence stage, i.e., from steps 7000 to 8000. As shown in Table 4, removing the Dual Factor increases PPL by 2.9 compared with the full model, while AvgBit increases by only 0.1. This result indicates that the Dual Factor is the most critical component for preserving performance. In particular, the intensity and variation factors are important for characterizing the sensitivity of optimizer states. Therefore, removing this component causes clear performance degradation, even though the average bit-width changes only marginally. In contrast, removing the Temporal Factor reduces AvgBit by 0.5, but increases PPL by 1.4. This indicates that temporal information is important for maintaining model stability under higher compression. Moreover, it helps the quantization process adapt better during the later stage of training. Meanwhile, removing the Spatial Factor decreases PPL by 1.7, but increases AvgBit by 1.7. This result shows that the main role of the Spatial Factor is not to directly improve model performance. Instead, it mainly reduces the average bit-width and thereby improves overall compression efficiency. Overall, these components play different but complementary roles in STQuant . The Dual Factor mainly preserves performance, the Temporal Factor improves training-time quantization stability, and the Spatial Factor enhances compression efficiency. Therefore, STQuant: Spatio-Temporal Adaptive Framework for Optimizer Quantization in Large Multimodal Model Training 
+
+although the full STQuant is not the best variant on any single met-ric, it achieves a better balance between performance and compres-sion ratio, which validates the effectiveness of the overall design. 
+
+## 5 Conclusion 
+
+In this paper, we propose STQuant , a spatio-temporal aware dy-namic quantization framework for optimizer states in large-scale multimodal model training. STQuant jointly captures temporal training dynamics, spatial heterogeneity across layers, and gra-dient statistical features, and thereby enables adaptive bit-width allocation with very low overhead. Experiments on language, vision, and multimodal tasks demon-strate that STQuant achieves convergence stability and downstream performance comparable to, and in some cases better than, full-precision AdamW. Meanwhile, it reduces optimizer-state memory overhead by up to 84.4% and compresses the average bit-width to 5.1 bits. Taken together, these results indicate that spatio-temporal aware dynamic quantization is an effective and general solution for optimizer compression in large-scale model training. 
+
+## References 
+
+[1] 2024. OCP Microscaling Data Formats (MX) Specification v1.0. https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf. Open Compute Project. [2] Josh Achiam, Steven Adler, Sandhini Agarwal, Lama Ahmad, Ilge Akkaya, Floren-cia Leoni Aleman, Diogo Almeida, Janko Altenschmidt, Sam Altman, Shyamal Anadkat, et al . 2023. Gpt-4 technical report. arXiv preprint arXiv:2303.08774 
+
+(2023). [3] Xiangning Chen, Chen Liang, Da Huang, Esteban Real, Kaiyuan Wang, Hieu Pham, Xuanyi Dong, Thang Luong, Cho-Jui Hsieh, Yifeng Lu, et al . 2023. Sym-bolic discovery of optimization algorithms. Advances in neural information processing systems 36 (2023), 49205–49233. [4] Thomas M Cover. 1999. Elements of information theory . John Wiley & Sons. [5] Tim Dettmers, Mike Lewis, Sam Shleifer, and Luke Zettlemoyer. 2021. 8-bit optimizers via block-wise quantization. arXiv preprint arXiv:2110.02861 (2021). [6] Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. 2023. Qlora: Efficient finetuning of quantized llms. Advances in neural information processing systems 36 (2023), 10088–10115. [7] Zhen Dong, Zhewei Yao, Daiyaan Arfeen, Amir Gholami, Michael W Mahoney, and Kurt Keutzer. 2020. Hawq-v2: Hessian aware trace-weighted quantization of neural networks. Advances in neural information processing systems 33 (2020), 18518–18529. [8] Zhen Dong, Zhewei Yao, Amir Gholami, Michael W Mahoney, and Kurt Keutzer. 2019. Hawq: Hessian aware quantization of neural networks with mixed-precision. In Proceedings of the IEEE/CVF international conference on computer vision . 293–302. [9] Elad Hoffer, Itay Hubara, and Daniel Soudry. 2017. Train longer, generalize better: closing the generalization gap in large batch training of neural networks. 
+
+Advances in neural information processing systems 30 (2017). [10] Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. 2024. Awq: Activation-aware weight quantization for on-device llm compression and accel-eration. Proceedings of machine learning and systems 6 (2024), 87–100. [11] Hong Liu, Zhiyuan Li, David Hall, Percy Liang, and Tengyu Ma. 2023. Sophia: A scalable stochastic second-order optimizer for language model pre-training. 
+
+arXiv preprint arXiv:2305.14342 (2023). [12] Shih-Yang Liu, Chien-Yi Wang, Hongxu Yin, Pavlo Molchanov, Yu-Chiang Frank Wang, Kwang-Ting Cheng, and Min-Hung Chen. 2024. Dora: Weight-decomposed low-rank adaptation, 2024. URL https://arxiv. org/abs/2402.09353 
+
+(2024). [13] Ilya Loshchilov and Frank Hutter. 2017. Decoupled weight decay regularization. 
+
+arXiv preprint arXiv:1711.05101 (2017). [14] Kai Lv, Yuqing Yang, Tengxiao Liu, Qipeng Guo, and Xipeng Qiu. 2024. Full parameter fine-tuning for large language models with limited resources. In 
+
+Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) . 8187–8198. [15] Shuming Ma, Hongyu Wang, Lingxiao Ma, Lei Wang, Wenhui Wang, Shaohan Huang, Li Dong, Ruiping Wang, Jilong Xue, and Furu Wei. 2024. The era of 1-bit llms: All large language models are in 1.58 bits. arXiv preprint arXiv:2402.17764 
+
+(2024). [16] Sadhika Malladi, Tianyu Gao, Eshaan Nichani, Alex Damian, Jason D Lee, Danqi Chen, and Sanjeev Arora. 2023. Fine-tuning language models with just forward passes. Advances in Neural Information Processing Systems 36 (2023), 53038– 53075. [17] Paulius Micikevicius, Dusan Stosic, Neil Burgess, Marius Cornea, Pradeep Dubey, Richard Grisenthwaite, Sangwon Ha, Alexander Heinecke, Patrick Judd, John Kamalu, et al . 2022. Fp8 formats for deep learning. arXiv preprint arXiv:2209.05433 
+
+(2022). [18] NVIDIA. 2022–2024. Transformer Engine User Guide. https://docs.nvidia.com/ deeplearning/transformer-engine/user-guide/index.html. Accessed 2026. [19] Yeonhong Park, Jake Hyun, SangLyul Cho, Bonggeun Sim, and Jae W Lee. 2024. Any-precision llm: Low-cost deployment of multiple, different-sized llms. arXiv preprint arXiv:2402.10517 (2024). [20] Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, and Yuxiong He. 2020. Zero: Memory optimizations toward training trillion parameter models. In SC20: in-ternational conference for high performance computing, networking, storage and analysis . IEEE, 1–16. [21] Aditya Ramesh, Mikhail Pavlov, Gabriel Goh, Scott Gray, Chelsea Voss, Alec Rad-ford, Mark Chen, and Ilya Sutskever. 2021. Zero-shot text-to-image generation. In International conference on machine learning . Pmlr, 8821–8831. [22] Baptiste Roziere, Jonas Gehring, Fabian Gloeckle, Sten Sootla, Itai Gat, Xiao-qing Ellen Tan, Yossi Adi, Jingyu Liu, Romain Sauvestre, Tal Remez, et al . 2023. Code llama: Open foundation models for code. arXiv preprint arXiv:2308.12950 
+
+(2023). [23] Claude E Shannon et al . 1959. Coding theorems for a discrete source with a fidelity criterion. IRE Nat. Conv. Rec 4, 142-163 (1959), 1. [24] Chen Tang, Kai Ouyang, Zenghao Chai, Yunpeng Bai, Yuan Meng, Zhi Wang, and Wenwu Zhu. 2023. Seam: Searching transferable mixed-precision quantiza-tion policy through large margin regularization. In Proceedings of the 31st ACM International Conference on Multimedia . 7971–7980. [25] Hongyu Wang, Shuming Ma, Li Dong, Shaohan Huang, Huaijie Wang, Lingxiao Ma, Fan Yang, Ruiping Wang, Yi Wu, and Furu Wei. 2023. Bitnet: Scaling 1-bit transformers for large language models. arXiv preprint arXiv:2310.11453 (2023). [26] Kuan Wang, Zhijian Liu, Yujun Lin, Ji Lin, and Song Han. 2019. Haq: Hardware-aware automated quantization with mixed precision. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition . 8612–8620. [27] Haocheng Xi, Yuxiang Chen, Kang Zhao, Kai Jun Teh, Jianfei Chen, and Jun Zhu. 2024. Jetfire: Efficient and accurate transformer pretraining with int8 data flow and per-block quantization. arXiv preprint arXiv:2403.12422 (2024). [28] Yuzhuang Xu, Xu Han, Zonghan Yang, Shuo Wang, Qingfu Zhu, Zhiyuan Liu, Weidong Liu, and Wanxiang Che. 2024. Onebit: Towards extremely low-bit large language models. Advances in Neural Information Processing Systems 37 (2024), 66357–66382. [29] Huanrui Yang, Lin Duan, Yiran Chen, and Hai Li. 2021. BSQ: Exploring bit-level sparsity for mixed-precision neural network quantization. arXiv preprint arXiv:2102.10462 (2021). [30] Zhewei Yao, Zhen Dong, Zhangcheng Zheng, Amir Gholami, Jiali Yu, Eric Tan, Leyuan Wang, Qijing Huang, Yida Wang, Michael Mahoney, et al . 2021. Hawq-v3: Dyadic neural network quantization. In International Conference on Machine Learning . PMLR, 11875–11886. [31] Zhewei Yao, Reza Yazdani Aminabadi, Minjia Zhang, Xiaoxia Wu, Conglong Li, and Yuxiong He. 2022. Zeroquant: Efficient and affordable post-training quanti-zation for large-scale transformers. Advances in neural information processing systems 35 (2022), 27168–27183. [32] Yushun Zhang, Congliang Chen, Ziniu Li, Tian Ding, Chenwei Wu, Diederik P Kingma, Yinyu Ye, Zhi-Quan Luo, and Ruoyu Sun. 2024. Adam-mini: Use fewer learning rates to gain more. arXiv preprint arXiv:2406.16793 (2024). [33] Zhenyu Zhang, Ajay Jaiswal, Lu Yin, Shiwei Liu, Jiawei Zhao, Yuandong Tian, and Zhangyang Wang. 2024. Q-galore: Quantized galore with int4 projection and layer-adaptive low-rank gradients. arXiv preprint arXiv:2407.08296 (2024). [34] Jiawei Zhao, Zhenyu Zhang, Beidi Chen, Zhangyang Wang, Anima Anandkumar, and Yuandong Tian. 2024. Galore: Memory-efficient llm training by gradient low-rank projection. arXiv preprint arXiv:2403.03507 (2024). [35] Wayne Xin Zhao, Kun Zhou, Junyi Li, Tianyi Tang, Xiaolei Wang, Yupeng Hou, Yingqian Min, Beichen Zhang, Junjie Zhang, Zican Dong, et al . 2023. A survey of large language models. arXiv preprint arXiv:2303.18223 1, 2 (2023), 1–124. 
+
+Received 20 February 2007; revised 12 March 2009; accepted 5 June 2009
