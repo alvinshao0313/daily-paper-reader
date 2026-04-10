@@ -1,0 +1,823 @@
+Title: Bit-by-Bit: Progressive QAT Strategy with Outlier Channel Splitting for Stable Low-Bit LLMs
+
+URL Source: https://arxiv.org/pdf/2604.07888v1
+
+Published Time: Fri, 10 Apr 2026 00:39:21 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# Bit-by-Bit: Progressive QAT Strategy with Outlier Channel Splitting for Stable Low-Bit LLMs 
+
+Binxing Xu 1* Hao Gu 2* Lujun Li 2 Hao Wang 3 Bei Liu 2
+
+Jiacheng Liu 2 Qiyuan Zhu 2 Xintong Yang 2 Chao Li 1† Sirui Han 2† Yike Guo 2†
+
+> 1
+
+Zhejiang University 2Hong Kong University of Science and Technology 
+
+> 3
+
+City University of Hong Kong 
+
+binxing.xu@zju.edu.cn marcusguhao@gmail.com 
+
+Abstract 
+
+Training LLMs at ultra-low precision remains a formidable challenge. Direct low-bit QAT often suffers from convergence instability and substantial training costs, exacerbated by quan-tization noise from heavy-tailed outlier chan-nels and error accumulation across layers. To address these issues, we present B IT -BY -B IT , a progressive QAT framework with outlier chan-nel splitting. Our approach integrates three key components: (1) block-wise progressive train-ing that reduces precision stage by stage, en-suring stable initialization for low-bit optimiza-tion; (2) nested structure of integer quantization grids to enable a "train once, deploy any preci-sion" paradigm, allowing a single model to sup-port multiple bit-widths without retraining; (3) rounding-aware outlier channel splitting, which mitigates quantization error while acting as an identity transform that preserves the quantized outputs. Furthermore, we follow microscaling groups with E4M3 scales, capturing dynamic activation ranges in alignment with OCP/N-VIDIA standards. To address the lack of effi-cient 2-bit kernels, we developed custom opera-tors for both W2A2 and W2A16 configurations, achieving up to 11 × speedup over BF16. Un-der W2A2 settings, B IT -BY -B IT significantly outperforms baselines like BitDistiller and Effi-cientQAT on both Llama2/3, achieving a loss of only 2.25 WikiText2 PPL compared to full-precision models. 
+
+1 Introduction 
+
+The remarkable success of modern Large Language Models (LLMs), such as GPT-5 (OpenAI, 2025) and DeepSeek (Liu et al., 2024a), is largely at-tributed to scaling laws, which suggest that in-creasing model size consistently enhances perfor-mance. However, the burgeoning scale of these models necessitates the adoption of low-precision        
+
+> *Equal contribution.
+> †Corresponding authors. 𝒂 𝒇𝒖𝒍𝒍 𝒑𝒓𝒆𝒄𝒊𝒔𝒊𝒐𝒏 𝒃 𝟖𝒃𝒊𝒕
+> 𝒄 𝟒𝒃𝒊𝒕 𝒅 𝟐𝒃𝒊𝒕
+
+Figure 1: Loss landscapes under different precisions. 
+
+The vertical axis denotes the loss, the horizontal axes (α, β ) represent random directions in parameter space. 
+
+formats to optimize both storage and computa-tional efficiency. Existing approaches fall into two families: post-training quantization (PTQ) and quantization-aware training (QAT). PTQ quantizes a pretrained model with little or no retraining and thus dominated early work; however, it often de-grades sharply at ultralow precisions ( ≤ 4-bit) (Lin et al., 2024). By contrast, QAT incorporates the quantization process directly into the training loop to mitigate the quant error caused by low-precision representation. To ensure low-bit performance, existing QAT methods have explored primarily on several di-rections: (i) modifying the optimization objec-tive via variants of knowledge distillation (Du et al., 2024; Chen et al., 2024a) to better align with full-precision output distributions; (ii) im-proving discrete gradient estimation through en-hanced Straight-Through Estimators (STE) (Pan-ferov et al., 2025; Malinovskii et al., 2024) to suppress gradients with large approximation er-1
+
+> arXiv:2604.07888v1 [cs.LG] 9 Apr 2026
+
+𝟑𝟔𝟎𝟎 ×𝑳𝒆𝒔𝒔   
+
+> 𝒄 𝒃 𝒂 Figure 2: Analysis of QAT challenges. (a) Training loss curve of direct QAT, exhibiting a prominent loss spike. (b) Layer-wise reconstruction loss and relative error across Transformer blocks, illustrating significant error accumulation in deeper layers. (c) Comparison of training budgets; our method (Bit-by-Bit) achieves a 3600 ×
+> reduction in token requirements compared to ParetoQ.
+
+rors; (iii) engineering robust quantization prim-itives, such as clipping strategies and adaptive grids (Chen et al., 2024a; Liu et al., 2025b; Du et al., 2024) to mitigate the impact of non-salient values; (iv) employing fine-grained, stage-wise schedules for learning rates and weight decay (Ma et al., 2025, 2024; Team et al., 2025); and (v) inte-grating value-redistributing transformations (e.g., Hadamard) into training (Choi et al., 2025; Pan-ferov et al., 2025; Tan et al., 2025; Wang et al., 2025) to smooth out outliers prior to quantiza-tion. Despite these advances, existing approaches still face critical stability challenges during low-bit training. They often rely on massive token budgets to converge to usable low-bit representa-tions (Fig. 2(c)); demand extensive hyperparameter “wind tunnel” tuning, particularly of learning rates, since low-bit weights require larger yet inherently unstable updates; and introduce significant compu-tational overhead from complex distillation losses, which slow training and inflate memory usage due to the need to retain both teacher and student logits. These challenges naturally raise the question: How can we mitigate quantization error and achieve stable ultra-low-bit QAT? 
+
+To address these challenges, we first examine the loss landscapes under different precisions (Fig. 1). We observe that as precision decreases, the loss landscape becomes increasingly uneven and dis-continuous, which can trap the model in poor local minima. Compounding this difficulty, loss spikes emerge during low-bit training process (Fig. 2(a)). Moreover, weight distributions are difficult to rep-resent at low bit widths(Fig. 3), making QAT op-timization inherently unstable in the ultra low bit regime. And by further examining the quantiza-tion error across different blocks (Fig. 2(b)), we find that later layers suffer from significantly larger errors. This suggests that the key challenge for ultra-low-bit QAT lies in the accumulation of quan-tization error . So we propose Bit-by-Bit , a pro-gressive framework for stable ultra-low-bit QAT. Our main contributions are: • A progressive strategy anneals precision from high to low, quantizing weights first and activa-tions later to provide a well-conditioned start for the subsequent low-bit stage. • Extending the curriculum progressive strategy to a unified "any-precision" framework by leverag-ing the nested nature of bit-width enables "train once, deploy at any precision". • Rounding-aware outlier channel splitting, which mitigates both outlier effects and rounding errors while preserving quantized outputs. Our comprehensive evaluation on LLaMA-2/3 and Mistral under both weight-only (w2a16) and weight–activation (w2a2) shows that B IT -BY -B IT 
+
+consistently surpasses strong QAT baselines under the same training budget in ultra–low-bit regimes. On LLaMA-2 7B with w2a2 quantization, it incurs only +2.25 perplexity increase on WikiText2 com-pared to FP16 (7.72 vs. 5.47). Furthermore, on LLaMA-3 family which is hard to quantize, Bit by Bit surpass other QAT methods. 
+
+2 Related work 
+
+2.1 Quantization for LLMs Post-Training Quantization (PTQ) is a main-stream LLM compression method, with aggres-sive strategies down to 2-bit (Liu et al., 2024b), ternary (Kaushal et al., 2024), and binary (Gu et al., 2025). Most approaches aim to preserve a small set of salient weights to reduce error, e.g., AWQ (Lin et al., 2024) uses activation-guided scal-ing, SqueezeLLM (Kim et al., 2023) mixes dense/s-parse formats, PB-LLM (Shang et al., 2023) com-bines binary and INT8, and BiLLM (Huang et al., 2024) adds residual quantization. Despite effec-2𝒂 𝒑𝒆𝒓 𝒕𝒆𝒏𝒔𝒐𝒓 𝒃 𝒈𝒓𝒐𝒖𝒑 = 𝟏𝟐𝟖 𝒄 𝒈𝒓𝒐𝒖𝒑 = 𝟔𝟒 𝒅 𝒈𝒓𝒐𝒖𝒑 = 𝟑𝟐 Figure 3: Value distributions of various group granularities showing (a) Low-bit values are nested in the high-bit grid, (b) lower bits collapse representations; larger groups improve dynamic-range. 
+
+tiveness, these designs often introduce complex implementations and kernel inefficiency. 
+
+Quantization-Aware Training (QAT) aims to address these issues by jointly optimizing the weights along with the quantizer to mitigate quan-tization error, including: LLM-QAT (Liu et al., 2023) operates without additional data but suffers from high computational overhead during teacher logits computation; QuEST (Panferov et al., 2025) filters outlier gradients and employs RMS oper-ations combined with Gaussian and Hadamard transforms for distribution fitting; DB-LLM (Chen et al., 2024a) introduces a dual binary representa-tion along with a deviation-aware distillation loss and BitNet (Ma et al., 2025) has demonstrated the potential of ternary weight representations, yet re-quires as many as 2T tokens to establish a stable low-bit model. 
+
+Weight-Only Quantization stores LLM weights in low precision, with recent works pushing below 1-bit representation (Gu et al., 2025; Dong et al., 2024), achieving up to 20 × compres-sion. Weight–Activation Quantization further quantizes activations, enabling low-precision GEMM kernels and reducing IO (e.g., DeepSeek’s DeepGEMM (DeepSeek, 2025)). Methods like SmoothQuant (Xiao et al., 2023a) shift quantiza-tion difficulty from activations to weights, while rotation-based approaches (QuaRot (Ashkboos et al., 2024), SpinQuant (Liu et al., 2024c)) improve robustness via orthogonal transformations. Our QAT framework supports both ultra-low-bit weight-only and weight–activation quantization. 
+
+3 Method 
+
+In this section, we revisit quantization and intro-duce our method, which integrates a progressive QAT strategy with Once-for-any-precision training, outlier channel splitting, and microscaling groups. 
+
+3.1 Quantization Revisited 
+
+Quantization is applied to all linear layers except the LM head and the embedding layer. In group-wise quantization, weight matrix W ∈ Rm×n is partitioned into G = mn g groups of size g:
+
+W =  W (1) , W (2) , . . . , W (G) , W (i) ∈ Rg×1.
+
+Each group is quantized independently. For any element x ∈ W (i), we compute 
+
+q = round 
+
+ xs + z
+
+
+
+, q ← clip( q, 0, 2n − 1) ,s = M ax − M in 
+
+2n − 1 , z = − round 
+
+ M in s
+
+
+
+,
+
+where M ax = max( W (i)), M in = min( W (i)).Henceforth, we use the terms scale and step size interchangeably to denote s. Traditional symmet-ric quantizers are often suboptimal at ultra-low bit-widths.Specifically, under a 2-bit configura-tion, they either utilize only three distinct levels to maintain a zero-centered balance (e.g., {− 1, 0, 1}), or map weights to a zero-less symmetric code-book such as {− 1.5, −0.5, 0.5, 1.5} as explored in strategies like SEQ (Liu et al., 2025b). To maximize representation capacity, we adopt an asymmetric quantizer with a zero-point. To incor-porate the quantizer into training, we adopt the straight-through estimator (STE) to address the non-differentiability of the rounding operation dur-ing backpropagation. Gradients flow only through the weights, while the scale s and zero-point z ob-tained directly from closed-form expressions. No additional clipping or heuristic adjustment (Shao et al., 2023) is applied to the weights, ensuring a simple yet effective quantization scheme. 
+
+3.2 Progressively Bit-by-Bit QAT 
+
+As shown in Fig. 1 and Fig. 2(a), directly optimiz-ing at very low precision often produces a rugged loss landscape and loss spike, making training to 3𝒐𝒓𝒊𝒈𝒏𝒊𝒂𝒍                          
+
+> 𝒚 𝒎 =𝒙 𝒎 𝒘 𝒎
+> 𝒂𝒇𝒕𝒆𝒓 𝑶𝑪𝑺
+> 𝒚 𝒎 =𝒙 𝒎
+> (𝒘 𝒎 +𝒔 /𝟐 )
+> 𝟐 +𝒙 𝒎
+> (𝒘 𝒎 −𝒔 /𝟐 )
+> 𝟐
+> 𝑿 ∗
+> 𝑾
+> 𝑿
+> 𝒘 𝒎
+> 𝑚𝑒𝑡𝑟𝑖𝑐 =||𝑥 ||!⋅𝑚𝑎𝑥 |𝑤 |
+> 𝒙 𝒎
+> ∗
+> 𝑾
+> (𝒘 𝒎 −𝒔 /𝟐 )
+> 𝟐
+> (𝒘 𝒎 +𝒔 /𝟐 )
+> 𝟐
+> 𝒙 𝒎 𝒙 𝒎
+> 𝒔𝒑𝒍𝒊𝒕 𝒇𝒑𝟏𝟔
+> 𝟖𝒃𝒊𝒕
+> 𝟐𝒃𝒊𝒕
+> 𝟒𝒃𝒊𝒕
+> 𝒑𝒓𝒐𝒈𝒓𝒆𝒔𝒔𝒊𝒗𝒆
+> 𝒅𝒊𝒓𝒆𝒄𝒕𝒍𝒚
+> 𝒑𝒓𝒐𝒈𝒓𝒆𝒔𝒔𝒊𝒗𝒆
+> 𝟐𝒃𝒊𝒕 𝒑𝒓𝒐𝒈𝒓𝒆𝒔𝒔𝒊𝒗𝒆
+> 𝒂 𝑷𝒓𝒐𝒈𝒓𝒆𝒔𝒔𝒊𝒗𝒆 𝑩𝒊𝒕 𝒃𝒚 𝑩𝒊𝒕 𝑸𝑨𝑻 𝒃 𝑹𝒐𝒖𝒏𝒅𝒊𝒏𝒈 𝑨𝒘𝒂𝒓𝒆 𝒐𝒖𝒕𝒊𝒍𝒆𝒓 𝒄𝒉𝒂𝒏𝒏𝒆𝒍 𝒔𝒑𝒍𝒊𝒕
+
+Figure 4: (a) Progressive Bit-by-Bit QAT: Direct 2-bit QAT drives weights into coarse clusters under a non-smooth loss landscape, progressive schedule that lowers precision stage-by-stage, using the higher-precision phase to stabilize and initialize the next stage. (b) Rounding-aware outlier channel splitting: detect outlier channels via metric || x|| 2 · max |w|, then apply identical, rounding-aware halving that keeps the quantized output unchanged. 
+
+suboptimal local minima. We observe that dequan-tized weights at lower bit collapse into limited num-ber of coarse clusters (Fig. 3). Lower-bit values are naturally covered by the higher-precision grid. For any value xlow in the lower-bit grid, there is always a corresponding high-bit value xhigh within half a step size |xlow − xhigh | ≤ 12 shigh . This hi-erarchical relationship suggests a natural coarse-to-fine progress: higher-bit grids act as smooth refinements of lower-bit representations, motivat-ing us to adopt progressive quantization as a more stable optimization scheme. 
+
+Progressive Strategy. We begin from a rela-tively high precision setting, which closely matches full precision and introduces negligible quantiza-tion error, providing a well-conditioned initializa-tion. The bitwidth is then gradually reduced across stages (e.g., from 8-bit to 4-bit and finally to 2-bit for weights), allowing the model to progressively adapt to the increasing quantization noise. For weight–activation quantization, we apply the same principle: the model is first stabilized under a con-figuration with low-bit weights but high-precision activations, and the activation precision is then progressively lowered in subsequent stages. This staged reduction enables the model to adapt step by step to the growing activation noise, thereby miti-gating training instability. We found that reducing weight precision first, followed by activation bits, yields the most stable results, further exploration of alternative strategies is provided in Appendix B.1. 
+
+Block Wise Strategy. Following BRECQ (Li et al., 2021) and EfficientQAT (Chen et al., 2024b), we employ a block-wise objective to mitigate error accumulation. For block i, let x(i) 
+
+> wka16
+
+denote the input activation when all preceding blocks use k-bit weights (while activations remain FP16), and 𝟖𝒃𝒊𝒕               
+
+> 00111110
+> 𝟒𝒃𝒊𝒕
+> 00111110
+> 𝟐𝒃𝒊𝒕
+> 00111110s
+> 𝒏𝒆𝒔𝒕𝒆𝒅 𝒔𝒉𝒊𝒇𝒕
+> 𝒔𝒉𝒂𝒓𝒆𝒅 𝒔𝒂𝒎𝒆
+> 𝒔𝒄𝒂𝒍𝒆
+
+Figure 5: Bit-shifting from higher to lower precision while sharing the same scale s.
+
+let x(i) 
+
+> w(k+∆) a16
+
+denote the activation obtained when the preceding blocks use a slightly higher precision, e.g., w4a16 as w(2 + ∆) a16 for stabilizing w2a16 .The full-precision reference is denoted as w16 a16 .The block-wise loss is formulated as 
+
+MSE [( x(i)
+
+> w(k+∆) a16
+
+W (i)
+
+> wka16
+
+) − (x(i)
+
+> w16 a16
+
+W (i)
+
+> w16 a16
+
+)] .
+
+This design leverages higher-bit block activations as a more accurate teacher, improving the robust-ness of QAT across 8/4/2-bit regimes. Similar formulation is also applied to weight–activation quantization, where activations are progressively reduced from a16 to lower precisions. 
+
+3.3 Once-for-any-precision. 
+
+Besides stabilizing low-bit optimization, our pro-gressive strategy also enables a single model to support multiple precisions. Conventionally, sup-porting multiple bit-widths requires storing sev-eral independently trained QAT checkpoints (e.g., W8/W4/W2), incurring considerable training and storage costs. Inspired by (Nair et al., 2025; Park et al., 2024; Cai et al., 2019), we extend our B IT -
+
+BY -B IT framework into a unified ONCE -FOR -ANY -
+
+PRECISION paradigm: a single set of master param-4eters can be deployed at various bit-widths without additional retraining. 
+
+Nested low-bit grids via bit shifts. The key idea is that, with the same scale s, a lower-bit quantizer is naturally a coarser version of higher-bit one (e.g., 2bit ⊂ 4bit ⊂ 8bit ). If a weight is already quantized to an h-bit integer code q(h), we can get an l-bit code ( l < h ) by just removing the last (h − l) least significant bits. 
+
+q(l) =
+
+j q(h)
+
+> 2h−l
+
+k
+
+, ˆw(l) = s ·  q(l) ≪ (h − l).
+
+In practice this is just bit shifting as Fig. 5: 
+
+q(l) = q(h) ≫ (h − l).
+
+Curriculum Progressive Strategy. Leveraging the nested nature of bit-widths, we adopt a cur-riculum manner from high precision to low preci-sion: higher-bit training provides a well initialize, and lower-bit objectives are added gradually. Con-cretely, we optimize an expanding set of targets 
+
+Bit = {(8); (8 , 4); (8 , 4, 2) },
+
+i.e., we first train only with 8-bit, then jointly with 8/4-bit, and finally with 8/4/2-bit. The resulting objective is 
+
+L = X
+
+> b∈Bit
+
+λb · MSE( xW b, y ) ,
+
+where Wb denotes the shared master weights trun-cated to b bits, and λb controls the contribution of each bit-width. Deployment. After training, we keep only the master checkpoint and obtain the de-sired low-bit on the fly using the nested bit-shift mapping. This enables “train once, deploy any pre-cision on demand” without retraining or storing multiple model copies. 
+
+3.4 Outlier Channel Split 
+
+The outlier issue has long been a major challenge in quantization, for uniform b-bit quantization, the step size is s = max( W )−min( W )2b−1 . Weight out-liers enlarge the range R = max( W ) − min( W ),thereby increasing s; activation outliers enlarge 
+
+∥x∥1. As a result, the quantization error is bounded by xW − xW quant ≤ 12 s ∥x∥1, showing that both weight and activation outliers amplify the er-ror through range expansion and input magnitude. Prior works (Shao et al., 2023) often mitigate this problem by clipping outliers with learnable parame-ters. However, outliers value encode important dis-tributional or semantic features (Sun et al., 2024), 
+
+Algorithm Once-for-any-precision        
+
+> # Bit: Target bit-width list[[8],[8,4],[8,4,2]]
+> def once_for_any_precision(M, i, Bit): Block = M.blocks[i] x_fp, y_fp = Block.data_loader() loss_total = 0
+> for bin Bit: lambda_b = schedule_bit_ratio(b) # use bit_shift_mapping W_r = s * quantize(Block.W, bits=b) y_pred = Block.forward(x_fp, W_r) loss_total+=lambda_b * MSE(y_pred, y_fp)
+> return loss_total # update
+> def bit_shift_mapping(s, q_high, h, l): q_low = q_high >> (h - l) W_low = s * (q_low << (h - l))
+> return W_low
+
+and discarding them directly can lead to substantial performance degradation. Motivated by this, we adopt Outlier Channel Splitting (OCS) (Zhao et al., 2019). Instead of clipping, OCS duplicates channels containing ex-treme values and redistributes their contribution via an identity mapping, thereby reducing the dynamic range while preserving critical information. Consider a linear layer y = xW . Let xm ∈
+
+Rd×1 denote an identified outlier activation in the 
+
+m-th input channel, and wm ∈ R1×d be its cor-responding weight row. OCS splits the original contribution xmwm into two lowered-magnitude branches without changing the numerical output: 
+
+xmwm =  xm xm
+
+ wm+s/ 22
+
+> wm−s/ 22
+
+!
+
+.
+
+By replacing a single outlier channel with two iden-tical copies of halved magnitude, OCS effectively compresses the dynamic range per channel, which alleviates quantization error at the cost of a minor increase in the input dimension m. Further theoret-ical analysis of the error reduction is provided in Appendix C. Splitting increases layer width and computation, so we split only a small subset of channels. To identify outlier channels that are most susceptible to quantization errors, we introduce a sensitivity metric Si for each input channel i. This metric is computed based on statistics gathered from a calibration set. Specifically, For a linear layer with input x ∈ Rm and weights W ∈ Rm×n, we define an outlier metric for each input channel i as 
+
+metric i = ∥Xi∥2 · max  
+
+> 1≤j≤n
+
+|Wij |,
+
+5where ∥Xi∥2 denotes the ℓ2 norm of the i-th in-put feature aggregated across N × L tokens, and 
+
+max 1≤j≤n |Wij | signifies the maximum weight magnitude in the i-th channel across all n output dimensions. As shown in Fig. 2(b), quantization error accumulates along depth, later blocks suffer larger errors. Motivated by this observation, we adopt a block-wise schedule that linearly increases the split ratio with depth. Index Transformer blocks by b = 1 , . . . , B from shallow to deep. For block 
+
+b, we set 
+
+rb = rmin + b − 1
+
+B − 1
+
+ rmax − rmin 
+
+,
+
+and split the top ⌈rb m⌉ input channels (ranked by 
+
+si), where m is the number of input channels in that layer. This allocates fewer splits to early blocks and more to later blocks, matching the observed depth-wise error accumulation. 
+
+3.5 Microscaling Format 
+
+Ultra low bit quantization significantly reduces computational and I/O costs, but it also severely restricts the representable dynamic range (Fig. 3). To address this limitation, microscaling formats, such as MXFP4 (Rouhani et al., 2023) and NVFP4 (NVIDIA, 2025), introduce a shared scale factor applied to small blocks of weights. Follow these line, we apply per-group scaling over 32 el-ements and store each group scale in FP8 to mini-mize overhead. While standard MX formats adopt E8M0 (power-of-two) scaling, this approach is not granular enough for 2-bit models. We use E4M3 FP8 for group scales instead. This format provides sufficient mantissa precision for accurate step-size adjustment, while adding only one 8-bit scale per 32 weights, resulting in a storage overhead of just 
+
+8/32 = 0 .25 bits per weight. 
+
+4 Experiment 
+
+We comprehensively evaluate Bit-by-Bit against both post-training quantization (PTQ) and quantization-aware training (QAT) baselines. PTQ methods include GPTQ (Frantar et al., 2022), AWQ (Lin et al., 2024), OmniQuant (Shao et al., 2023), SmoothQuant (Xiao et al., 2023b), MatQuant (Nair et al., 2025), and SpinQuant (Liu et al., 2024c), while QAT baselines cover Efficien-tQAT (Chen et al., 2024b), ParetoQ (Liu et al., 2025b), and BitDistiller (Du et al., 2024). All experiments are run on a single H800 GPU. 
+
+4.1 Experimental Settings 
+
+We test on the LLaMA (Dubey et al., 2024) and Mistral families, evaluating five zero-shot reasoning benchmarks (PIQA, ARC-Easy, ARC-Challenge, HellaSwag, Winogrande) and two lan-guage modeling tasks (WikiText2 (Merity et al., 2017) and C4 (Raffel et al., 2020)). For PTQ baselines, we use a 256-sample Red-Pajama subset (seq length 2048) for AWQ, GPTQ, and SmoothQuant; OmniQuant follows its 40-epoch calibration, and SpinQuant is calibrated for 2 epochs. For QAT baselines, EfficientQAT adopts Block-AP (4096 RedPajama samples, 2 epochs) fol-lowed by E2E on Alpaca; BitDistiller uses a 4096-sample Alpaca subset for KD-based QAT; and Pare-toQ is trained on 4096 RedPajama + 4096 Alpaca samples for 2 epochs, aligned to our budget (vs. 30B tokens in the original). Since these methods target weight-only quantization, we extend them with activation quantizers: online dynamic scaling for EfficientQAT, asymmetric clipping for BitDis-tiller, and 2-bit SEQ for ParetoQ. We train Bit-by-Bit on a 4096-sample subset of RedPajama. For weight-only quantization, the model precision is progressively reduced from w8a16 to w4a16 and then to w2a16 , switching every two epochs, while splitting 10% of weight channels as detected by the metric. For weight–activation quantization, we first lower the weight precision to w2a16 , then reduce the activation precision to w2a2 progressively. 
+
+4.2 Main Results 
+
+Table 1 reports perplexity results on WikiText2 and C4 under both weight-only (w2a16) and weight-activation (w2a2) settings. Bit-by-Bit consistently surpasses ParetoQ, EfficientQAT, and BitDistiller across model sizes and datasets. In w2a16, it re-quires fewer training tokens than ParetoQ, con-verges faster than BitDistiller, and achieves more stable training than EfficientQAT, e.g., reaching 11.02/16.45 PPL on WikiText2/C4 with LLaMA-3.2 3B. The advantage is also pronounced in w2a2, where it reduces WikiText2 PPL on LLaMA-2 7B to 7.72. Zero-shot results (Table 2) further confirm its robustness: Bit-by-Bit achieves the best aver-age accuracy under both w2a16 (56.91) and w2a2 (51.52), exceeding the strongest baseline by over 5 points in the latter. These results demonstrate Bit-by-Bit’s effectiveness in preserving strong gen-eralization under ultra-low precision. 6Table 1: Evaluation results on WikiText2 and C4 across different model sizes. Our method Bit-by-Bit is highlighted. 
+
+Method Bits Group WikiText2 C4 
+
+2-7B 3.2-1B 3.2-3B 3-8B 2-7B 3.2-1B 3.2-3B 3-8B FP16 - - 5.47 9.75 7.81 6.13 6.97 12.74 10.44 8.89 
+
+Weight Only Quantization (w2a16) 
+
+GPTQ w2a16 32 60.5 2775.63 379.23 43.34 33.7 1875.41 323.24 43.28 AWQ w2a16 32 2.2e5 1.7e7 7.2e6 5.2e5 1.75e5 1.9e7 7.7e6 5.1e5 OmniQuant w2a16 32 11.06 6260.71 1.4e51 2.2e6 15.02 2442.55 8315.17 8.3e5 ParetoQ w2a16 -1 10.89 42.82 26.88 100.04 12.40 35.08 24.08 94.97 EfficientQAT w2a16 32 7.39 21.48 13.31 11.17 9.30 24.84 17.38 15.18 BitDistiller w2a16 32 7.28 20.41 12.80 10.40 10.01 31.24 19.86 18.23 
+
+Bit-by-Bit (Ours) w2a16 32 6.50 16.13 11.02 8.32 9.22 23.03 16.45 14.27 Weight Activation Quantization (w2a2) 
+
+SmoothQuant w2a2 32 2.5e5 1.7e7 2.0e6 8.6e6 3.0e5 1.8e8 1.5e6 9.9e6 SpinQuant w2a2 32 5433.06 4059.73 4008.33 7931.37 7524.73 8222.23 8256.53 1.3e5 ParetoQ w2a2 -1 259.74 1091.78 1018.61 549.71 135.32 418.22 401.22 237.21 EfficientQAT w2a2 32 9.71 29.42 20.19 17.93 10.89 66.53 31.65 26.58 BitDistiller w2a2 32 29.66 30.68 18.39 15.36 43.08 60.12 28.23 25.86 
+
+Bit-by-Bit (Ours) w2a2 32 7.72 22.71 13.87 11.51 12.87 46.53 23.63 21.58 
+
+Table 2: Zero-shot evaluation of LLaMA-3.2 3B on five downstream tasks accuracy.                                                               
+
+> LLaMA-3.2-3B PIQA Hella. Wino. ARC-c ARC-e Avg bfloat16 77.47 73.62 69.61 45.90 71.71 67.67 ParetoQ 66.70 43.48 52.49 21.93 44.36 45.79 w2a16 EfficientQAT 70.02 57.07 59.35 34.13 58.92 55.89 BitDistiller 70.65 57.42 59.78 34.71 58.34 56.18
+> Bit-by-Bit (ours) 71.87 58.03 60.38 35.58 58.71 56.91
+> ParetoQ 51.80 25.76 48.78 23.55 27.53 35.48 w2a2 EfficientQAT 56.53 34.76 52.17 21.84 35.23 40.10 BitDistiller 60.87 42.15 54.03 26.72 47.61 46.28
+> Bit-by-Bit (ours) 66.00 49.30 56.91 31.40 54.00 51.52
+
+4.3 Once-for-any-precision evaluation 
+
+Our ONCE -FOR -ANY -PRECISION method produces models at multiple bit-widths. To validate the generality of this approach, we compare against MatQuant (Nair et al., 2025) and OmniQuant (Shao et al., 2023) on Mistral-7B. Specifically, we per-form a single QAT run with Bit-by-Bit and directly apply the trained model to different bit-widths (w8a16, w4a16, w2a16). In contrast, the baseline OmniQuant requires separate training for each bit-width, while MatQuant also employs a one-shot QAT strategy for multi-bit adaptation. As shown in Table 4, our method achieves competitive re-sults under all settings. For w8a16 and w4a16, Bit-by-Bit matches the full-precision baseline with only marginal degradation. obtaining task averages of 73.51 and 73.21 respectively. In challenging w2a16 setting, Bit-by-Bit excels in w2a16 (65.37 avg/10.73 PPL), surpassing OmniQuant and paral-leling MatQuant. This demonstrates that a single QAT process suffices for flexible deployment, elim-inating the need for separate retraining. 
+
+4.4 Ablation 
+
+We conduct a comprehensive ablation of our pro-posed components on LLaMA3.2-1B. As shown in Table 3, using block-wise loss yields sub-stantially better results than end-to-end training with NLL loss. Training directly on w2a16 per-forms poorly, whereas adopting progressive train-ing improves convergence and accuracy. Incor-porating OCS brings further gains. We evalu-ate several metrics for detecting outlier channels, including weight maximum ( wmax ), activation maximum ( xmax ), and kurtosis (DeCarlo, 1997; Nrusimha et al., 2024) which measures the “tailed-ness” of distribution, and find that the combined weight–activation metric ∥x∥2 · max |w| yields the best performance. While OCS slightly widens the weight matrix, the memory overhead remains mod-7Table 3: Ablation study on Llama 3.2-1b on w2a16 setting. 
+
+Block-wise Progressive Ocs Metric group size WikiText2 ppl Task avg Memory - - - - 32 1.7e3 35.09 0.33GB 
+
+✓ - - - 32 31.88 40.87 0.33GB 
+
+✓ ✓ - - 32 24.60 43.26 0.33GB 
+
+✓ ✓ ✓ Kurtosis 32 22.43 43.69 0.36GB 
+
+✓ ✓ ✓ wmax 32 20.37 44.26 0.36GB 
+
+✓ ✓ ✓ xmax 32 19.07 44.30 0.36GB 
+
+✓ ✓ ✓ || x|| 2 · max |w| 32 17.07 45.18 0.36GB 
+
+✓ ✓ ✓ || x|| 2 · max |w| 64 30.26 40.66 0.34GB 
+
+✓ ✓ ✓ || x|| 2 · max |w| 128 38.92 38.60 0.32GB 
+
+Table 4: Evaluation of Mistral-7B under different quan-tization methods                        
+
+> Mistral-7B Bits Method C4 ppl Task avg
+> bfloat16 8.24 73.99 w8a16 OmniQuant 8.24 73.77 MatQuant 8.43 73.46
+> Bit-by-Bit (ours) 8.33 73.51 w4a16 OmniQuant 8.47 73.62 MatQuant 8.63 73.13
+> Bit-by-Bit (ours) 8.79 72.21 w2a16 OmniQuant 50.99 59.74 MatQuant 13.05 65.99
+> Bit-by-Bit (ours) 10.73 65.37
+
+est (0.33GB →0.36GB). About the impact of group-size: using group-128 saves only 0.04GB of mem-ory but leads to a sharp degradation in performance where task accuracy falls from 45.18 to 38.60. Fur-thermore, we provide additional ablation results for the w2a2 configuration in Appendix E. 
+
+4.5 Speed Measurement 
+
+Modern GPU architectures are highly optimized for standard precision types (e.g., FP16, BF16) and specific integer formats (INT8/INT4). To address the lack of native 2-bit support on modern GPUs, we implement specialized high-performance CUDA kernels for W2A16 and W2A2 GEMV operations. As shown in Fig. 6, the y axis represents the latency of a GEMV operation between an (1 , K )
+
+input vector x and a (K, N ) weight matrix W .The x axis denotes matrix shapes corresponding to Wdown and Wup from MLP layers of Llama 3.2-3B and Llama 3-8B. Results reported with ocs are measured on weight matrices that have been ex-panded to accommodate the additional channels 𝟏𝟏 . 𝟐 ×
+
+Figure 6: Kernel latency of B IT -BY -B IT relative to na-tive PyTorch and Marlin of Wup , Wdown .
+
+introduced by the outlier splitting process. Notably, in (4096 , 14336) setting, our W2A2 implementa-tion achieves a speedup of over 10 × compared to the native PyTorch FP16 baseline, the performance overhead remains negligible with the inclusion of OCS. Furthermore, for end-to-end inference on Llama 3-8B, we reaches a decoding throughput of 76 tokens/s, representing a 1.5 × speedup over the 49 tokens/s of Transformers baseline. Detailed im-plementation of our custom kernels, performance results and test setting are provided in Appendix F. 
+
+5 Conclusion 
+
+We introduced B IT -BY -B IT , a stable low bit QAT framework integrating block-wise progressive pre-cision schedule, a once-for-any-precision multi tar-get objective, and rounding aware outlier-channel splitting that preserves the quantized output while shrinking rounding error. By treating low-bit train-ing as a coarse to fine adaptation, it achieves stable convergence and enables flexible multi-precision deployment from a single trained model. 8References 
+
+Saleh Ashkboos, Amirkeivan Mohtashami, Maximil-ian L Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. 2024. Quarot: Outlier-free 4-bit inference in rotated llms. Advances in Neural Information Processing Systems , 37:100213–100240. Han Cai, Chuang Gan, Tianzhe Wang, Zhekai Zhang, and Song Han. 2019. Once-for-all: Train one net-work and specialize it for efficient deployment. arXiv preprint arXiv:1908.09791 .Hong Chen, Chengtao Lv, Liang Ding, Haotong Qin, Xiabin Zhou, Yifu Ding, Xuebo Liu, Min Zhang, Jinyang Guo, Xianglong Liu, and 1 others. 2024a. Db-llm: Accurate dual-binarization for efficient llms. 
+
+arXiv preprint arXiv:2402.11960 .Mengzhao Chen, Wenqi Shao, Peng Xu, Jiahao Wang, Peng Gao, Kaipeng Zhang, and Ping Luo. 2024b. Efficientqat: Efficient quantization-aware training for large language models. arXiv preprint arXiv:2407.11062 .Mengzhao Chen, Chaoyi Zhang, Jing Liu, Yutao Zeng, Zeyue Xue, Zhiheng Liu, Yunshui Li, Jin Ma, Jie Huang, Xun Zhou, and 1 others. 2025. Scaling law for quantization-aware training. arXiv preprint arXiv:2505.14302 .Euntae Choi, Sumin Song, Woosang Lim, and Sungjoo Yoo. 2025. Rotate, clip, and partition: Towards w2a4kv4 quantization by integrating rotation and learnable non-uniform quantizer. arXiv preprint arXiv:2502.15779 .Lawrence T DeCarlo. 1997. On the meaning and use of kurtosis. Psychological methods , 2(3):292. DeepSeek. 2025. Deepgemm: High-performance gemm implementation. Accessed: April 10, 2026. Peijie Dong, Lujun Li, Yuedong Zhong, Dayou Du, Ruibo Fan, Yuhan Chen, Zhenheng Tang, Qiang Wang, Wei Xue, Yike Guo, and 1 others. 2024. Stbllm: Breaking the 1-bit barrier with structured binary llms. arXiv preprint arXiv:2408.01803 .Dayou Du, Yijia Zhang, Shijie Cao, Jiaqi Guo, Ting Cao, Xiaowen Chu, and Ningyi Xu. 2024. Bitdistiller: Unleashing the potential of sub-4-bit llms via self-distillation. arXiv preprint arXiv:2402.10631 .Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Amy Yang, Angela Fan, and 1 others. 2024. The llama 3 herd of models. 
+
+arXiv e-prints , pages arXiv–2407. Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. 2022. Gptq: Accurate post-training quantization for generative pre-trained transformers. 
+
+arXiv preprint arXiv:2210.17323 .Hao Gu, Lujun Li, Zheyu Wang, Bei Liu, Qiyuan Zhu, Sirui Han, and Yike Guo. 2025. Btc-llm: Effi-cient sub-1-bit llm quantization via learnable trans-formation and binary codebook. arXiv preprint arXiv:2506.12040 .Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, Weizhu Chen, and 1 others. 2022. Lora: Low-rank adaptation of large language models. ICLR , 1(2):3. Wei Huang, Yangdong Liu, Haotong Qin, Ying Li, Shiming Zhang, Xianglong Liu, Michele Magno, and Xiaojuan Qi. 2024. Billm: Pushing the limit of post-training quantization for llms. arXiv preprint arXiv:2402.04291 .Ayush Kaushal, Tejas Vaidhya, Arnab Kumar Mon-dal, Tejas Pandey, Aaryan Bhagat, and Irina Rish. 2024. Spectra: Surprising effectiveness of pretrain-ing ternary language models at scale. arXiv preprint arXiv:2407.12327 .HyunJin Kim, Jungwoo Shin, and Alberto A Del Barrio. 2022. Ctmq: Cyclic training of convolutional neural networks with multiple quantization steps. arXiv preprint arXiv:2206.12794 .Sehoon Kim, Coleman Hooper, Amir Gholami, Zhen Dong, Xiuyu Li, Sheng Shen, Michael W Ma-honey, and Kurt Keutzer. 2023. Squeezellm: Dense-and-sparse quantization. arXiv preprint arXiv:2306.07629 .Yuhang Li, Ruihao Gong, Xu Tan, Yang Yang, Peng Hu, Qi Zhang, Fengwei Yu, Wei Wang, and Shi Gu. 2021. Brecq: Pushing the limit of post-training quantization by block reconstruction. arXiv preprint arXiv:2102.05426 .Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. 2024. Awq: Activation-aware weight quantization for on-device llm compression and acceleration. Proceed-ings of machine learning and systems , 6:87–100. Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao Wu, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenyu Zhang, Chong Ruan, and 1 others. 2024a. Deepseek-v3 technical report. arXiv preprint arXiv:2412.19437 .Jingyuan Liu, Jianlin Su, Xingcheng Yao, Zhejun Jiang, Guokun Lai, Yulun Du, Yidao Qin, Weixin Xu, Enzhe Lu, Junjie Yan, and 1 others. 2025a. Muon is scalable for llm training. arXiv preprint arXiv:2502.16982 .Yifei Liu, Jicheng Wen, Yang Wang, Shengyu Ye, Li Lyna Zhang, Ting Cao, Cheng Li, and Mao Yang. 2024b. Vptq: Extreme low-bit vector post-training quantization for large language models. arXiv preprint arXiv:2409.17066 .
+
+9Zechun Liu, Barlas Oguz, Changsheng Zhao, Ernie Chang, Pierre Stock, Yashar Mehdad, Yangyang Shi, Raghuraman Krishnamoorthi, and Vikas Chan-dra. 2023. Llm-qat: Data-free quantization aware training for large language models. arXiv preprint arXiv:2305.17888 .Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Krishnamoor-thi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. 2024c. Spinquant: Llm quanti-zation with learned rotations. arXiv preprint arXiv:2405.16406 .Zechun Liu, Changsheng Zhao, Hanxian Huang, Sijia Chen, Jing Zhang, Jiawei Zhao, Scott Roy, Lisa Jin, Yunyang Xiong, Yangyang Shi, and 1 others. 2025b. Paretoq: Scaling laws in extremely low-bit llm quan-tization. arXiv preprint arXiv:2502.02631 .Liqun Ma, Mingjie Sun, and Zhiqiang Shen. 2024. Fbi-llm: Scaling up fully binarized llms from scratch via autoregressive distillation. arXiv preprint arXiv:2407.07093 .Shuming Ma, Hongyu Wang, Shaohan Huang, Xingxing Zhang, Ying Hu, Ting Song, Yan Xia, and Furu Wei. 2025. Bitnet b1. 58 2b4t technical report. arXiv preprint arXiv:2504.12285 .Vladimir Malinovskii, Denis Mazur, Ivan Ilin, Denis Kuznedelev, Konstantin Burlachenko, Kai Yi, Dan Alistarh, and Peter Richtarik. 2024. Pv-tuning: Be-yond straight-through estimation for extreme llm compression. Advances in Neural Information Pro-cessing Systems , 37:5074–5121. Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. 2017. Pointer sentinel mixture mod-els. In ICLR .Pranav Nair, Puranjay Datta, Jeff Dean, Prateek Jain, and Aditya Kusupati. 2025. Matryoshka quantization. 
+
+arXiv preprint arXiv:2502.06786 .Aniruddha Nrusimha, Mayank Mishra, Naigang Wang, Dan Alistarh, Rameswar Panda, and Yoon Kim. 2024. Mitigating the impact of outlier channels for lan-guage model quantization with activation regulariza-tion. arXiv preprint arXiv:2404.03605 .NVIDIA. 2025. Introducing NVFP4 for efficient and accurate low-precision inference. OpenAI. 2025. Gpt-5 system model card. Andrei Panferov, Jiale Chen, Soroush Tabesh, Roberto L Castro, Mahdi Nikdan, and Dan Alistarh. 2025. Quest: Stable training of llms with 1-bit weights and activations. arXiv preprint arXiv:2502.05003 .Jungwoo Park, Taewhoo Lee, Chanwoong Yoon, Hyeon Hwang, and Jaewoo Kang. 2025. Outlier-safe pre-training for robust 4-bit quantization of large lan-guage models. arXiv preprint arXiv:2506.19697 .Yeonhong Park, Jake Hyun, SangLyul Cho, Bonggeun Sim, and Jae W Lee. 2024. Any-precision llm: Low-cost deployment of multiple, different-sized llms. 
+
+arXiv preprint arXiv:2402.10517 .Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael Matena, Yanqi Zhou, Wei Li, and Peter J Liu. 2020. Exploring the limits of transfer learning with a unified text-to-text trans-former. JMLR .Bita Darvish Rouhani, Ritchie Zhao, Ankit More, Mathew Hall, Alireza Khodamoradi, Summer Deng, Dhruv Choudhary, Marius Cornea, Eric Dellinger, Kristof Denolf, and 1 others. 2023. Microscal-ing data formats for deep learning. arXiv preprint arXiv:2310.10537 .Yuzhang Shang, Zhihang Yuan, Qiang Wu, and Zhen Dong. 2023. Pb-llm: Partially binarized large lan-guage models. arXiv preprint arXiv:2310.00034 .Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li, Kaipeng Zhang, Peng Gao, Yu Qiao, and Ping Luo. 2023. Omniquant: Omnidirectionally calibrated quantization for large language models. arXiv preprint arXiv:2308.13137 .Mingjie Sun, Xinlei Chen, J Zico Kolter, and Zhuang Liu. 2024. Massive activations in large language models. arXiv preprint arXiv:2402.17762 .Qitao Tan, Xiaoying Song, Jin Lu, Guoming Li, Jun Liu, Lingzi Hong, Caiwen Ding, Jundong Li, Xiaoming Zhai, Shaoyi Huang, and 1 others. 2025. Zeroqat: Your quantization-aware training but efficient. arXiv preprint arXiv:2509.00031 .MiniCPM Team, Chaojun Xiao, Yuxuan Li, Xu Han, Yuzhuo Bai, Jie Cai, Haotian Chen, Wentong Chen, Xin Cong, Ganqu Cui, and 1 others. 2025. Minicpm4: Ultra-efficient llms on end devices. arXiv preprint arXiv:2506.07900 .Hongyu Wang, Shuming Ma, and Furu Wei. 2025. Bitnet v2: Native 4-bit activations with hadamard transformation for 1-bit llms. arXiv preprint arXiv:2504.18415 .Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. 2023a. SmoothQuant: Accurate and efficient post-training quantization for large language models. In Proceed-ings of the 40th International Conference on Machine Learning , volume 202 of Proceedings of Machine Learning Research , pages 38087–38099. PMLR. Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. 2023b. Smoothquant: Accurate and efficient post-training quantization for large language models. In Interna-tional conference on machine learning , pages 38087– 38099. PMLR. 
+
+10 Ritchie Zhao, Yuwei Hu, Jordan Dotzel, Chris De Sa, and Zhiru Zhang. 2019. Improving neural network quantization without retraining using outlier channel splitting. In International conference on machine learning , pages 7543–7552. PMLR. 
+
+Appendix A Extended Discussion 
+
+A.1 The Use of Large Language Models (LLMs) 
+
+A large language model was utilized for grammati-cal and stylistic refinement of the manuscript. Its role was strictly limited to text editing and pol-ishing to enhance clarity. All research ideas, ex-perimental design, and analytical content are the original work of the authors. 
+
+A.2 Broader Impacts 
+
+Our work advances ultra-low-bit quantization of large language models through a progressive train-ing strategy with outlier channel splitting. By en-abling stable training at 2-bit and below, Bit-by-Bit 
+
+reduces the memory footprint and computational cost of LLMs by orders of magnitude. This im-provement directly translates into lower inference latency, reduced energy consumption, and smaller carbon emissions, making the deployment of LLMs more sustainable. Beyond efficiency, democratization is another key impact: with drastically reduced hardware re-quirements, powerful LLMs become accessible to a wider range of users and organizations, including those with limited computing resources. This may empower broader participation in AI research and applications, bridging the gap between well-funded institutions and smaller labs or industry players. On the societal side, compressed LLMs can be deployed in edge scenarios such as mobile devices, offline environments, and privacy-sensitive settings, expanding the reach of AI to education, healthcare, and accessibility applications. However, lowering the barriers to deployment also amplifies risks of misuse, such as generating disinformation at scale or enabling harmful applications on inexpensive hardware. Mitigating these risks requires comple-mentary safeguards, responsible governance, and continued community awareness. Overall, we believe our work contributes to the ongoing effort of making LLMs greener, more efficient, and more inclusive, while highlighting the importance of balancing technological progress with responsible use. 
+
+A.3 Limitations 
+
+While B IT -BY -B IT improves stability at ultra–low bits, it has several limitations. (i) We observe larger 11 performance drops on the Qwen family, these mod-els appear harder to quantize, leading to greater quantization error, and a deeper analysis is left for future work. (ii) The block-wise training schedule is less friendly to distributed training than end-to-end schemes, requiring nontrivial load-balancing and communication engineering. (iii) We have not extensively explored direct end-to-end progressive training; its convergence behavior and trade-offs remain open. (iv) We have not explored directions include learning layerwise schedules and split ra-tios automatically, extending to MoE and longer-context inference (e.g., KV-cache quantization), in-tegrating hardware-aware mixed-precision search, and combining our training with lightweight distil-lation. 
+
+A.4 Ethics statement 
+
+We acknowledge and adhere to the ACL Code of Ethics. We have carefully considered the ethical implications of our research and paper submission. Our work does not involve human subjects, and it does not make use of data sets that could raise privacy or security concerns. We have ensured that our methodology and applications do not introduce or perpetuate harmful biases, and we have taken care to document our data sources and experimen-tal procedures to promote transparency and repro-ducibility. We have no known conflicts of interest or sponsorship to disclose. 
+
+A.5 Reproducibility statement 
+
+We are committed to providing sufficient detail for the academic community to reproduce the results presented in this paper. All experiments were per-formed on NVIDIA H800 GPU. We utilized the official implementations of all baseline methods where available, ensuring consistent environment configurations. Our evaluations were conducted on two major model families: the LLaMA series and the Mistral series. Performance was measured across seven standard benchmarks: Zero-Shot Rea-soning: PIQA, ARC-Easy, ARC-Challenge, Hel-laSwag, and Winogrande; Language Modeling: WikiText2 and the C4 test set. We took measures to align the training cost across all QAT approaches for an unbiased evaluation. - EfficientQAT was first subjected to the Block-AP stage, utilizing a 4096-sample RedPajama subset over 2 epochs, and then proceeded to the E2E stage using the entire Alpaca dataset. - For BitDistiller, knowledge distillation was performed on a 4096-sample Alpaca subset synthesized by the teacher model. - ParetoQ’s train-ing budget was limited to 2 epochs, leveraging a combined dataset comprising a 4096-sample Red-Pajama subset and an equal-sized 4096-sample Al-paca subset. Furthermore, because these QAT base-lines were inherently weight-only, we customized the activation quantization for each: EfficientQAT used a dynamic quantizer, BitDistiller relied on asymmetric clipping, and ParetoQ was equipped with a 2-bit SEQ quantizer. We used a 4096-sample subset of RedPajama in our Bit-by-Bit training process. In the process of Weight-Only Quanti-zation, we incorporated the splitting of 10% of weight channels based on the metric at each step. In the process of Weight-Activation Quantization, we maintain the 10% channel splitting rule. 
+
+B Extended and detail Method 
+
+B.1 Different Progressive Strategies B.1.1 Precision Progressive Strategies (A) Weights → Activations (claimed in method). 
+
+We first lower the weight precision to stabilize the network under weight noise, and only then reduce the activation precision: 
+
+(w8, a 16) → (w4, a 16) → (w2, a 16) 
+
+→ (w2, a 8) → (w2, a 4) → (w2, a 2) .
+
+(B) Activations → Weights. First lower the acti-vation precision then reduce the weights precision: 
+
+(w16 , a 8) → (w16 , a 4) → (w16 , a 2) 
+
+→ (w8, a 2) → (w4, a 2) → (w2, a 2) .
+
+(C) Alternating W/A. We interleave the bit re-ductions of weights and activations: 
+
+(w8, a 16) → (w8, a 8) → (w4, a 8) 
+
+→ (w4, a 4) → (w2, a 4) → (w2, a 2) .
+
+(D) Cyclic Precision (Kim et al., 2022) Unlike monotone schedules, cyclic precision alternates be-tween (k+1) - and k-bit training before committing to k-bit. The idea is to leverage the smoother loss landscape of (k+1) -bit to recalibrate scales and reduce STE bias, while gradually adapting to the coarser k-bit lattice. A typical sequence is 
+
+(w16 , a 16) → (w3, a 16) → (w2, a 16) →
+
+(w3, a 16) → (w2, a 16) · · · → (w2, a 2) .
+
+In practice, we first warm up from 8-bit down to (k+2) -bit, then run several short cycles between 12 (k+1) and k, and finally fine-tune at k-bit. This cyclic back-and-forth helps avoid representation collapse at ultra-low bits (e.g., 2-bit) by ensur-ing parameters remain quantizable on both lattices. While it introduces extra bit switches and hyperpa-rameters, it often improves stability compared to a one-shot drop. 
+
+Empirical observations. We typically find Schedule (A) more stable (smoother loss/PPL de-cay, fewer divergence events), likely because it avoids simultaneous large shifts in both parame-ter and activation distributions. The alternating scheme can work but is more sensitive to optimizer and clipping hyperparameters and often requires longer warmup. 
+
+B.1.2 Block-wise Progressive Strategy 
+
+We adopt a stochastic, depth-aware curriculum over transformer blocks. Let the model have L blocks indexed from input to output as j = 1 , . . . , L . At stage t (with target bit bt), we quantize only a sub-set St ⊆ { 1, . . . , L }, sampled with a bias toward earlier blocks and with an increasing coverage over stages. 
+
+Depth-biased sampling. Define a per-block sam-pling probability 
+
+pj ∝ (L + 1 − j)α, α ≥ 0,
+
+so earlier blocks (small j) are more likely to be se-lected. Given a stage-wise coverage ratio rt ∈ (0 , 1] ,we sample |S t| = ⌊rtL⌋ blocks without replace-ment according to {pj }.
+
+Bit schedule. We follow a high-to-low bit cur-riculum, e.g., 
+
+b1 = 8 → b2 = 4 → b3 = 2 ,
+
+and optionally apply the same scheme to activations after weights. The coverage ratio increases with t
+
+(e.g., rt linear or cosine from r1 ≈ 0.3 to rT = 1 .0). 
+
+Notes. (1) Depth bias ( α) and coverage growth (rt) control stability/speed; we find α ∈ [0 .5, 1] and linear rt robust. (2) This stochastic schedule avoids large simultaneous distribution shifts and is more kernel-friendly than fully per-step rebitting. (3) For a deterministic variant, select the first ⌊rtL⌋ blocks at each stage instead of sampling. 
+
+Algorithm Block-wise Progressive Strategy  
+
+> 1:
+
+Input: blocks 1..L , stages t = 1 ..T , bits {bt},ratios {rt}, bias α 
+
+> 2:
+
+for t = 1 to T do ▷ progressively lower precision  
+
+> 3:
+
+Compute pj ∝ (L+1 −j)α and sample St
+
+with |S t| = ⌊rtL⌋ 
+
+> 4:
+
+for j = 1 to L do  
+
+> 5:
+
+if j ∈ S t then  
+
+> 6:
+
+Quantize block j to bit bt; (others stay at previous bit)  
+
+> 7:
+
+end if  
+
+> 8:
+
+end for  
+
+> 9:
+
+(Optional) apply OCS to top-rℓ channels in selected blocks  
+
+> 10:
+
+QAT for a fixed budget (steps/epochs) with short LR warmup  
+
+> 11:
+
+end for B.2 Mixed-precision of down-projection 
+
+As observed by (Chen et al., 2025), the inputs to the MLP down-projection ( FC2 Proj ) in Trans-former blocks exhibit persistent activation outliers (high kurtosis). Under ultra–low-bit W/A quanti-zation (e.g., W2A2), these heavy tails dominate the activation quantization error. To remove this bottleneck, we adopt a layer-wise mixed-precision 
+
+scheme that raises the activation bit-width only for outlier-dominated sites while keeping the rest of the network at low precision. Concretely, we com-pute per-layer activation kurtosis κ on a calibration set and mark layers with κ > τ as outlier-sensitive; for these layers we set w2a4 (with the same group-wise scaling as elsewhere), while all remaining lay-ers use w2a2. This targeted relaxation substantially reduces activation quantization error—especially at coarse group sizes—while incurring minimal over-head and preserves the benefits of ultra–low-bit quantization in the rest of the model. 
+
+B.3 LoRA for Distribution-Preserving Progression 
+
+As illustrated in Fig. 4 (a), the higher-bit stage es-tablishes a well-conditioned weight/activation dis-tribution that serves as a strong initialization for subsequent lower-bit stages. To preserve this distri-bution while reducing precision progressively, we insert low-rank adapters (LoRA) (Hu et al., 2022) and restrict updates to these adapters rather than the full quantized backbone. 13 Concretely, when moving from bitwidth bt to 
+
+bt+1 (bt+1 < b t), we freeze the backbone weights 
+
+W (t) and optimize only a rank-r perturbation 
+
+W (t+1) = W (t) + α A (t)B(t)⊤,A(t) ∈ Rd×r, B (t) ∈ Rk×r,
+
+with the forward pass quantized as 
+
+W (t+1)  
+
+> q
+
+= Qs(t+1) 
+
+ W (t) + α A (t)B(t)⊤.
+
+To further stabilize the transition, we use alight distribution-matching regularizer that anchors first/second-order statistics of either weights or ac-tivations across stages, e.g., 
+
+Ldist = μ(W (t+1)  
+
+> q
+
+) − μ(W (t) 
+
+> q
+
+) 2
+
++λ σ(W (t+1)  
+
+> q
+
+) − σ(W (t) 
+
+> q
+
+) 2,
+
+optionally combined with a KL term on layer ac-tivations. In practice we adopt small ranks ( r ∈{4, 8}) and reinitialize adapters at each stage. This 
+
+distribution-preserving LoRA update significantly mitigates representation drift and reduces instabil-ity at ultra-low bits (e.g., 2-bit), while cutting train-able parameters to a r(d+k) 
+
+> dk
+
+fraction of full fine-tuning. After convergence, adapters are merged and requantized or discarded after re-estimating scales. 
+
+B.4 Symmetric Microscaling via SEQ 
+
+Our main pipeline uses asymmetric integers for simplicity, whereas microscaling formats (e.g., MXFP4/NVFP4) favor symmetric payloads with zero-point fixed at 0. To avoid the 2-bit degener-ation to ternary under strict symmetric uniform grids, we adopt Stretched Elastic Quantization (SEQ) (Liu et al., 2025b), an LSQ-style amend-ment tailored for low-bit settings. 
+
+WQ = α
+
+Clip   Wα , −1, 1 · k 
+
+> 2
+
+− 12
+
+ + 12
+
+k
+
+!
+
+× 2,
+
+which places centers at half-integers; for b=2 the normalized levels are {− 34 , − 14 , 14 , 34 }. Here α ∈
+
+FP8 is stored/rounded in FP8 per group, and ST ∈
+
+FP32 is shared per tensor. The dequantized values are 
+
+ˆW = ST · WQ = ST α ·
+
+
+
+n + 12
+
+
+
+n ∈
+
+n
+
+− k 
+
+> 2
+
+, . . . , k 
+
+> 2
+
+− 1
+
+o
+
+.
+
+At b=2 , the LUT becomes 
+
+CSEQ-2b = ST α · {− 1.5, −0.5, 0.5, 1.5}.
+
+This keeps a zero-point–free symmetric path, matches NVFP4’s FP8 group scale + FP32 master scale, and fully uses all four codes at 2-bit. 
+
+B.5 Muon for Low-bit QAT: Training Dynamics 
+
+We investigated whether the Muon (Liu et al., 2025a; Park et al., 2025) optimizer can stabilize training dynamics in ultra–low-bit QAT. In our pipeline, the per-group scale and zero-point are computed online ; thus the only trainable variables are the full-precision 2D weight matrices, while quantizer statistics are not explicitly optimized. 
+
+Setup. We keep the learning-rate schedule, batch size, and clipping identical to the AdamW baseline, and apply STE for quantization with pro-gressive bit reduction. 
+
+Observation. Across models and bit settings, Muon did not yield consistent gains over AdamW: convergence speed and final perplexity were com-parable or slightly worse, and we observed larger short-horizon oscillations near quantization thresh-olds in some layers. 
+
+Possible causes (hypotheses). (i) Online rescal-ing induces non-stationary curvature that weakens Muon’s preconditioning benefits under STE noise; (ii) gradient signals are dominated by rounding dis-continuities at ultra–low bits, reducing the utility of curvature-aware updates; (iii) block/group-wise statistic updates interact with momentum, amplify-ing drift. 
+
+Next steps. We will explore (a) using Muon only on LoRA adapters while freezing the back-bone; (b) scale-aware trust-region or gradient clip-ping around threshold crossings; (c) layer-wise Muon/AdamW hybrids. At present, Muon does not provide a clear advantage for our low-bit QAT setting. 
+
+C Error Estimation for OCS 
+
+To justify the efficacy of our Outlier Channel Split (OCS) strategy, we provide a formal error anal-ysis comparing our Rounding-aware (RA) split 
+
+with a naive half split . Consider a selected outlier channel m with a weight row Wm: and an input activation xm. We decompose the weight into two branches with symmetric half-step offsets relative 14 to the (post-split) step size s:
+
+Wm: −→ (W (1)  
+
+> m:
+
+, W (2)  
+
+> m:
+
+)=
+
+ Wm: − s/ 22 , Wm: + s/ 22
+
+
+
+.
+
+By nearest rounding, Qs(W (1)  
+
+> m:
+
+) + Qs(W (2)  
+
+> m:
+
+) = 
+
+Qs(Wm:). Defining the rounding error function as RoundErr (z) = Round (z) − z ∈ [− 12 , 12 ), the resulting error εRA can be derived as: 
+
+εRA = xm
+
+
+
+Qs(W (1)  
+
+> m:
+
+) + Qs(W (2)  
+
+> m:
+
+) − Wm:
+
+
+
+= xm (Qs(Wm:) − Wm:)= xm · s · RoundErr 
+
+ Wm:
+
+s
+
+
+
+.
+
+In contrast, a naive half split (Wm:/2, W m:/2) 
+
+forces each branch to be quantized independently without the benefit of offset cancellation. This results in a cumulative error εnaive governed by a coarser quantization scale 2s:
+
+εnaive = xm
+
+
+
+Qs
+
+ Wm:
+
+2
+
+
+
++ Qs
+
+ Wm:
+
+2
+
+
+
+− Wm:
+
+
+
+= xm
+
+
+
+2 · s · Round 
+
+ Wm:
+
+2s
+
+
+
+− Wm:
+
+
+
+= xm · 2s · RoundErr 
+
+ Wm:
+
+2s
+
+
+
+Hence E[|εRA |] = 12 E[|εnaive |], implying a 4 × re-duction in MSE. Assuming the splitting operation effectively halves the dynamic range such that the new step size s ≈ sold /2, our RA split achieves 
+
+E[|εRA |] ≈ 12 E[|εbase |], while the naïve split is even with the baseline. 
+
+Table 5: Performance comparison on complex rea-soning and instruction following capabilities (GSM8k, MathQA, MMLU, and IFEval)                                                  
+
+> Precision Gsm8k MathQA Mmlu Ifeval
+> Llama2-13B FP16 0.22 0.32 0.52 0.18 BIT -BY -B IT w2a16 0.20 0.32 0.50 0.17 BIT -BY -B IT w2a2 0.11 0.29 0.40 0.16 Qwen2.5-7B FP16 0.80 0.43 0.71 0.28 BIT -BY -B IT w2a16 0.77 0.42 0.70 0.28 BIT -BY -B IT w2a2 0.75 0.38 0.70 0.27 Qwen2.5-14B FP16 0.84 0.52 0.77 0.32 BIT -BY -B IT w2a16 0.84 0.51 0.75 0.30 BIT -BY -B IT w2a2 0.81 0.50 0.75 0.30
+
+D Results on advanced reasoning and instruction following dataset 
+
+Table 5 presents the evaluation results on advanced reasoning and instruction-following benchmarks, including GSM8k, MathQA, MMLU, and IFE-val. The Qwen2.5 family significantly outperforms Llama2-13B across all metrics, demonstrating su-perior mathematical reasoning and general knowl-edge capabilities. notably, Qwen2.5 models ex-hibit remarkable robustness to quantization. While Llama2-13B suffers a severe performance drop in the w2a2 setting (e.g., GSM8k score halving from 0.22 to 0.11), the Qwen2.5-14B maintains near-lossless performance, dropping only from 0.84 to 0.81. This indicates that the newer architecture is much more resilient to low-bit quantization in complex reasoning tasks. 
+
+E Ablation Study on W2A2 Setting 
+
+To further validate the robustness and scalability of the Bit-by-Bit framework under extreme quantiza-tion regimes, we provide a complementary ablation analysis under the W2A2 (2-bit weight, 2-bit ac-tivation) setting. For these experiments, we train each configuration for only one epoch to facilitate rapid analysis. The results, including WikiText2 and C4 perplexity (PPL), are summarized in Ta-ble 6. 
+
+Effectiveness of Progressive Strategy. As shown in Table 6, the baseline model without any of our proposed components fails to converge, re-sulting in a catastrophic perplexity (e.g., 2 × 10 5
+
+on WikiText2). While the introduction of block-wise optimization reduces the error, the perplexity remains unusable at 1441 .9. Crucially, the addition of our progressive training strategy brings the WikiText2 PPL down to 42 .2, representing a mas-sive improvement in stability. This confirms that for ultra-low bit-widths like W2A2, the smooth op-timization trajectory provided by the nested lattice structure is indispensable. 
+
+Comparison of Outlier Metrics. We examine several metrics for identifying outlier channels for OCS. In the W2A2 regime, we observe that activation-based metrics are particularly effective. While the weight-only metric ( wmax ) achieves 
+
+36 .75 PPL, the activation-centric metric xmax 
+
+yields better robustness ( 32 .34 PPL). This suggests that as activation precision drops to 2-bit, captur-ing and splitting activation outliers becomes more critical than in weight-only quantization. The joint metric ∥x∥2 · max |w| also performs competitively at 32 .48 PPL. 15 Table 6: Ablation study on LLaMA-3.2-1B under the W2A2 setting. All models are trained for one epoch. “-” indicates the component is disabled. 
+
+Block-wise Progressive Ocs Metric Calibration group size WikiText2 ppl C4 ppl - - - - - 32 2.0e5 1.0e6 
+
+✓ - - - - 32 1441.9 4592.8 
+
+✓ ✓ - - - 32 42.2 120.2 
+
+✓ ✓ ✓ Kurtosis WikiText2 32 41.8 127.4 
+
+✓ ✓ ✓ wmax WikiText2 32 36.75 97.66 
+
+✓ ✓ ✓ ∥x∥2 · | w| WikiText2 32 32.48 79.95 
+
+✓ ✓ ✓ xmax WikiText2 32 32.34 76.79 
+
+✓ ✓ ✓ xmax RedPajama 32 31.82 72.63 
+
+✓ ✓ ✓ xmax C4 32 32.18 74.21 
+
+✓ ✓ ✓ xmax WikiText2 64 121.87 534.78 
+
+✓ ✓ ✓ xmax WikiText2 128 261.28 1191.11 
+
+Impact of Calibration and Group Size. Our analysis of calibration sets shows that using a sam-pled RedPajama subset yields the best alignment (31 .82 PPL), likely due to its distribution being well-aligned with the data used during QAT. Re-garding granularity, the W2A2 setting is highly sen-sitive to the group size. Increasing the group size from 32 to 128 leads to a sharp performance degra-dation, with WikiText2 PPL surging from 32 .34 
+
+to 261 .28 . This underscores the necessity of fine-grained microscaling (e.g., group size 32) to main-tain accuracy when both weights and activations are heavily quantized. 
+
+F Implementation details and More Results on GEMV 
+
+This appendix provides low-level implementation details for our custom W2A2 GEMV kernel and the W2A16 kernel based on the Marlin framework, together with the exact test settings used in our evaluation. We focus on the matrix-vector multi-plication (GEMV) case during the decode stage, where a single activation vector multiplies a weight matrix: 
+
+y = xW where x ∈ R1×K , W ∈ RK×N
+
+F.1 GEMV kernel Implementation F.1.1 W2A2 GEMV kernel Bit packing format and unpack with lop3. To maximize memory throughput, we store both weights and activations in a 2-bit packed format. Concretely, four 2-bit values are encoded into a single byte ( int8 ). We unpack packed 2-bit values into int8 lanes us-ing a lightweight routine based on the lop3.b32 in-struction, processing four elements per instruction. This significantly reduces the cost of unpacking in the W2A2 kernel. 
+
+Compute core: DP4A accumulation After un-packing, we compute dot products using integer SIMD instructions. Specifically, we use dp4a to accumulate products into an 32-bit accumulator before applying scaling and writing bf16 outputs. This design keeps the compute pipeline lightweight while matching the packed 2-bit data layout. 
+
+F.1.2 W2A16 GEMV kernel 
+
+Our W2A16 kernel is built upon the Marlin frame-work, extending its optimized tiling and coalescing strategies to 2-bit regimes. The implementation stages activation and packed-weight tiles through shared memory with asynchronous copy, performs on-the-fly dequantization, and uses tensor-core MMA to accumulate in FP32 before applying per-column scales and writing FP16 outputs. 
+
+F.2 Test setting and more results Test setting. Our GEMV kernel is fully written in CUDA 12.1 and compiled for NVIDIA Ada GPUs. All performance evaluations are conducted on a single NVIDIA RTX 4090 GPU. During our perfor-mance evaluations, we generate weights ( W) and activations ( A) corresponding to the designated low-bit precisions while keeping the effective com-pute shape identical across methods. Taking W2A2 as an example, we sample 2-bit weights and activa-tions as integer tensors with values in {0, 1, 2, 3},16 Table 7: Latency comparison for weight matrices ap-pearing in the decode layers of LLaMA models.                                
+
+> Model Shape (N, K )W2A2 ( μs) BF16 ( μs) Llama3.2-3B (1024, 3072) 8.93 6.45 (3072, 3072) 8.64 16.04 (3072, 8192) 8.70 32.80 (8192, 3072) 8.94 20.76 Llama3-8B (1024, 4096) 8.58 6.87 (4096, 4096) 8.64 29.73 (4096, 14336) 11.56 133.49 (14336, 4096) 11.50 131.29 Llama3-70B (1024, 8192) 9.34 8.57 (8192, 8192) 9.02 150.15 (8192, 28672) 18.62 509.98 (28672, 8192) 19.39 516.95
+
+Table 8: Throughput comparison on Llama3-8b           
+
+> Sequence Length BF16 (tokens/s) W2A2 (tokens/s) 64 49.02 76.59 128 48.85 75.13 256 48.59 74.97 512 47.87 74.17
+
+and bit-pack them into a byte-packed 2-bit repre-sentation (i.e., four 2-bit values are stored in one byte) to form the packed activation/weight buffers before launching the custom kernel. For each con-figuration, we run the kernel 50 times and report the average latency. As a baseline, we time bf16 
+
+GEMV using torch.matmul with matched shapes. 
+
+Results on more shapes. We benchmark a col-lection of (N, K ) shapes corresponding to projec-tion layers in Llama3 family models. There are seven linear weight matrices: Wdown , Wup , Wgate 
+
+in the MLP layer, and Wq, Wk, Wv, Wo in the self-attention layer. Although there are seven dis-tinct weights, they only instantiate four unique ma-trix shapes. Specifically, Wk and Wv share the same shape, Wq and Wo have identical shapes, and Wup and Wgate also share the same dimen-sions, resulting in four distinct shapes in total when including Wdown .Table 7 reports kernel latency for these four rep-resentative shapes across Llama 3.2-3B, Llama 3-8B and Llama3-70B models. For matrices with rel-atively small output dimensions (e.g., N = 1024 ), W2A2 exhibits slightly higher latency compared to the bf16 baseline. This behavior is primarily due to fixed CUDA kernel launch overheads and the extra bit-level work required to unpack 2-bit operands, which dominate execution time in these regimes. In contrast, for larger models and FFN-expanded shapes with large output dimensions, the workload exposes more parallelism, allowing W2A2 to bet-ter amortize launch overheads. The acceleration effect becomes significantly pronounced, exceed-ing 10 × speedup in some cases. Furthermore, as table 8 shows, we evaluate the end-to-end decoding performance on the LLaMA3-8B model to demon-strate the practical efficacy of W2A2 in inference scenarios. Inference Speed ( tokens/s ) is calculated as: Speed = tokens prompt + tokens generation 
+
+time We use a batch size of 1 and the minimum number of GPUs possible for evaluation. The speed is averaged over three runs. 17

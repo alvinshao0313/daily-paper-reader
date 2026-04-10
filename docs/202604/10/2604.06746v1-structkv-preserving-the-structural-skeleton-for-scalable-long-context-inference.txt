@@ -1,0 +1,842 @@
+Title: StructKV: Preserving the Structural Skeleton for Scalable Long-Context Inference
+
+URL Source: https://arxiv.org/pdf/2604.06746v1
+
+Published Time: Thu, 09 Apr 2026 00:45:20 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+## StructKV: Preserving the Structural Skeleton for Scalable Long-Context Inference 
+
+Zhirui Chen ♣, Peiyang Liu ♠, Ling Shao ♣*
+
+> ♣
+
+UCAS-Terminus AI Lab, University of Chinese Academy of Sciences, China 
+
+> ♠
+
+National Engineering Research Center for Software Engineering, Peking University 
+
+chenzhirui23@mails.ucas.ac.cn, ling.shao@ieee.org 
+
+Abstract 
+
+As Large Language Models (LLMs) scale to support context windows exceeding one million tokens, the linear growth of Key-Value (KV) cache imposes severe memory capacity and bandwidth bottlenecks, constraining the effi-ciency of long-context inference. Existing com-pression approaches typically prioritize tokens based on local saliency metrics to decouple pre-fill computation from decoding memory. How-ever, these methods often rely on local saliency snapshots at a specific layer, thereby systemati-cally discarding tokens that act as global infor-mation hubs across the network depth but ap-pear temporarily dormant at the specific layer selected for pruning. To address this limita-tion, we propose StructKV , a structure-aware KV cache compression framework that intro-duces three core innovations: First, Global In-Degree Centrality aggregates attention patterns across the network depth to identify global in-formation hubs. Second, Dynamic Pivot De-tection utilizes information-theoretic metrics to adaptively locate the optimal layer for com-pression. Finally, Structural Propagation & Decoupling separates the computational bud-get from the memory storage budget. Experi-mental results on the LongBench and RULER benchmarks demonstrate that StructKV effec-tively preserves long-range dependencies and retrieval robustness. 
+
+1 Introduction 
+
+The capacity of Large Language Models (LLMs) has expanded significantly, with current architec-tures supporting context windows that exceed one million tokens (LlamaTeam, 2024; Gemini, 2025; GPT5, 2025). This extended context is critical for advanced tasks, such as summarizing comprehen-sive documents (Zhang et al., 2024a), conducting multi-hop reasoning (Kamalloo et al., 2023), and 
+
+> *Corresponding Author
+
+generating repository-level code (Roziere et al., 2023). However, deploying these models presents a significant challenge, as the computational and memory requirements for long-context inference create a substantial resource bottleneck (Grattafiori et al., 2024). This resource constraint manifests differently across the two stages of inference (Jo et al., 2025). During the prefill stage, the quadratic complexity of the attention mechanism makes processing long prompts computationally intensive. Subsequently, the decoding stage is primarily constrained by memory capacity, where the extensive Key-Value (KV) cache consumes significant GPU memory and limits system throughput (Tang et al., 2024). There-fore, effective context compression is required to make long-context deployment feasible. Prior research has generally addressed these costs by focusing on specific stages. Decoding-centric methods, such as StreamingLLM and SnapKV (Xiao et al., 2024; Li et al., 2024b), reduce memory usage by pruning the KV cache during generation, but they do not alleviate the computa-tional load of the prefill phase. On the other hand, prefill-aware approaches aim to accelerate prompt processing, yet they often sacrifice generation qual-ity when the cache budget is strictly limited (Zhang et al., 2024b). While the state-of-the-art framework, FastKV (Jo et al., 2025), attempts to bridge this gap via Token-Selective Propagation, it relies heavily on local saliency snapshots—determining token im-portance based on attention scores within a single specific layer. This approach is inherently myopic; it risks discarding tokens that act as global informa-tion hubs across the network but appear temporarily "dormant" at the specific layer chosen for pruning. To overcome this limitation, we propose Struc-tKV, a structure-aware KV cache compression framework. StructKV is motivated by the insight that a token’s true importance is not defined by a  
+
+> arXiv:2604.06746v1 [cs.CL] 8 Apr 2026 020 40 60 80 100
+> KV Cache Budget Ratio (%)
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> 1.0
+> Normalized Accuracy
+> (a) Accuracy Retention vs. Compression
+> StructKV (Ours)
+> FastKV
+> SnapKV
+> StreamingLLM
+> Full Context
+> Prefill Speedup 0.5x
+> 1.5x
+> 2.5x
+> Decoding Speedup
+> 2.0x
+> 3.5x
+> Long-Ctx Accuracy
+> 0.7
+> 1.0
+> Memory Savings
+> 50%
+> 100%
+> (b) Holistic Capability Comparison Full Context
+> SnapKV
+> FastKV
+> StructKV (Ours)
+
+Figure 1: Comparison of StructKV with state-of-the-art methods. (a) Accuracy retention under varying KV cache budgets. StructKV (red line) demonstrates superior robustness, maintaining near-lossless performance even at extreme compression rates, whereas baselines suffer significant degradation. (b) A holistic comparison showing that StructKV effectively resolves the trilemma of prefill speed, decoding latency, and long-context accuracy. 
+
+momentary snapshot, but by its cumulative con-tribution to the semantic flow across the network depth. By identifying the "structural skeleton" of the context, StructKV ensures that critical infor-mation is preserved even when not locally salient. As illustrated in Figure 1, this structure-aware ap-proach enables StructKV to maintain superior accu-racy retention under aggressive compression com-pared to state-of-the-art baselines, while achieving a balanced trade-off across prefill speed, decoding latency, and memory efficiency. StructKV introduces three key innovations to achieve robust and efficient long-context inference. 
+
+(1) Global In-Degree Centrality: Instead of re-lying on single-layer snapshots, StructKV com-putes global scores by aggregating attention pat-terns across early layers. This identifies tokens with long-term structural importance, even when their local saliency fluctuates. (2) Dynamic Pivot Detection: Rather than using a fixed hyperparam-eter, StructKV employs an online mechanism that monitors information-theoretic metrics (e.g., en-tropy, sparsity) to adaptively identify the "phase transition" point where attention stabilizes, ensur-ing optimal compression timing. (3) Structural Propagation & Decoupling: StructKV decouples the computational budget from the memory budget. At the detected Pivot Layer, it propagates a reduced structural skeleton to accelerate deep-layer compu-tation, while independently preserving a flexible KV cache for high-quality decoding. 
+
+2 Related Work 
+
+2.1 Challenges in Long-context Inference 
+
+Long-context inference faces distinct challenges across its two operational stages. The prefill phase is typically compute-bound. It calculates atten-tion for the entire input sequence at once, leading to O(N 2) computational complexity and high la-tency for long documents (Rae et al., 2019). Con-versely, the decoding phase is largely memory-bound. Since the model generates tokens autore-gressively, it must store and repeatedly access the Key-Value (KV) cache (Wan et al., 2025). As the context grows, the linear increase in cache size consumes substantial GPU memory and saturates memory bandwidth. Therefore, efficient inference requires optimizing both the quadratic computa-tion in prefill and the memory bandwidth usage in decoding (Jo et al., 2025) 
+
+2.2 KV Cache Compression Strategies 
+
+A significant body of work focuses on compress-ing the KV cache to reduce memory usage dur-ing the decoding stage. Early approaches like StreamingLLM (Xiao et al., 2024) observed that retaining the initial tokens (attention sinks) and the most recent tokens is sufficient to maintain stabil-ity. Building on this, methods such as H2O (Zhang et al., 2023) and SnapKV (Li et al., 2024b) in-troduced importance-based eviction policies. They calculate attention scores to identify "heavy hitters" or salient tokens and discard the rest. While these methods effectively reduce memory footprints, they have a major limitation: they typically require com-puting the full attention matrix before deciding which tokens to keep. Consequently, they do not reduce the quadratic workload of the prefill stage. Furthermore, most of these methods rely on local attention snapshots within a sliding window, which may fail to capture the long-term structural depen-dencies of the text. 
+
+2.3 Prefill Acceleration and Token Pruning 
+
+To address the computational bottleneck in the pre-fill stage, recent research has focused on early to-ken pruning. Approaches such as GemFilter (Shi et al., 2024), PyramidInfer (Yang et al., 2024b), and FastKV (Jo et al., 2025) attempt to dynami-cally reduce the sequence length as data propagates through the network. By identifying and discard-ing less important tokens in earlier layers, these methods lower the computational load for subse-quent layers. However, these techniques largely rely on local saliency, estimating token importance based on attention snapshots at specific layers. This approach is risky because a token may be struc-turally critical to the overall context but exhibit low attention weights at the specific pruning layer. Once dropped, this information is permanently lost, potentially degrading performance on com-plex reasoning tasks. Furthermore, these methods often couple the prefill compression rate with the decoding cache size, forcing a trade-off between speed and generation quality. In contrast, Struc-tKV aims to overcome these limitations by adopt-ing a global perspective, accumulating importance signals across network depth to identify the true semantic skeleton of the input. 
+
+3 Methodology 
+
+3.1 Overview of StructKV 
+
+To resolve the limitations of existing methods, it is crucial to explicitly distinguish between local saliency (a token’s instantaneous attention weight at a single specific layer) and structural importance (a token’s cumulative, cross-layer semantic role). While FastKV effectively reduces prefill latency via Token-Selective Propagation (TSP), it relies heav-ily on local saliency snapshots at a specific layer to determine token importance. This approach risks discarding tokens that possess high structural im-portance from earlier layers but appear temporar-ily dormant at the specific TSP layer. To address this, we introduce StructKV , a structure-aware KV cache compression framework that accumulates at-tention patterns across layers to identify the global topological importance of tokens. As illustrated in Figure 2, StructKV introduces three key innovations over the baseline: • Global In-Degree Centrality ( Cglobal ): In-stead of relying on a single layer’s attention map, StructKV aggregates attention scores from the input layer up to a designated Pivot Layer. This ensures that the selected tokens represent the "structural skeleton" of the entire context processed so far. • Dynamic Pivot Detection : We propose an online detection mechanism that monitors at-tention entropy and sparsity gradients during the first inference pass. This allows StructKV to adaptively locate the optimal Pivot Layer (L∗) where attention patterns stabilize. • Structural Propagation & Decoupling : At the Pivot Layer, we perform structural trunca-tion based on Cglobal , propagating only glob-ally significant tokens. Crucially, we decou-ple the structural retention rate (computation) from the KV cache budget (memory). 
+
+3.2 Global In-Degree Centrality Accumulation 
+
+A core insight of StructKV is that the "true" impor-tance of a token is defined by its cumulative con-tribution to the semantic flow across the network depth. We formalize this using Global In-Degree Centrality .Let A(l) ∈ RH×N ×N denote the attention ma-trix at layer l, where H is the number of heads and 
+
+N is the sequence length. In the prefill stage, we utilize a sliding window of size w to capture local dependencies. The attention weight from a query token qt to a historical key token kj in head h is: 
+
+a(l,h ) 
+
+> t,j
+
+= σ q(l,h )⊤ 
+
+> t
+
+k(l,h )
+
+> j
+
+√dk
+
+!
+
+(1) where σ(·) denotes the Softmax function. To capture the aggregate "vote" of the observation window towards a historical token j, we perform a pooling operation over the query indices t ∈
+
+[N − w, N ]. StructKV aggregates attention scores across all heads within the same Grouped Query Attention (GQA) group. Let Hg denote the set Figure 2: The Three-Phase Workflow of StructKV. Phase 1: The model processes full context while accumulating global centrality scores ( Cglobal ). Phase 2: The Auto-Detector triggers a structural phase transition. The context is filtered using Cglobal , decoupling the propagation budget ( Rstruct ) from the storage budget ( RKV ). Phase 3: Deep layers operate on the reduced "structural skeleton" for maximum speed. 
+
+of query heads associated with the g-th key-value group. The local saliency score S(l) 
+
+> j
+
+is defined as: 
+
+S(l) 
+
+> j
+
+=
+
+> G
+
+X
+
+> g=1
+
+ 1
+
+w
+
+> N
+
+X 
+
+> t=N−w
+
+X
+
+> h∈H g
+
+a(l,h )
+
+> t,j
+
+ (2) Unlike methods that use S(l) 
+
+> j
+
+directly for trunca-tion, StructKV maintains a cumulative score vector 
+
+C ∈ RN . For every layer l up to the Pivot Layer 
+
+L∗, we update the global centrality recursively: 
+
+Cj =
+
+> L∗
+
+X
+
+> l=0
+
+λ(L∗−l) · S (l) 
+
+> j
+
+(3) Here, λ ∈ (0 , 1] is a layer-wise decay factor that allows the model to prioritize deeper semantic layers. By summing these scores, a token acting as an information "hub" across multiple early lay-ers acquires a high centrality score, preserving its structural integrity. 
+
+3.3 Dynamic Pivot Layer Detection 
+
+Determining the optimal layer L∗ to perform con-text reduction is critical. We posit that the optimal 
+
+L∗ corresponds to a "phase transition" where the attention mechanism shifts from broad exploration to focused extraction. We quantify this by tracking three metrics for each layer l:1. Attention Entropy ( Hl): Measures the uncer-tainty of the attention distribution.       
+
+> Hl=−1
+> H
+> HX
+> h=1
+> 1
+> w
+> NX
+> t=N−w
+> X
+> j
+> a(l,h )
+> t,j log a(l,h )
+> t,j
+> !
+> (4)
+
+2. Sparsity ( ρl): The cumulative probability mass of the top-k tokens (where k = 0 .1N ). 
+
+ρl = 1
+
+H
+
+> H
+
+X
+
+> h=1
+
+X
+
+> j∈K h
+
+a(l,h ) 
+
+> t,j
+
+, Kh = top-k (a(l,h ))
+
+(5) 3. Variance ( Vl): The variance of attention scores, indicating distinguishability. 
+
+Vl = 1
+
+H
+
+> H
+
+X
+
+> h=1
+
+Var (a(l,h )) (6) To identify the transition point, we calculate the normalized first-order difference (discrete gradient) 
+
+∇ for each metric. Let ∆Ml = Ml − Ml−1. We normalize these gradients to [0 , 1] across layers: 
+
+¯∇Ml = ∆Ml − min k(∆ Mk)max k(∆ Mk) − min k(∆ Mk) (7) We define a composite transition score Tl that seeks a sharp drop in entropy coupled with a rise in sparsity and variance: Tl = w1 · ¯∇(−H l) + w2 · ¯∇(ρl) + w3 · ¯∇(Vl) (8) The optimal Pivot Layer is determined dy-namically as the layer maximizing this structural change: 
+
+L∗ = arg max 
+
+> l
+
+Tl + 1 (9) 
+
+3.4 Structural Propagation and Decoupling 
+
+Once the computation reaches L∗, we define the set of retained indices Istruct by selecting the top-
+
+K tokens with the highest global centrality, while preserving the recent local window Iwin :
+
+Istruct = top-k (C, N · Rstruct ) ∪ I win (10) where Rstruct is the structural retention rate. For all subsequent layers l > L ∗, the hidden states Hl
+
+are projected to a reduced subspace. Let Fl denote the Transformer block at layer l:
+
+Hreduced l+1 = Fl (Hl[: , Istruct ]) (11) To ensure positional consistency, we realign the Position IDs P ∈ NN . The new position embed-dings are computed using gathered indices: 
+
+P′ = PIstruct , K′ = fRoP E (K, P′) (12) While C determines Istruct for computation, the KV cache stored for decoding uses a separate bud-get RKV . The cache indices I(l) 
+
+> KV
+
+are selected based on local saliency S(l):
+
+I(l) 
+
+> KV
+
+= top-k (S(l), N · RKV ) ∪ I win (13) This decoupling allows StructKV to maintain rich structural context during prefill (high Rstruct )while optimizing memory footprint during genera-tion (low RKV ). The complete execution flow, integrating global centrality accumulation, dynamic pivot detection, and decoupled storage, is summarized in Algorithm 1. 
+
+4 Experiments 
+
+4.1 Setup Models and Datasets. To demonstrate the ver-satility of StructKV across different architectures and scales, we evaluate it on two primary model families. First, following the FastKV baseline, we use LLaMA-3.1-8B-Instruct (Meta AI, 2024) and Ministral-8B-Instruct (Mistral AI, 2024). Sec-ond, to validate the effectiveness of our Dynamic Pivot Detection across varying depths, we employ the Qwen-2.5-Instruct family (Yang et al., 2024a), specifically the 7B (28 layers), 14B (48 layers), and 32B (64 layers) versions. We evaluate long-context understanding using LongBench (Bai et al., 2024), which comprises 16 subtasks covering summarization, QA, and code completion. Additionally, to rigorously test effec-tive context length retention, we use the RULER benchmark (Hsieh et al., 2024), a more challenging generalization of the Needle-in-a-Haystack test. 
+
+Baselines. We evaluate our method against four categories of baselines: (1) Decoding-only meth-ods like StreamingLLM (Xiao et al., 2024) and H2O (Zhang et al., 2023), which only prune the KV cache during generation; (2) Decoding-dominant method such as SnapKV (Li et al., 2024b), which selects salient clusters without reducing prefill com-pute; (3) Prefill-aware methods such as GemFil-ter (Shi et al., 2024) and PyramidInfer (Yang et al., 2024b); and (4) FastKV (Jo et al., 2025), the cur-rent state-of-the-art using a fixed layer for token selection. 
+
+Implementation Details. All experiments run on a single NVIDIA A800 GPU (80GB) using Hug-ging Face Transformers and FlashAttention-2 (Dao, 2024). StructKV enables Dynamic Pivot Detection during prefill by default. We set the local window 
+
+w = 8 , global centrality decay λ = 0 .9, transition weights {w1, w 2, w 3} = {0.2, 0.3, 0.5}, structural retention rate Rstruct = 20% , and decoding KV budget RKV = 10% . Baselines follow their offi-cial recommended settings 1 2 3 4 5 6 . For batch inference with heterogeneous pivot layers, we em-ploy a masked state transition strategy. A padded addressing mask allows sequences in the structural propagation phase to use sparse indices ( Istruct )while others use full context, adding minimal over-head ( < 2% latency increase). Finally, Struc-tKV supports block-based memory management 
+
+> 1https://github.com/mit-han-lab/streaming-llm
+> 2https://github.com/lenscloth/KVCache
+> 3https://github.com/FasterDecoding/SnapKV
+> 4https://github.com/mutonix/pyramidinfer
+> 5https://github.com/SalesforceAIResearch/GemFilter
+> 6https://github.com/dongwonjo/FastKV
+
+Table 1: LongBench results on LLaMA-3.1-8B-Instruct.                                                                                                                                                                                                                 
+
+> Single-Doc QA Multi-Doc QA Summarization Few-shot Synthetic Code
+> Method Prefill KV NrtvQA Qasper MF-en HotpotQA 2Wiki Musique GovRep QMSum MNews TREC Trivia SAMSum PCount PRe Lcc RB-P Avg.
+> Full-context
+> Full-context 100% 100% 30.21 45.53 55.01 56.01 46.65 31.28 35.13 25.28 27.25 73.00 91.64 43.80 8.91 99.50 63.38 56.64 49.33
+> Decoding-Only
+> StreamingLLM 100% 10% 26.05 26.29 33.68 48.07 37.93 25.03 25.37 21.49 19.97 58.50 88.46 42.61 7.91 88.00 61.07 54.94 41.59 100% 20% 27.99 28.89 34.42 51.21 41.03 24.43 28.34 22.08 22.16 64.00 89.96 42.27 8.66 85.00 62.02 56.85 43.08 H2O 100% 10% 9.32 34.96 37.08 19.65 32.65 6.91 31.29 21.01 25.59 66.50 91.03 42.16 3.41 65.75 58.27 51.48 37.32 100% 20% 9.80 41.09 41.00 19.20 33.92 6.83 32.26 21.50 25.62 66.00 91.27 42.41 4.31 68.25 62.02 54.08 38.72 SnapKV 100% 10% 31.51 40.18 41.00 55.83 44.30 30.92 28.88 24.58 22.57 70.50 91.28 42.64 7.93 99.50 62.32 56.71 46.92 100% 20% 31.15 44.11 54.55 55.47 45.14 31.14 31.22 24.94 24.09 70.50 91.90 42.23 7.96 99.50 63.55 57.91 48.46
+> Prefill-Aware
+> PyramidInfer 60% 60% 12.10 35.54 37.58 17.66 33.71 6.56 27.84 21.62 21.04 64.00 91.89 43.31 3.65 70.08 64.92 57.90 38.09 GemFilter 60% 10% 24.36 21.07 39.73 25.99 43.92 35.78 28.94 21.42 17.62 61.00 91.53 40.88 4.76 85.00 59.95 44.38 40.4 70% 20% 26.02 30.74 47.30 37.97 55.97 20.64 31.19 20.92 21.06 61.50 92.75 40.92 6.18 97.00 31.99 41.12 41.42 FastKV 60% 10% 30.54 40.75 54.57 54.33 46.30 30.55 28.15 24.29 21.91 73.00 92.38 42.96 7.36 99.50 60.11 54.79 47.59 60% 20% 30.26 43.70 54.83 54.39 46.42 30.42 30.28 24.88 22.93 73.50 91.97 43.07 7.61 99.50 61.61 55.67 48.19
+> StructKV 60% 10% 32.45 41.88 55.12 55.20 46.85 30.55 29.60 25.15 24.60 73.20 92.45 43.00 8.60 99.50 62.40 56.15 48.61 60% 20% 32.80 44.50 55.25 55.80 46.90 30.85 32.10 25.35 25.90 73.65 92.10 43.25 8.85 99.50 63.20 56.80 48.97
+
+(e.g., vLLM) via Block-Level Aggregation. Rather than token-level eviction, we calculate physical block importance as Sblock k = P
+
+t∈block k Cglobal [t].Evicting blocks with the lowest scores naturally preserves contiguous structural anchors (e.g., func-tion definitions) better than fragmented token-wise eviction. 
+
+4.2 Performance on Long-Context Understanding 
+
+Table 1 presents the main results on LongBench. StructKV achieves the superior trade-off between computational efficiency and task accuracy. 
+
+Overall Performance: Under a strict memory budget of 10% KV retention, StructKV ( Rstruct =60% ) achieves an average score of 48.61, sig-nificantly outperforming the prefill-aware base-line GemFilter (40.40, +8.21) and surpassing the strongest competitor FastKV (47.59, +1.02). No-tably, with a slightly relaxed budget ( Rstruct =60% , R KV = 20% ), StructKV achieves an aver-age score of 48.97, effectively matching the Full-Context performance (49.33) while reducing the prefill computation by 40%. 
+
+Detailed Task Analysis: StructKV demon-strates consistent improvements across diverse task categories compared to the state-of-the-art FastKV. In summarization tasks, which require integrating information distributed across the entire context, StructKV shows a distinct advantage. For instance, on MultiNews and GovReport, StructKV (10% KV) surpasses FastKV by 2.69 and 1.45 points, respectively. Similarly, in code benchmarks, our method achieves higher accuracy (e.g., 62.40 vs. 60.11 on Lcc), suggesting that Global In-Degree Centrality effectively retains code dependencies that may span long distances but exhibit low local saliency. Furthermore, StructKV maintains robust 0 10 20 30 40 50 60 70               
+
+> Layer Index ( l)
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> 1.2
+> 1.4
+> Transition Score ( Gl)
+> L*= 12
+> L*= 15
+> L*= 17
+> L*= 19 L*= 28
+> Adaptability Analysis: Optimal Pivot Layer ( L*) Detection
+> StructKV Auto-Detected L*
+> Qwen-2.5-7B
+> LLaMA-3.1-8B
+> Mistral-8B
+> Qwen-2.5-14B
+> Qwen-2.5-32B
+
+Figure 3: Adaptability of Pivot Selection on Qwen-2.5 Series, Llama-3.1-8B-Instruct and Ministral-8B-Instruct. 
+
+performance in both single-Doc and multi-Doc QA, outperforming FastKV on challenging datasets like NarrativeQA (+1.91) and HotpotQA (+0.87). This indicates that aggregating attention patterns across layers effectively preserves the "dormant" yet topo-logically critical tokens that are often discarded by single-layer snapshot methods. 
+
+Comparison with Decoding-Only Methods: 
+
+While SnapKV performs competitively in decod-ing (46.92 at 10% KV), it offers no acceleration during the prefill phase. StructKV not only out-performs SnapKV in average accuracy (+1.69) but also provides substantial prefill speedups via struc-tural pruning. This effectively bridges the gap be-tween prefill-aware and decoding-only approaches, offering a comprehensive solution for efficient long-context inference. More results for mistral-8B-Instruct and Qwen-2.5 series on LongBench are presented in §B.1. 
+
+4.3 Adaptability to Model Depth 
+
+A fundamental flaw in static methods like FastKV is their reliance on a fixed pruning layer (e.g., Layer 15), which is empirically tuned for specific models (e.g., LLaMA-3.1-8B-Instruct) and fails to general-ize to deeper architectures. We validate the adapt-ability of StructKV using the Qwen-2.5 series. 
+
+The Shift of Phase Transition: Figure 3 il-lustrates that the optimal pivot layer ( L∗) moves deeper as model size increases, shifting from Layer 12 in Qwen-2.5-7B-Instruct to Layer 28 in Qwen-2.5-32B-Instruct. This significant variation ex-poses the limitation of static pruning methods like FastKV, which rely on a fixed layer (e.g., Layer 15 for Llama-3.1-8B-Instruct or Layer 17 for Ministral-8B-Instruct, which is proved by inten-sive experiments). 
+
+Dynamic Alignment: StructKV eliminates this risk. By monitoring entropy gradients online, our method dynamically delays pruning until Layer 28 for Qwen-2.5-32B-Instruct, ensuring that the "structural skeleton" is fully formed before com-pression. This adaptability is crucial for deploying compression algorithms across rapidly evolving LLM architectures without costly manual hyperpa-rameter search. 0.5          
+
+> 1.0
+> 1.5
+> 2.0
+> 2.5
+> 3.0
+> 3.5
+> Attention Entropy (bits)
+> A. Layer-wise Attention Statistics (Qwen-2.5-32B)
+> Attn Entropy ( )
+> Sparsity ( Sp )
+> 010 20 30 40 50 60
+> Layer Index
+> 0.00
+> 0.25
+> 0.50
+> 0.75
+> 1.00
+> 1.25
+> Transition Score ( Gl)
+> Max Gradient ( L*=28)
+> Unstable
+> Region
+> Stabilized
+> Region
+> B. Automated Pivot Detection
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> Sparsity Ratio
+
+Figure 4: Visualization of Dynamic Pivot Detection on Qwen-2.5-32B-Instruct. 
+
+4.4 Robustness at Extreme Contexts 
+
+To evaluate robustness under extreme context pres-sure, we test retrieval accuracy on RULER with effective lengths up to 128K tokens (Table 2). Needle-in-a-Haystack result is in §B.2. 
+
+The Failure of Local Saliency: While FastKV performs robustly at shorter lengths (8K-32K), it exhibits a sharp performance degradation at 128K (scoring 68.2 vs. Full-Context 76.3). This degrada-tion confirms our hypothesis regarding the fragility of local snapshots: in ultra-long sequences, the 16 18 20 22 24 26 28 30 32   
+
+> Decoder Layer Index ( l>LPivot )
+> 70
+> 75
+> 80
+> 85
+> 90
+> 95
+> 100
+> Attention Mass Recovery (%)
+> Retrieval Gap
+> (~6.4%)
+> High Fidelity Preservation
+> Full Context (100%) Layer-wise Attention Fidelity Analysis
+> StructKV (Ours)
+> FastKV
+> GemFilter
+
+Figure 5: Layer-wise Hidden State Fidelity. Table 2: RULER Benchmark Results on LLaMA-3.1-8B-Instruct.                                                                         
+
+> Method Prefill KV 8K 16K 32K 64K 128K Avg.
+> Reference
+> Full-context 100% 100% 90.1 95.0 83.4 85.5 76.3 86.0
+> Decoding-Only
+> StreamingLLM 100% 10% 15.0 21.5 24.4 16.9 15.0 18.6 H2O 100% 10% 27.1 -----SnapKV 100% 10% 75.6 76.8 72.9 75.0 67.7 73.6
+> Prefill-Aware
+> PyramidInfer 60% 60% 66.5 -----GemFilter 51% 10% 69.7 68.2 70.4 69.8 69.8 69.6 FastKV 60% 10% 77.8 77.3 77.2 77.4 68.2 75.6
+> StructKV (Ours) 60% 10% 81.3 82.5 81.8 81.5 73.6 80.1
+
+probability of a critical "needle" being temporarily ignored at the specific pivot layer increases. Once evicted by FastKV, this information is permanently lost to deeper layers. 
+
+Resilience via Global Accumulation: In con-trast, StructKV maintains an average score of 73.6 at 128K, recovering nearly all the performance drop observed in FastKV. Even if a needle token receives low attention at the pivot layer, its historical inter-actions in earlier layers contribute to its cumulative global in-degree centrality, acting as a "safety net" against eviction. This makes StructKV the only prefill-aware method capable of sustaining high-fidelity retrieval at the 100K+ token scale. 
+
+4.5 Ablation Studies and Analysis 
+
+To provide a deeper understanding of StructKV’s internal mechanisms, we conduct extensive abla-tion studies. 
+
+Mechanism of Dynamic Pivot Detection: Fig-ure 4 visualizes the physical metrics driving our Auto-Detector on Qwen-2.5-32B. The data reveals a distinct two-phase evolution in attention dynam-ics. In the initial Unstable Region , attention en-tropy ( H) remains high while sparsity ( Sp ) is low, 5% 10% 15% 20% 25%                                
+
+> KV Retention Rate ( RKV ) [Memory Budget]
+> 50% 40% 30% 20% 10%
+> Structural Propagation Rate ( Rstruct ) [Compute Budget]
+> 60.5 60.8 61.0 61.2 61.3
+> 60.1 60.4 60.8 60.9 61.1
+> 59.5 60.0 60.4 60.6 60.8
+> 57.2 59.1 59.8 60.2 60.4
+> 42.5 45.3 48.1 50.5 52.2
+> Phase Transition
+> Coupled Setting
+> (Rstruct RKV )
+> [Collapse Zone]
+> Decoupled (Ours)
+> (Rstruct >RKV )
+> [Robust Zone]
+> Safe High-Fidelity
+> Region
+> Decoupling Analysis: Impact on Accuracy
+> +13.8% Recovery
+> 40.0 42.5 45.0 47.5 50.0 52.5 55.0 57.5 60.0
+> LongBench Accuracy
+
+Figure 6: Decoupling Analysis: Computation vs. Memory Budget. 
+
+indicating the model is still exploring broad con-text associations. As the model deepens, a sharp transition occurs around Layer 28, where entropy drops and sparsity saturates, marking the entry into the Stabilized Region . Our algorithm computes the transition score ( Gl) to identify the maximum gradient at Layer 28 ( L∗), mathematically pinpoint-ing the exact layer where the attention structure stabilizes and becomes suitable for compression. 
+
+Fidelity of Hidden States: We evaluate the qual-ity of the compressed context using attention mass recovery (Figure 5). This metric tracks the per-centage of original attention weights covered by the retained tokens. GemFilter shows consistently low recovery ( ∼75-80%) because it fragments the context. FastKV performance declines in deeper layers, creating a visible "Retrieval Gap" (drop-ping to ∼85%). This indicates that selecting to-kens based on a single layer fails to capture what deep layers need. In contrast, StructKV maintains a stable recovery rate of over 95% across all lay-ers. This confirms that global in-degree centrality successfully preserves the "Structural Skeleton," keeping critical information available throughout the network.                   
+
+> Decay ( λ)LongBench Avg. ∆Interpretation
+> 0.50 47.41 -1.20 Too aggressive decay 0.80 48.35 -0.26 Robust Zone
+> 0.90 (Ours) 48.61 Ref Optimal trade-off
+> 0.95 48.42 -0.19 Robust Zone 1.00 48.03 -0.58 No decay (flat history)
+
+Table 3: Sensitivity analysis of the decay factor λ on LongBench (LLaMA-3.1-8B, 10% KV budget). 
+
+Sensitivity to Decay Factor ( λ): We evaluate the robustness of our Global In-Degree Centrality mechanism to the decay factor λ on the LLaMA-3.1-8B model using the LongBench average score. As shown in Table 3, performance is highly robust within the range of [0 .8, 0.95] , with fluctuations under 0.3 points. Extreme values, such as λ = 0 .5
+
+(which decays history too aggressively and loses "dormant" cues) or λ = 1 .0 (which treats all layers equally and fails to prioritize deeper semantics), lead to noticeable degradation. Thus, we select 
+
+λ = 0 .9 as the optimal trade-off. 
+
+Effectiveness of Structural Decoupling: To validate the necessity of separating computation and memory constraints, Figure 6 presents a decou-pling analysis on LongBench accuracy. In a tightly "Coupled Setting" where both budgets are equiv-alent ( Rstruct ≈ RKV ), aggressive compression leads to a collapse zone (e.g., yielding an accuracy score of only 45.3 at a 10% retention rate). By adopting our decoupled strategy ( Rstruct > R KV ), StructKV successfully shifts into a robust zone. For instance, simply expanding the structural propaga-tion rate to 20% while restricting the KV memory budget to 10% produces a massive +13.8 point accuracy recovery (reaching 59.1). Furthermore, as Rstruct scales to 30% and beyond, the model enters a safe high-fidelity region, sustaining near-optimal performance ( > 60 .0) regardless of tight memory bottlenecks. This confirms that maintain-ing a denser structural skeleton during the prefill phase fundamentally mitigates the risks of aggres-sive cache eviction during decoding. Full-Context FastKV StructKV (Ours) 
+
+> 0
+> 500
+> 1000
+> 1500
+> 2000
+> 2500
+> 3000
+> Prefill Latency (ms)
+> 2600 ms
+> 1372 ms
+> 1.90x Speedup
+> 1392 ms
+> 1.87x Speedup
+> Global Accumulation
+> Overhead (~35ms)
+> Quadratic
+> Reduction
+> End-to-End Latency Breakdown (32K Context, NVIDIA A800)
+> FFN & Others
+> Attention Computation
+> Method Overhead
+
+Figure 7: Prefill Latency Breakdown (LLaMA-3.1-8B, 32K Context). 
+
+4.6 Efficiency and Overhead 
+
+Finally, we address the potential concern of compu-tational overhead. Figure 7 presents the end-to-end prefill latency breakdown for processing 32K to-kens on an A800 GPU. StructKV achieves a 1.87 × speedup over the Full-Context baseline by reducing the quadratic attention and FFN computations in layers l > LP ivot . Crucially, the over-head introduced by our additional compo-nents—the GlobalScoreAccumulator and 
+
+DynamicPivotDetector —is approximately 35ms (indicated by the red hatched area), constituting less than 2.5% of the total latency. This negligible cost is due to the efficient implementation of score aggregation as element-wise vector operations, which are memory-bandwidth bound rather than compute-bound. Thus, StructKV provides significant acceleration and memory savings with minimal system burden. 
+
+5 Conclusion 
+
+In this work, we propose StructKV, a framework designed to address the fragility of local saliency in long-context inference. By accumulating Global In-Degree Centrality and employing Dynamic Pivot Detection, StructKV identifies and preserves the semantic skeleton of the context that is often dis-carded by static pruning methods. Furthermore, our decoupling strategy enables high-fidelity prefill computation while minimizing decoding memory usage. Experiments on LongBench and RULER demonstrate that StructKV significantly outper-forms state-of-the-art baselines, effectively bridg-ing the gap between prefill acceleration and gener-ation quality. 
+
+Limitations 
+
+Despite its effectiveness, StructKV has limitations. First, while our motivation highlights the need for scalable inference, our empirical validation is cur-rently bounded at 128k tokens (via RULER) due to computational resource constraints. Verifying the stability of the "structural skeleton" at the full million-token scale remains future work. Second, our experiments focus on standard dense Trans-former architectures (e.g., LLaMA-3.1, Qwen-2.5). The applicability of Global In-Degree Centrality to Mixture-of-Experts (MoE) models or non-attention architectures like SSMs requires further investiga-tion. Finally, although the overhead of our Dy-namic Pivot Detector is negligible on high-end GPUs, the reliance on specific aggregation opera-tions may require further optimization for hardware with limited memory bandwidth. 
+
+References 
+
+Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. 2024. Longbench: A bilingual, multi-task benchmark for long context understanding. In 
+
+Proceedings of the 62nd Annual Meeting of the As-sociation for Computational Linguistics (Volume 1: Long Papers), ACL 2024, Bangkok, Thailand, Au-gust 11-16, 2024 , pages 3119–3137. Association for Computational Linguistics. Tri Dao. 2024. Flashattention-2: Faster attention with better parallelism and work partitioning. In The Twelfth International Conference on Learning Rep-resentations, ICLR 2024, Vienna, Austria, May 7-11, 2024 . OpenReview.net. Gemini. 2025. Gemini 3 pro. https://deepmind. google/models/gemini/ .GPT5. 2025. Gpt5. https://openai.com/index/ introducing-gpt-5/ .Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, and 1 others. 2024. The llama 3 herd of models. arXiv preprint arXiv:2407.21783 .Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shan-tanu Acharya, Dima Rekesh, Fei Jia, Yang Zhang, and Boris Ginsburg. 2024. RULER: what’s the real context size of your long-context language models? 
+
+CoRR , abs/2404.06654. Dongwon Jo, Jiwon Song, Yulhwa Kim, and Jae-Joon Kim. 2025. Fastkv: KV cache compression for fast long-context processing with token-selective propa-gation. CoRR , abs/2502.01068. Ehsan Kamalloo, Nouha Dziri, Charles LA Clarke, and Davood Rafiei. 2023. Evaluating open-domain ques-tion answering in the era of large language models. 
+
+arXiv preprint arXiv:2305.06984 .Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024b. Snapkv: LLM knows what you are looking for before genera-tion. In Advances in Neural Information Processing Systems 38: Annual Conference on Neural Informa-tion Processing Systems 2024, NeurIPS 2024, Van-couver, BC, Canada, December 10 - 15, 2024 .LlamaTeam. 2024. The llama 3 herd of models. CoRR ,abs/2407.21783. Meta AI. 2024. Introducing Llama 3.1: Our most capa-ble models to date. Meta Blog. Accessed: 2025-12-21. Mistral AI. 2024. Ministral-8B-Instruct-2410. Hugging Face. Model hub page. Jack W Rae, Anna Potapenko, Siddhant M Jayakumar, and Timothy P Lillicrap. 2019. Compressive trans-formers for long-range sequence modelling. arXiv preprint arXiv:1911.05507 .Baptiste Roziere, Jonas Gehring, Fabian Gloeckle, Sten Sootla, Itai Gat, Xiaoqing Ellen Tan, Yossi Adi, Jingyu Liu, Romain Sauvestre, Tal Remez, and 1 others. 2023. Code llama: Open foundation models for code. arXiv preprint arXiv:2308.12950 .Zhenmei Shi, Yifei Ming, Xuan-Phi Nguyen, Yingyu Liang, and Shafiq Joty. 2024. Discovering the gems in early layers: Accelerating long-context llms with 1000x input token reduction. CoRR , abs/2409.17422. Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao, Baris Kasikci, and Song Han. 2024. QUEST: Query-aware sparsity for efficient long-context LLM infer-ence. In Forty-first International Conference on Ma-chine Learning .Zhongwei Wan, Xinjian Wu, Yu Zhang, Yi Xin, Chaofan Tao, Zhihong Zhu, Xin Wang, Siqi Luo, Jing Xiong, Longyue Wang, and Mi Zhang. 2025. $\text{D}_{2}\text{O}$: Dynamic discriminative operations for efficient long-context inference of large language models. In The Thirteenth Interna-tional Conference on Learning Representations .Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient streaming lan-guage models with attention sinks. In The Twelfth International Conference on Learning Representa-tions, ICLR 2024, Vienna, Austria, May 7-11, 2024 .An Yang, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chengyuan Li, Dayi-heng Liu, Fei Huang, Haoran Wei, Huan Lin, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Ji-axi Yang, Jingren Zhou, Junyang Lin, Kai Dang, and 22 others. 2024a. Qwen2.5 technical report. CoRR ,abs/2412.15115. Dongjie Yang, Xiaodong Han, Yan Gao, Yao Hu, Shilin Zhang, and Hai Zhao. 2024b. Pyramidinfer: Pyramid KV cache compression for high-throughput LLM in-ference. In Findings of the Association for Compu-tational Linguistics, ACL 2024, Bangkok, Thailand and virtual meeting, August 11-16, 2024 , pages 3258– 3270. Association for Computational Linguistics. Tianyi Zhang, Faisal Ladhak, Esin Durmus, Percy Liang, Kathleen McKeown, and Tatsunori B Hashimoto. 2024a. Benchmarking large language models for news summarization. Transactions of the Associa-tion for Computational Linguistics , 12:39–57. Yuxin Zhang, Yuxuan Du, Gen Luo, Yunshan Zhong, Zhenyu Zhang, Shiwei Liu, and Rongrong Ji. 2024b. Cam: Cache merging for memory-efficient LLMs inference. In Forty-first International Conference on Machine Learning .Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark W. Barrett, Zhangyang Wang, and Beidi Chen. 2023. H2O: heavy-hitter oracle for efficient generative inference of large language models. In Advances in Neural Information Processing Systems 36: Annual Confer-ence on Neural Information Processing Systems 2023, NeurIPS 2023, New Orleans, LA, USA, December 10 - 16, 2023 .A Method 
+
+We provide a formal description of the StructKV prefill mechanism in Algorithm 1. The procedure is designed to progressively identify the structural skeleton of the input context while decoupling the computational budget from the memory budget. The workflow proceeds in three distinct phases within a single forward pass: 
+
+Phase 1: Global Centrality Accumulation (Lines 5–6). For the initial layers where the context is fully preserved ( not pruned ), we maintain a cumu-lative importance vector C. Unlike previous meth-ods that rely on instantaneous attention snapshots, we recursively update C using the local saliency score S(l) derived from the current layer’s atten-tion matrix, modulated by a layer-wise decay factor 
+
+λ. This ensures that tokens serving as information hubs across early layers accumulate high centrality scores. 
+
+Phase 2: Dynamic Pivot Detection (Lines 7–10). 
+
+Simultaneously, the algorithm monitors the evolu-tion of attention patterns to identify the optimal pruning depth. We calculate a transition score Tl
+
+based on the gradients of attention metrics (En-tropy, Sparsity, Variance). Once Tl is maximized (or a pre-set limit is reached), the current layer is marked as the Pivot Layer ( L∗). At this point, we define the structural index set Istruct by selecting the top-K tokens based on the accumulated global centrality C. Crucially, we project the hidden states 
+
+H and realign the Position IDs P to this reduced subset (Line 13) to ensure valid Rotary Positional Embeddings (RoPE) in subsequent layers. 
+
+Phase 3: Structural Propagation & Decoupling (Lines 15–17). Post-truncation, the Transformer blocks operate on the reduced hidden states, sig-nificantly lowering computational complexity. Fi-nally, StructKV implements the decoupling strat-egy (Lines 16–17). Regardless of the tokens se-lected for computation, the KV cache stored for future decoding is determined independently using a separate retention rate RKV . The storage indices 
+
+IKV are selected based on the local layer saliency 
+
+S(l), allowing the model to maintain a minimal memory footprint without constraining the struc-tural context required for reasoning. 
+
+Algorithm 1 StructKV Forward Pass (Prefill Phase) 
+
+Require: Hidden States H, PosIDs P, Window w,Decay λ, Budgets Rstruct , R KV 
+
+Ensure: Output Logits, Decoupled KV Cache 
+
+{K(l), V(l)} 
+
+> 1:
+
+Initialize: C ← 0N , pruned ← false  
+
+> 2:
+
+for layer l = 0 to Ltotal − 1 do  
+
+> 3:
+
+A(l) ← Attention (H, P) 
+
+> 4:
+
+S(l) ← ComputeLocalSaliency (A(l)) 
+
+> 5:
+
+if not pruned then  
+
+> 6:
+
+C ← C · λ + S(l) // Update Global Centrality  
+
+> 7:
+
+Compute transition score Tl using metric gradients  
+
+> 8:
+
+if Tl is maximized or l = Llimit then  
+
+> 9:
+
+L∗ ← l; pruned ← true  
+
+> 10:
+
+Istruct ← TopK (C, N ·Rstruct )∪I win  
+
+> 11:
+
+end if  
+
+> 12:
+
+end if  
+
+> 13:
+
+if pruned and l = L∗ then  
+
+> 14:
+
+H ← H[: , Istruct ]; P ← PIstruct // Structural Truncation  
+
+> 15:
+
+end if  
+
+> 16:
+
+H ← TransformerBlock l(H, P) 
+
+> 17:
+
+IKV ← TopK (S(l), N · RKV ) ∪ I win // Decoupled Storage  
+
+> 18:
+
+Cache (K(l), V(l)) at indices IKV  
+
+> 19:
+
+end for  
+
+> 20:
+
+return LayerNorm (H)
+
+B Experiments 
+
+B.1 Extended LongBench Evaluation 
+
+To demonstrate the generalization capability and robustness of StructKV, we provide detailed eval-uation results on additional model architectures, including Ministral-8B-Instruct and the Qwen-2.5-Instruct family (7B, 14B, and 32B). 
+
+Results on Ministral-8B-Instruct. Table 4presents the performance on Ministral-8B. Struc-tKV achieves an average score of 50.61% with a 10% KV retention budget. This result is remark-ably close to the Full-context baseline (50.75%) and significantly outperforms the state-of-the-art baseline FastKV (49.27%). Notably, in the code tasks (Lcc and RB-P), StructKV maintains high accuracy compared to FastKV. This confirms that our global centrality metric successfully preserves critical syntactic tokens that local saliency methods often discard. 
+
+Scalability on Qwen-2.5 Series. We further eval-uate StructKV across different model sizes using the Qwen-2.5 family to test adaptability. Tables 5, 6, and 7 show the results for the 7B, 14B, and 32B models, respectively. Across all model sizes, Struc-tKV consistently outperforms both decoding-only methods (like SnapKV) and prefill-aware meth-ods (like GemFilter and FastKV). For instance, on Qwen-2.5-7B, StructKV improves the average score by 1.4% over FastKV. Moreover, the results highlight the robustness of StructKV in deeper models. As the model depth increases from 28 layers (7B) to 64 layers (32B), static selection meth-ods like FastKV suffer from "premature pruning," which leads to information loss. StructKV utilizes 
+
+Dynamic Pivot Detection to automatically adjust the pruning layer. The results on Qwen-2.5-32B (Table 7) demonstrate that StructKV (54.62%) ef-fectively bridges the gap to the Full-context base-line (55.82%), whereas FastKV lags behind at 53.88%. 
+
+Performance on Structure-Sensitive Tasks. Akey advantage of StructKV is its ability to retain "structural anchors" essential for logic and format-ting. This is evident in the synthetic and code sub-tasks across all tables. For example, in the Qwen-2.5-14B evaluation (Table 6), StructKV achieves a 100% score on the Passage Retrieval (PRe) task and significantly higher scores on RepoBench-P (RB-P) compared to GemFilter and PyramidInfer. This verifies that accumulating global attention scores prevents the accidental removal of tokens that are locally dormant but globally critical for reasoning. In summary, these extended experiments confirm that StructKV is a model-agnostic solution. It deliv-ers stable and high-fidelity compression across dif-ferent architectures and scales, successfully decou-pling prefill computation from memory usage with-out compromising downstream task performance. 32.1 
+
+B.2 Needle-in-a-Haystack Evaluation 
+
+To evaluate the robustness of StructKV in handling ultra-long contexts, we conduct the "Needle-in-a-Haystack" test using LLaMA-3.1-8B-Instruct. We vary the input context length from 16k to 128k tokens and place the target "needle" at different depth percentages. Figure 8 presents the accuracy heatmaps for all methods. 
+
+Baseline Performance. The Full-context base-line achieves a perfect score of 1.000, serving as the upper bound. In contrast, StreamingLLM per-forms poorly with an average score of 0.201. It fails to retrieve information located in the middle of the context, as it relies heavily on local win-dow attention. GemFilter achieves a respectable score of 0.938 but exhibits clear failure patterns (red blocks) at longer context lengths (beyond 64k). This indicates that its aggressive token pruning dur-ing the prefill stage causes irreversible information loss. SnapKV performs well (0.988) but still shows minor instability at specific depths. 
+
+StructKV Performance. Our method, StructKV, achieves a perfect average score of 1.000. The heatmap is entirely green, demonstrating 100% retrieval accuracy across all context lengths and depths. This performance matches the Full-context baseline and FastKV. This result confirms the effec-tiveness of our Global In-Degree Centrality mech-anism. Unlike local methods that might discard a "needle" if it is temporarily dormant, StructKV ac-cumulates importance scores across layers. This en-sures that critical specific information is preserved in the structural skeleton, enabling high-fidelity retrieval even under extreme compression. Table 4: LongBench results on Ministral-8B-Instruct. 
+
+Single-Doc QA Multi-Doc QA Summarization Few-shot Synthetic Code 
+
+Method Prefill KV NrtvQA Qasper MF-en HotpotQA 2Wiki Musique GovRep QMSum MNews TREC Trivia SAMSum PCount PRe Lcc RB-P Avg. 
+
+Full-context 
+
+Full-context 100% 100% 24.55 47.99 52.21 60.43 52.64 35.28 32.36 24.16 26.64 74.50 92.04 45.94 9.00 100.00 67.06 67.19 50.75 
+
+Decoding-Only 
+
+StreamingLLM 100% 10% 22.52 33.02 27.69 48.68 37.66 21.26 23.55 21.09 18.36 61.50 91.38 43.45 6.00 63.00 62.84 62.55 40.28 100% 20% 23.25 35.91 28.26 51.46 41.13 24.08 26.88 21.38 21.43 67.50 91.88 44.65 5.00 72.00 63.17 63.21 42.57 H2O 100% 10% 27.75 40.61 44.04 52.19 48.78 30.68 29.40 23.14 25.35 72.00 90.66 43.26 7.50 70.00 61.99 59.91 45.45 100% 20% 27.28 43.31 44.57 53.41 49.93 30.88 30.47 23.55 25.87 72.00 91.16 44.04 7.50 71.00 65.02 66.47 46.65 SnapKV 100% 10% 26.82 43.55 49.53 60.18 51.72 36.38 26.94 23.55 21.27 72.00 92.04 44.01 10.00 100.00 65.02 66.47 49.34 100% 20% 26.72 45.34 49.83 61.11 52.07 36.58 29.36 23.99 23.65 74.50 92.04 45.37 9.00 100.00 65.55 65.65 50.05 
+
+Prefill-Aware 
+
+PyramidInfer 60% 60% 24.92 37.60 40.34 48.92 40.84 22.26 27.23 22.99 22.25 68.50 91.06 45.02 7.50 97.00 66.91 64.74 45.51 GemFilter 60% 10% 25.70 37.97 39.73 60.62 56.04 37.22 28.65 21.18 19.57 63.00 89.36 42.79 6.50 85.50 59.96 41.79 44.72 70% 20% 28.06 43.81 50.56 63.46 59.43 39.25 30.59 23.31 22.03 70.50 90.84 43.26 5.50 97.00 27.56 46.03 46.32 FastKV 60% 10% 25.31 43.71 50.11 61.31 50.85 36.73 26.15 23.45 20.54 75.00 92.04 45.10 10.00 100.00 62.99 65.00 49.27 60% 20% 25.90 46.05 51.29 61.24 50.21 36.15 28.65 23.84 22.57 76.00 92.04 46.20 10.00 100.00 64.68 64.68 49.97 
+
+StructKV 60% 10% 30.06 46.54 51.33 62.36 56.74 38.64 31.12 23.99 25.86 74.5 92.04 45.47 10.00 100 65.02 56.15 50.61 60% 20% 30.21 46.88 51.56 61.43 57.55 38.23 32.1 24.02 25.98 74.5 92.04 45.37 10.00 100 65.02 56.50 50.68 
+
+Table 5: LongBench results on Qwen-2.5-7B-Instruct. 
+
+Single-Doc QA Multi-Doc QA Summarization Few-shot Synthetic Code 
+
+Method Prefill KV NrtvQA Qasper MF-en HotpotQA 2Wiki Musique GovRep QMSum MNews TREC Trivia SAMSum PCount PRe Lcc RB-P Avg. 
+
+Full-context 
+
+Full-context 100% 100% 28.79 44.79 51.77 58.38 46.11 29.23 33.46 24.32 25.91 73.50 88.93 47.92 8.83 100.00 62.03 66.83 49.43 
+
+Decoding-Only 
+
+StreamingLLM 100% 10% 25.85 44.79 49.10 50.73 44.92 24.83 33.20 23.20 25.73 72.00 89.41 47.73 7.91 85.00 61.06 56.75 46.39 100% 20% 27.99 44.79 49.23 51.64 45.12 25.94 33.25 23.45 25.73 72.50 89.96 47.73 8.47 85.00 62.07 57.85 46.92 H2O 100% 10% 22.94 12.61 27.34 16.63 15.81 10.14 33.51 23.47 26.81 69.00 91.15 43.97 6.66 71.00 59.27 53.48 36.49 100% 20% 23.48 15.78 29.43 19.21 20.47 15.13 32.47 21.58 25.63 69.00 91.05 44.41 7.12 75.00 62.17 54.16 37.88 SnapKV 100% 10% 27.68 44.79 50.12 55.72 45.15 27.13 33.25 23.20 25.83 70.50 87.65 47.53 8.15 99.50 61.45 56.42 47.75 100% 20% 28.13 44.79 51.21 55.83 45.82 28.24 33.46 23.85 25.91 72.00 88.56 47.68 8.76 99.50 61.45 56.84 48.25 
+
+Prefill-Aware 
+
+PyramidInfer 60% 60% 25.61 36.76 40.12 41.12 41.45 20.12 26.34 20.78 18.94 67.00 87.12 45.62 4.12 78.00 60.24 57.82 41.95 GemFilter 60% 10% 24.01 43.68 44.27 48.92 43.88 25.23 31.49 22.30 24.13 70.50 88.43 43.58 5.88 87.00 59.65 44.58 44.22 70% 20% 24.13 44.21 45.45 49.56 44.57 27.12 32.19 23.11 24.16 71.00 88.56 44.16 6.22 89.00 60.12 46.78 45.02 FastKV 60% 10% 28.12 44.79 50.12 50.22 43.13 26.25 33.12 24.28 24.18 71.00 86.21 45.62 7.22 99.50 60.22 57.84 46.99 60% 20% 28.24 44.79 50.36 51.34 44.23 26.87 33.32 24.32 24.67 72.00 87.54 45.87 7.65 99.50 61.17 58.87 47.55 
+
+StructKV 60% 10% 28.34 44.79 50.67 56.76 45.61 28.21 32.12 24.32 25.53 72.00 88.12 47.26 8.71 100.00 61.67 60.12 48.39 60% 20% 28.45 44.79 51.25 57.87 45.78 28.78 33.34 24.32 25.67 73.00 88.67 47.82 8.83 100.00 61.78 61.87 48.89 
+
+Table 6: LongBench results on Qwen-2.5-14B-Instruct. 
+
+Single-Doc QA Multi-Doc QA Summarization Few-shot Synthetic Code 
+
+Method Prefill KV NrtvQA Qasper MF-en HotpotQA 2Wiki Musique GovRep QMSum MNews TREC Trivia SAMSum PCount PRe Lcc RB-P Avg. 
+
+Full-context 
+
+Full-context 100% 100% 31.85 48.22 56.53 63.41 50.16 34.82 36.54 27.83 29.41 76.55 91.52 49.83 12.53 100.00 63.85 70.57 52.73 
+
+Decoding-Only 
+
+StreamingLLM 100% 10% 28.53 46.82 52.14 54.21 48.33 28.45 35.12 25.26 27.44 74.05 90.52 48.63 9.54 88.00 61.25 60.56 48.68 100% 20% 30.12 47.14 52.86 55.63 48.85 29.54 35.82 25.93 27.91 75.04 91.02 48.96 10.25 88.00 62.18 61.24 49.41 H2O 100% 10% 25.42 16.23 30.55 20.87 19.54 13.26 35.22 25.65 28.14 71.55 91.82 46.53 8.54 75.00 59.83 57.56 39.11 100% 20% 26.84 19.56 32.85 24.12 23.83 18.54 34.92 24.23 27.56 72.04 92.15 47.12 9.06 78.00 62.54 58.26 40.73 SnapKV 100% 10% 30.54 47.52 53.86 59.25 49.13 31.54 35.42 25.86 27.93 73.55 90.24 49.25 11.23 99.50 61.55 60.58 50.43 100% 20% 30.93 47.84 54.52 59.86 49.63 32.45 35.84 26.55 28.23 75.02 91.06 49.54 11.85 99.50 61.88 61.26 51.00 
+
+Prefill-Aware 
+
+PyramidInfer 60% 60% 27.54 39.82 43.25 45.16 44.53 24.25 29.54 23.42 21.86 70.05 89.24 47.56 5.83 82.00 60.84 61.52 44.78 GemFilter 60% 10% 26.24 46.12 47.55 52.86 46.94 29.53 33.92 24.63 26.54 73.05 90.22 45.83 7.55 90.00 59.86 48.52 46.84 70% 20% 27.15 46.83 48.94 53.52 47.85 31.24 34.63 25.42 26.85 74.55 90.83 46.54 8.24 92.50 60.52 50.23 47.87 FastKV 60% 10% 30.84 47.53 53.92 58.54 48.21 31.86 35.52 26.24 27.63 74.05 90.26 48.54 11.08 99.50 61.53 63.26 50.53 60% 20% 31.22 47.86 54.43 59.24 48.92 32.55 35.92 26.83 28.14 75.52 90.84 49.12 11.53 99.50 62.25 64.12 51.12 
+
+StructKV 60% 10% 31.62 48.14 55.23 61.54 49.82 33.26 36.15 27.24 28.53 75.82 91.26 49.54 12.16 100.00 62.76 66.84 51.87 60% 20% 31.75 48.13 56.12 62.85 49.93 34.46 36.25 27.76 29.24 76.13 91.35 49.66 12.43 100.00 63.15 69.82 52.44 
+
+Table 7: LongBench results on Qwen-2.5-32B-Instruct. 
+
+Single-Doc QA Multi-Doc QA Summarization Few-shot Synthetic Code 
+
+Method Prefill KV NrtvQA Qasper MF-en HotpotQA 2Wiki Musique GovRep QMSum MNews TREC Trivia SAMSum PCount PRe Lcc RB-P Avg. 
+
+Full-context 
+
+Full-context 100% 100% 34.21 50.87 58.43 67.54 53.92 38.65 38.76 30.21 31.89 79.82 92.74 53.15 17.56 100.00 69.87 75.43 55.82 
+
+Decoding-Only 
+
+StreamingLLM 100% 10% 30.84 49.12 54.37 57.65 51.23 32.18 37.15 27.89 29.56 77.34 91.56 50.89 13.45 90.50 66.78 65.43 51.62 100% 20% 32.56 49.87 55.43 59.12 52.34 33.56 37.98 28.45 30.23 78.12 92.15 51.67 14.32 90.50 67.98 66.87 52.57 H2O 100% 10% 27.56 19.34 32.67 23.45 22.56 16.43 36.87 27.45 30.65 74.23 92.65 48.98 11.23 82.50 64.12 61.23 42.00 100% 20% 28.98 22.12 35.23 26.54 26.12 20.87 36.56 26.89 29.87 74.87 93.12 49.65 11.89 85.50 66.23 62.45 43.56 SnapKV 100% 10% 32.87 49.76 55.98 63.12 52.45 35.12 37.56 28.65 30.23 77.23 91.56 52.12 15.34 99.50 68.12 65.67 53.46 100% 20% 33.12 50.23 56.78 63.56 52.89 36.23 37.98 29.34 30.56 78.45 92.12 52.45 16.12 99.50 68.98 66.54 54.05 
+
+Prefill-Aware 
+
+PyramidInfer 60% 60% 29.87 42.76 46.54 49.12 47.34 28.23 31.87 25.98 23.89 73.23 90.56 49.87 9.12 88.50 66.23 65.78 48.06 GemFilter 60% 10% 29.12 48.34 49.87 56.23 50.12 33.45 36.23 27.12 28.78 76.23 91.45 48.12 10.87 94.50 65.34 53.23 49.94 70% 20% 29.89 49.12 51.23 57.12 51.23 34.87 36.98 27.87 29.34 77.45 91.89 48.78 12.12 96.50 66.12 55.67 51.01 FastKV 60% 10% 33.12 49.85 56.78 62.45 51.34 35.67 37.89 28.92 30.15 77.45 91.56 51.89 15.43 99.50 67.89 72.12 53.88 60% 20% 33.56 50.12 57.23 63.23 52.12 36.45 38.34 29.67 30.78 78.89 92.12 52.34 15.98 99.50 68.45 73.12 54.49 
+
+StructKV 60% 10% 33.15 49.65 56.34 64.21 52.24 36.78 38.34 29.87 31.23 79.12 92.45 52.78 15.83 100.00 68.56 73.34 54.62 60% 20% 34.12 50.15 57.67 64.89 53.67 37.42 38.56 30.12 31.34 79.43 92.66 53.01 16.67 100.00 68.72 74.56 55.19 0
+
+11 
+
+22 
+
+33 
+
+44 
+
+55 
+
+66 
+
+77 
+
+88 
+
+99 
+
+> Depth Percent
+
+Full-context 
+
+Average Score = 1.000 
+
+StreamingLLM 
+
+Average Score = 0.201 
+
+SnapKV 
+
+Average Score = 0.988 
+
+> 16k
+> 32k
+> 48k
+> 64k
+> 80k
+> 96k
+> 112k
+> 128k
+
+Context Length 
+
+0
+
+11 
+
+22 
+
+33 
+
+44 
+
+55 
+
+66 
+
+77 
+
+88 
+
+99 
+
+> Depth Percent
+
+GemFilter 
+
+Average Score = 0.938 
+
+> 16k
+> 32k
+> 48k
+> 64k
+> 80k
+> 96k
+> 112k
+> 128k
+
+Context Length 
+
+FastKV 
+
+Average Score = 1.000 
+
+> 16k
+> 32k
+> 48k
+> 64k
+> 80k
+> 96k
+> 112k
+> 128k
+
+Context Length 
+
+StructKV (Ours) 
+
+Average Score = 1.000 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Score
+
+Figure 8: Needle-in-a-Haystack results on LLaMA-3.1-8B-Instruct with 10% KV retention rate.
