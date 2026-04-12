@@ -1,0 +1,649 @@
+Title: ForkKV: Scaling Multi-LoRA Agent Serving via Copy-on-Write Disaggregated KV Cache
+
+URL Source: https://arxiv.org/pdf/2604.06370v1
+
+Published Time: Thu, 09 Apr 2026 00:08:32 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# ForkKV: Scaling Multi-LoRA Agent Serving via Copy-on-Write Disaggregated KV Cache 
+
+# Shao Wang 
+
+Shanghai Jiao Tong University Shanghai, China shaowang@sjtu.edu.cn 
+
+# Rui Ren 
+
+Shanghai Jiao Tong University Shanghai, China renrui@sjtu.edu.cn 
+
+# Lin Gui 
+
+Shanghai Jiao Tong University Shanghai, China guilin@sjtu.edu.cn 
+
+## Abstract 
+
+The serving paradigm of large language models (LLMs) is rapidly shifting towards complex multi-agent workflows where specialized agents collaborate over massive shared contexts. While Low-Rank Adaptation (LoRA) enables the efficient co-hosting of these special-ized agents on a single base model, it introduces a critical memory footprint bottleneck during serving. Specifically, unique LoRA ac-tivations cause Key-Value (KV) cache divergence across agents, rendering traditional prefix caching ineffective for shared contexts. This forces redundant KV cache maintenance, rapidly saturating GPU capacity and degrading throughput. To address this challenge, we introduce ForkKV , a serving sys-tem for multi-LoRA agent workflows centered around a novel mem-ory management paradigm in OS: fork with copy-on-write (CoW). By exploiting the structural properties of LoRA, ForkKV physi-cally decouples the KV cache into a massive shared component (analogous to the parent process’s memory pages) and lightweight agent-specific components (the child process’s pages). To support this mechanism, we propose a DualRadixTree architecture that al-lows newly forked agents to inherit the massive shared cache and apply CoW semantics for their lightweight unique cache. Further-more, to guarantee efficient execution, we design ResidualAttention ,a specialized kernel that reconstructs the disaggregated KV cache directly within on-chip SRAM. Comprehensive evaluations across diverse language models and practical datasets of different tasks demonstrate that ForkKV achieves up to 3.0x the throughput of state-of-the-art multi-LoRA serving systems with a negligible im-pact on generation quality. 
+
+## CCS Concepts 
+
+• Information systems → Data management systems ; • Com-puting methodologies → Distributed computing methodolo-gies ; Machine learning .
+
+## Keywords 
+
+Large Language Models, LoRA, Multi-Agent Systems, KV Cache 
+
+## 1 Introduction 
+
+The serving paradigm of Large Language Models (LLMs) has rapidly evolved from simple chatbots to complex autonomous agentic work-flows, such as coding assistants equipped with advanced reasoning, planning, and tool-call capabilities [ 5, 45 , 54 ]. These workflows operate as collaborative pipelines of specialized LLM nodes, termed 
+
+agents , each dedicated to different subtasks. A defining charac-teristic of these multi-agent workloads is their context structure. Agents typically share a massive static context, often dominated by a lengthy prefix like extensive system prompts or a large code-base [ 35 , 65 , 74 ]. From this shared prefix, agents fork their own distinct context from dynamic outputs, such as reasoning steps from previous agents and historically acquired tool observations. For example, to resolve a Github issue, a coding assistant uses codebase as its shared static context and sequentially triggers navigation, generation, and testing agents, where each agent builds their own context based on previous agents. However, successfully executing such diverse subtasks requires distinct agent capabilities. A single monolithic model often lacks the flexibility to handle every stage op-timally, necessitating fine-tuning the base model with task-specific datasets to serve specialized agents effectively [9, 47, 50, 72]. To tailor foundational models for these diverse tasks in a work-flow, Parameter-Efficient Fine-Tuning (PEFT) [ 41 ] techniques, par-ticularly Low-Rank Adaptation (LoRA) [ 21 ], offer a promising solu-tion. By freezing the pretrained weights and updating only small low-rank matrices known as adapters , LoRA maintains high gener-ation quality while introducing minimal parameter overhead [ 15 ,21 , 34 ]. For example, LoRA adapters with a low-rank dimension of 16 trained on Llama3.1-70B [ 42 ] account for only 0.28% of the orig-inal model size (approximately 400MB v.s. 140GB). Such extreme memory efficiency fundamentally shifts how systems manage con-current workloads. Instead of deploying multiple monolithic mod-els, the serving engine can concurrently host multiple specialized agents on a single shared base model by dynamically swapping these lightweight adapters. Many modern agentic applications have already adopted this efficient architectural design [ 24 , 36 , 38 , 71 ], which we refer to as multi-LoRA agent serving in this paper. While LoRA successfully minimizes the memory overhead of model weights, multi-agent serving still suffers from a critical mem-ory footprint bottleneck caused by the duplicated unshareable Key-Value states (i.e., KV cache) across agents. In traditional monolithic deployment, serving engines avoid memory redundancy through 
+
+prefix caching [4, 20 , 44 , 74 ]. This technique allows different re-quests to share the KV cache of common prefixes. However, this optimization breaks down in multi-LoRA scenarios. The unique activations produced by each adapter cause the KV cache to di-verge across different agents. Consequently, the system is forced to maintain an independent KV cache for each agent even when they process the exact same context, incurring severe memory footprint overhead. As shown in Figure 1, the overall memory consumption (represented by the deep blue line) scales linearly with the number of agents, rapidly saturating GPU capacity. Specifically, in sequen-tial workflows like ReAct [ 68 ], context reuse fails entirely when the pipeline switches to a new LoRA agent. In parallel workflows like MapReduce [ 40 ], broadcasting the shared input creates redundant cache copies. Complex agent workflows exacerbate this redundancy, 
+
+> arXiv:2604.06370v1 [cs.DC] 7 Apr 2026 Shao et al. Run 32x concurrent agents within
+> same GPU capacity
+> Base cache is computed once
+> and shared across agents
+
+Figure 1: Context memory usage when serving agents with 32K shared contexts on Llama3-8B, where agents are based on different LoRA adapters and the rank is 16. 
+
+which could lead to severe performance degradation in both latency and throughput [1, 59, 67, 75]. To overcome this memory footprint bottleneck, our key insight is that we can partially share the KV cache across agents by physi-cally decoupling it based on the structural properties of LoRA. We term this partially shared memory layout disaggregated KV cache .The standard LoRA projection 𝑥𝑊 + 𝑥𝐴 𝑖 𝐵 𝑖 intuitively suggests sep-arating the KV cache into a massive base cache ( 𝑏𝐶𝑎𝑐ℎ𝑒 = 𝑥𝑊 ) and a lightweight adapter-specific residual cache ( 𝑟𝐶𝑎𝑐ℎ𝑒 = 𝑥𝐴 𝑖 ) that can reconstruct full projection via 𝑟𝐶𝑎𝑐ℎ𝑒 × 𝐵 𝑖 . This decomposition exposes a significant size asymmetry, where bCache is typically dozens of times the size of rCache due to the low-rank projection of LoRA. Thus, instead of redundantly allocating complete KV cache for agents processing the same context, we globally share the mas-sive 𝑏𝐶𝑎𝑐ℎ𝑒 across agents and only maintain lightweight rCache for each agent. This disaggregated design drastically cuts the per-agent memory footprint, effectively mitigating the memory footprint bot-tleneck. As validated in Figure 1, our approach enables an 8GB KV cache to support 32 × more concurrent agents. Admittedly, sharing 𝑏𝐶𝑎𝑐ℎ𝑒 beyond the first layer is mathemati-cally lossy because adapter-specific activations cause subsequent inputs 𝑥 to diverge across agents. However, this divergence is em-pirically bounded. The transformer architecture provides inherent robustness through its residual connections [ 16 ], and the LoRA adapters preserve necessary task-specific interactions [ 21 , 58 ]. Con-sequently, this aggressive memory optimization maintains a simi-larity for input 𝑥 of over 99.4%, yielding a negligible degradation in generation quality of only 1.60% (see details in Figure 5). Supporting disaggregated KV cache presents several major chal-lenges. First, the system needs to manage the distinct lifecycles of the shared bCache and unique rCache while maintaining the struc-tural dependencies imposed by their mathematical decomposition. As multi-agent collaboration naturally forms multi-branch reason-ing paths, tracking the resulting 1-to-N base-to-residual mappings introduces severe complexity. Second, computing attention scores requires reconstructing KV cache from its disaggregated compo-nents, but naive reconstruction in HBM incurs severe memory and computational overhead. Materializing the full-sized KV cache in HBM for every agent will completely negate the memory savings. Conversely, performing in-place updates on the shared bCache us-ing rCache causes memory access conflicts across agents, forcing sequential execution and destroying intra-batch parallelism. To address the first management challenge, we introduce ForkKV ,a multi-LoRA agent serving system featuring a novel disaggregated KV cache management mechanism inspired by the operating sys-tem (OS) primitive for subprocess creation: fork with copy-on-write (CoW) . ForkKV manages the disaggregated KV cache with the same efficiency as an OS fork: the massive bCache acts as the shareable and read-only memory pages of a parent process, the lightweight 
+
+rCache serves as the unique CoW footprint of a child process, and their dynamic combination represents the complete memory space. To orchestrate this dual-tiered layout in practice, ForkKV intro-duces a coordinated DualRadixTree architecture. When a new agent is launched, ForkKV performs a longest-prefix match to inherit the globally shared read-only bCache , forks the memory space by allocating memory exclusively for the agent’s unique rCache , and updates this dual-tree storage after generation. To tackle the second challenge, we propose fusing KV cache reconstruction directly into the attention kernel. By keeping all in-termediate computations within the fast on-chip SRAM, the design eliminates both the extra HBM allocation and the serialized execu-tion caused by conflicting memory access. Based on this insight, we implement ResidualAttention , an attention kernel specifically tailored for the disaggregated KV cache architecture. In the first step, the kernel streams bCache and rCache directly into SRAM in a block-wise manner and reconstructs Key cache. In the second step, 
+
+ResidualAttention computes separate attention scores for the base and residual components and fuses the final output by leveraging matrix associativity. In this work, we implement ForkKV on top of SGLang [ 74 ], a state-of-the-art LLM serving framework for production. To assess the system, we design end-to-end evaluations based on two typical agentic serving scenarios, ReAct and MapReduce. We conduct these experiments across a wide range of LLMs, including Llama3-8B [ 2 ], Qwen2.5-7B [ 55 ], and Qwen2.5-14B [ 55 ]. Across practical work-loads such as LooGLE [ 30 ], NarrativeQA [ 26 ], and APIGen [ 39 ], 
+
+ForkKV demonstrates significant performance gains over state-of-the-art multi-LoRA serving systems. Specifically, ForkKV achieves 1.25-3.04 × the throughput on ReAct workflows, and 1.68-2.60 × the throughput on MapReduce workflows, with a negligible quality degradation of only 0.71% on average measured by F1-Score [28]. In summary, we make the following contributions: 
+
+• We identify the memory footprint bottleneck in multi-LoRA agent serving, where adapter-specific KV cache divergence makes prefix caching ineffective. 
+
+• We propose ForkKV, a multi-LoRA agent serving system inspired by the OS fork primitive with copy-on-write, uti-lizing a DualRadixTree to disaggregate the KV cache into a shareable base and LoRA-specific residuals. 
+
+• We design ResidualAttention , an attention kernel fusing KV cache reconstruction for disaggregated KV cache layout. 
+
+• We comprehensively evaluate ForkKV across diverse LLMs and datasets, demonstrating significant improvement over state-of-the-art LoRA serving systems. ForkKV : Scaling Multi-LoRA Agent Serving via Copy-on-Write Disaggregated KV Cache 
+
+## 2 Background 
+
+We first introduce the mechanics of LLM serving (§2.1), then analyze the structural properties of LoRA (§2.2), and finally discuss the computational demands of modern agentic workflows (§2.3). 
+
+## 2.1 LLM Serving 
+
+LLMs [ 2 , 13 , 14 , 55 , 64 ] predominantly adopt the Transformer architecture to generate text auto-regressively. During genera-tion, tokens interact with historical context via attention mech-anism [ 3 , 51 , 56 ], where sequential order is typically captured by applying Rotary Position Embedding (RoPE) [ 53 ] to the Query ( 𝑄 )and Key ( 𝐾 ) representations. To avoid redundantly recomputing 𝐾 and 𝑉 tensors for historical tokens at every step, inference engines employ a KV cache . This optimization naturally divides the serving process into two phases: a compute-heavy prefill phase that processes the prompt to popu-late the initial KV cache, and a memory-bound decode phase that auto-regressively generates new tokens by attending to the cached history. This efficiency is further extended across different requests via prefix caching [ 4 , 20 , 44 , 74 ]. By identifying and reusing the KV cache of shared text segments (e.g., system prompts or shared con-text), inference engines significantly accelerate the Time-to-First-Token (TTFT) and optimize overall memory usage [1, 59, 67, 75]. 
+
+## 2.2 Low-Rank Adaptation (LoRA) 
+
+Low-Rank Adaptation (LoRA) [ 21 ] is a prominent Parameter-Efficient Fine-Tuning (PEFT) [ 41 ] designed to mitigate the significant com-putational and memory costs associated with full-parameter fine-tuning. Instead of updating the entire model, LoRA freezes the pretrained weights and injects small trainable low-rank adapter matrices into transformer layers. Formally, for a pretrained weight matrix 𝑊 ∈ R𝑚 ×𝑛 , LoRA 𝑖 
+
+introduces two low-rank matrices 𝐴 𝑖 ∈ R𝑚 ×𝑟 and 𝐵 𝑖 ∈ R𝑟 ×𝑛 , where the rank 𝑟 ≪ 𝑚, 𝑛 . The combined projection is computed as: 
+
+𝑌 = 𝑥𝑊 + 𝑥𝐴 𝑖 𝐵 𝑖 (1) where 𝑥 ∈ R𝑠 ×𝑚 is the input hidden state, and 𝑠 is the number of tokens in a batch (batch size multiplied by sequence length). This computation can be naturally decomposed into two dis-tinct parts. We refer to the projection from the frozen weights, 
+
+𝑥𝑊 ∈ R𝑠 ×𝑛 , as the base model cache ( bCache ), and the interme-diate projection from the first low-rank matrix, 𝑥𝐴 𝑖 ∈ R𝑠 ×𝑟 , as the residual cache ( rCache ). The final projected state can thus be reconstructed via: 
+
+𝑌 = 𝑏𝐶𝑎𝑐ℎ𝑒 + 𝑟𝐶𝑎𝑐ℎ𝑒 × 𝐵 𝑖 (2) This algebraic decomposition reveals two critical properties. First, because 𝑟 ≪ 𝑛 , the bCache is significantly larger than the rCache (e.g., 64 times larger given a typical 𝑛 = 1024 and 𝑟 = 16 ). Second, the output dimension ( 𝑟 ) of the rCache inherently mis-matches the dimension ( 𝑛 ) required by the Rotary Position Em-bedding (RoPE) matrix 𝑅 𝑝 . Consequently, RoPE cannot be directly applied to the rCache. Its application must be deferred until the rCache is projected back to the full 𝑛 -dimensional space via 𝐵 𝑖 .
+
+## 2.3 Agentic Workflow 
+
+Modern LLM applications have evolved into agentic workflows ,which are comprehensive pipelines that decompose complex prob-lems into actionable steps. Each step is typically executed by an individual autonomous agent node. A defining characteristic of these workflows, whether in sequential (e.g.,ReAct [ 68 ]) or parallel (e.g., MapReduce [ 40 ]), is their forked context structure: agents rely on a massive shared static prefix (e.g., a large codebase) and subsequently branch off to build distinct contexts from dynamic outputs like prior reasoning steps and tool observations. As workflows grow more complex, the individual agents within them require highly specialized expertise. Because deploying a separate fully fine-tuned model for each specialized agent node is memory prohibitive [ 10 , 52 ], multi-LoRA serving has emerged as the prevailing paradigm [ 24 , 36 , 38 , 71 ]. By multiplexing task-specific LoRA modules on a single shared base model, systems can efficiently support the diverse agents constituting the workflow while minimizing memory overhead. 
+
+## 3 Motivation 
+
+In this section, we first highlight the critical memory footprint bot-tlenecks of prefix caching in multi-LoRA serving (§3.1). We then demonstrate the potential of context sharing via disaggregated KV cache (§3.2), followed by an analysis of the two primary system challenges this approach introduces (§3.3): the management of dis-aggregated KV cache, and the memory footprint and computational overhead caused by KV cache reconstruction. 
+
+## 3.1 Inefficient Prefix Caching 
+
+Prefix caching significantly reduces Time-to-First-Token (TTFT) and improves throughput in modern LLM serving systems [ 1, 59 ,67 , 75 ]. However, this mechanism relies on the assumption that identical text prefixes yield identical KV cache. This assumption fails in multi-LoRA serving scenarios where requests target distinct adapters. Unique LoRA activations cause KV cache divergence even if the text prefixes are exactly the same. Consequently, the generated KV cache becomes strictly tied to specific adapters and can no longer be shared. The system is therefore forced to compute and store duplicated KV cache for each adapter, rendering traditional prefix caching ineffective. This redundancy becomes exceptionally severe in multi-LoRA agent serving scenarios. The execution context in these workflows is typically dominated by massive shared static inputs such as system prompts, codebases, or internal documents [36], alongside continuously appended intermediate steps. Figure 3 illustrates the throughput of ReAct and MapReduce workflows operating on 32K contexts across varying numbers of distinct concurrent workflows, where each workflow utilizes a completely non-overlapping set of LoRA adapters. As the number of workflows scales from 1 to 8, the throughput for ReAct and MapReduce drops by 90.8% and 90.1% respectively. This degradation occurs because, in both se-quential workflows like ReAct (Figure 2a) and parallel workflows like MapReduce (Figure 2b), the inability to share KV cache across distinct LoRA adapters means agents must repeatedly process the massive static inputs alongside incremental contexts and maintain Shao et al. 𝑖 𝑖 !" Agent Tool Call        
+
+> 12
+> ❌
+> Workflow
+> Context
+> (Cannot reuse gray context because of LoRA switch)
+> (a) ReAct (b) MapReduce
+> 1
+> 24
+> 1
+> 3
+> 123
+> ❌
+
+Figure 2: Failure of reusing KV cache across individual agents using different LoRA adapters. 
+
+Figure 3: End-to-end throughput of prefix caching with dif-ferent number of concurrent workflows. Every individual agent in different workflows uses different LoRA adapters. 
+
+independent KV cache at each reasoning step, which not only in-flates TTFT but also drastically increases memory consumption. As concurrency increases, these redundant KV cache rapidly exhaust GPU memory. This high memory pressure leaves little space for other active requests, severely restricting batch parallelism and causing the observed throughput collapse. 
+
+Takeaway #1: Prefix caching is inefficient in multi-LoRA agent serv-ing scenarios because KV cache cannot be shared across agents with different LoRA adapters, resulting in critical throughput degradation. 
+
+## 3.2 Opportunities of Sharing Contexts 
+
+To mitigate memory contention in multi-LoRA agent serving, our key insight is to replace the traditional unified KV cache with a physically decoupled architecture. We introduce a partially shared memory layout termed the disaggregated KV cache . As established in Section 2.2, the standard LoRA projection 𝑥𝑊 + 𝑥𝐴 𝑖 𝐵 𝑖 natu-rally decomposes the attention states into a massive base cache (𝑏𝐶𝑎𝑐ℎ𝑒 = 𝑥𝑊 ) and a lightweight residual cache ( 𝑟𝐶𝑎𝑐ℎ𝑒 = 𝑥𝐴 𝑖 )that can reconstruct the LoRA projection through 𝑟𝐶𝑎𝑐ℎ𝑒 × 𝐵 𝑖 . This decomposition exposes a significant size asymmetry, where bCache 
+
+is typically dozens of times the size of rCache due to the low-rank projection of LoRA. Our design directly exploits this structural property. Traditional prefix caching, as shown in Figure 4a, redundantly allocates a com-plete KV cache for each concurrent agent. Instead, our approach computes the large 𝑏𝐶𝑎𝑐ℎ𝑒 exactly once and shares it globally across all agents processing identical contexts. Each individual agent then only allocates memory for its own small 𝑟𝐶𝑎𝑐ℎ𝑒 . This theoretical advantage translates into concrete system benefits. Consider 16 KV Cache -1                   
+
+> (a) Prefix Caching: Unified KV Cache
+> Redundantly storing KV cache for each agent
+> (b) ForkKV : Disaggregated KV Cache
+> Reusing bCache across agents, and storing lightweight rCache for each agent
+> rCache -1rCache -N+bCache
+> …
+> …
+> Large Size
+> (N)
+> Small Size
+> (1+N/64)
+> Llama3 -8B with LoRA rank=16: size ( ) = ) x 64
+> KV Cache -2KV Cache -N
+> size ( ) = size (
+> KV Cache -i
+> (xW +xA!B!)=bCache
+> (xW )
+> rCache -i
+> (xA!)+xB!
+
+Figure 4: Memory usage comparison of ForkKV v.s. prefix caching when serving N agents with distinct LoRAs (r=16) on Llama3-8B. bCache and rCache represent base cache and residual cache respectively in disaggregated KV cache layout. 
+
+concurrent agents processing the same 32K context on Llama3-8B. Traditional methods require 4GB of GPU memory per agent, consuming 64GB in total. In contrast, the disaggregated layout re-quires only a single 4GB 𝑏𝐶𝑎𝑐ℎ𝑒 alongside 16 unique 64MB 𝑟𝐶𝑎𝑐ℎ𝑒 
+
+allocations. This reduces the total memory consumption to approx-imately 5GB, yielding an 11.8 × memory efficiency improvement. Consequently, the disaggregated architecture transforms the in-herent decomposability of the KV cache into a critical optimiza-tion opportunity, fundamentally alleviating memory contention in multi-LoRA agent serving. 
+
+Negligible Accuracy Loss. While the disaggregated KV cache significantly improves memory efficiency, sharing a unified base cache beyond the first layer is mathematically lossy. This occurs because adapter-specific activations at each transformer layer cause the exact input state 𝑥 to diverge across agents. However, this ap-proximation introduces minimal error in practice, yielding only a 1.60% accuracy loss on tool calling benchmarks like APIGen , as demonstrated in Figure 5a. This minimal impact is driven by two key factors. First, the residual connections 𝑥 𝑙 +1 = 𝑥 𝑙 + 𝐹 (𝑥 𝑙 ) within the transformer architecture prevent the base state 𝑥 𝑙 from radical drift [ 16 ]. Second, our disaggregated layout explicitly preserves the task-specific interactions between Q, K and V within each LoRA adapter, which are necessary for accurate attention outputs. While residual connections bound the overall state divergence, high gen-eration quality still requires the attention mechanism to correctly extract task-specific features. Previous studies demonstrate that the effectiveness of LoRA relies on joint optimization of these QKV pro-jections [ 21 , 58 ]. Our disaggregated layout explicitly preserves this mechanism by computing a dedicated adapter cache for each agent. Therefore, every adapter applies its unique K and V transformations to the shared context. This guarantees accurate attention outputs and prevents errors from compounding in the residual stream. As a result, our method maintains an input state cosine similarity of over 99.4% across all layers compared to standard prefix caching (Figure 5b). In contrast, the full reuse baseline entirely shares the KV cache and breaks the necessary QKV coadaptation. This leads to ForkKV : Scaling Multi-LoRA Agent Serving via Copy-on-Write Disaggregated KV Cache  
+
+> (a) Generation Quality (b) Similarity of Input x
+
+Figure 5: ForkKV maintains comparable (a) generation qual-ity and (b) input x similarity compared to prefix caching. Experiments are conducted on APIGen dataset. 
+
+inaccurate attention outputs that progressively accumulate, drop-ping the cache similarity to approximately 92.4% and causing a severe 21.0% accuracy loss (Figure 5). 
+
+Limitations of Prior Approaches. Existing multi-LoRA agent serving systems are fundamentally trapped in a dilemma between memory scalability and generation accuracy. Maintaining inde-pendent KV cache for each adapter preserves accuracy but incurs prohibitive memory overhead, making high-concurrency deploy-ments unfeasible. Conversely, as illustrated above, entirely sharing the cache through a full reuse paradigm alleviates memory pres-sure but severely degrades generation quality. To navigate this bottleneck, recent studies have explored selective KV cache recom-putation [ 19 , 67 ]. However, these techniques are explicitly designed for single-model environments and fail to manage the state diver-gence across multiple agents. While DroidSpeak [ 36 ] extends cache sharing to multi-model scenarios by recomputing critical layers, it still treats the KV cache as an indivisible monolithic unit, missing a critical opportunity to minimize the memory footprint through structural decoupling. Overall, these fundamental limitations ne-cessitate a new disaggregated KV cache architecture tailored for multi-LoRA agent serving. 
+
+Takeaway #2: Replacing the monolithic KV cache with a shared base and an isolated residual significantly reduces memory consumption for concurrent agents without compromising on generation quality. 
+
+## 3.3 Challenges 
+
+While a disaggregated KV cache architecture maximizes context sharing with negligible accuracy loss, realizing these benefits ex-poses two fundamental challenges in system design. 
+
+Managing Disaggregated KV Cache. The primary challenge lies in managing the distinct lifecycles of the bCache and rCache 
+
+while maintaining the structural dependencies imposed by their mathematical decomposition. This difficulty stems from their dif-ferent access patterns. The massive bCache acts as a shared foun-dation accessed by multiple concurrent agents. Conversely, the lightweight rCache is strictly tied to individual agents using differ-ent LoRA adapters. Existing serving systems [ 27 , 52 , 74 ] typically assume an indivisible KV cache. They manage these states under a single lifecycle within a unified memory pool, inherently lacking the structural abstraction required for a disaggregated memory architecture. Furthermore, as multi-agent collaboration naturally forms multi-branch reasoning paths, tracking the resulting 1-to-N base-to-residual mappings within a unified pool introduces severe complexity when resolving context dependencies. These structural limitations therefore necessitate a novel caching abstraction specif-ically tailored for the disaggregated KV cache layout. 
+
+KV Cache Reconstruction. Although decomposing the KV cache improves memory efficiency, computing accurate attention scores requires reconstructing KV cache from its disaggregated compo-nents. This requirement introduces a critical challenge because naive HBM-based reconstruction methods incur severe memory footprint and computational overhead. For instance, materializing a full-sized KV cache in HBM for every agent prior to attention com-putation completely negates our intended memory savings. An al-ternative approach involves directly updating the shared bCache in place using LoRA projections recovered from the rCache . However, this operation causes memory access conflicts across concurrent agents, forcing sequential execution and destroying intra-batch parallelism. Consequently, we must design a reconstruction mecha-nism that preserves both memory efficiency and batched execution, thereby enabling high-performance inference under the disaggre-gated KV cache architecture. 
+
+## 4 Overview and Key Ideas 
+
+To fully exploit the opportunities of context sharing in multi-LoRA agent serving scenarios, we need to address two challenges: the management of disaggregated KV cache, and the memory footprint and computational overhead caused by KV cache reconstruction. In this paper, we propose ForkKV , a multi-LoRA agent serving sys-tem that improves throughput using an OS-inspired disaggregated cache management mechanism and a novel attention kernel. In this section, we summarize two key ideas behind our system: 
+
+1. OS-Inspired Disaggregated Cache Management. Managing a disaggregated KV cache requires a novel memory abstraction. Traditional unified pools fail to accommodate the distinct lifecycles and structural dependencies of shared and unique memory com-ponents. To bridge this gap, ForkKV introduces a DualRadixTree architecture. As shown in Figure 7, this structure natively supports the disaggregated layout by physically separating the management of the massive base cache from the lightweight residual cache. To orchestrate this decoupled memory architecture, we introduce an operating system inspired fork semantics with copy-on-write. As demonstrated in Figure 6, when a new agent is launched, it forks the cache state from an existing agent in two steps. First, the new agent inherits the globally shared base cache which contains the same context in the base radix tree. This process is analogous to a newly forked OS process mapping the read-only physical pages of its parent. Second, the agent allocates exclusive memory for its unique residual cache in the residual radix tree. This part serves as the child process’s isolated copy-on-write footprint for the new agent. Together, the dual-tree design and fork semantics trans-late our theoretical decoupling into a practical system design that systematically resolves the memory management complexity of disaggregated KV cache. 
+
+2. ResidualAttention. KV cache reconstruction incurs severe memory and computational overhead when operating in HBM. Shao et al. Phys  
+
+> Page
+> Phys
+> Page
+> fork Parent
+> Process
+> Child
+> Process
+> Copy -on -Write
+> Phys
+> Page
+> reuse d
+> CPU Memory
+> (a) OS: Create child process Former
+> Agent
+> bCache
+> rCache
+> Current
+> Agent
+> rCache
+> fork
+> bCache
+> reuse d
+> Copy -on -Write
+> RadixTree
+> (base )
+> RadixTree
+> (residual) (b) ForkKV: Create new agent
+
+Figure 6: ForkKV use OS-inspired fork semantics to create memory space for new agents with copy-on-write. 
+
+Previous naive methods struggle with either a prohibitive HBM allocation or a severe degradation of intra-batch parallelism. To address this challenge, we propose fusing KV cache reconstruc-tion directly into the attention kernel. By keeping all intermediate computations within the fast on-chip SRAM, this design eliminates both the extra HBM allocation and the serialized execution caused by conflicting memory accesses. Based on this insight, we implement ResidualAttention , an at-tention kernel specifically tailored for the disaggregated KV cache architecture. Rather than assuming a monolithic KV cache layout, ResidualAttention streams the decoupled bCache and rCache di-rectly into the SRAM in a block-wise manner. Inside the SRAM, the kernel first reconstructs the LoRA residuals of K using up-projection and a deferred RoPE operation. It then computes attention scores separately for the base and residual components and fuses the final output by leveraging matrix associativity. Through this algorithm and system co-design, ResidualAttention preserves the memory savings enabled by the disaggregated KV cache while ensuring high-throughput batched execution for concurrent agents. 
+
+System Workflow. Figure 7 illustrates the execution pipeline of 
+
+ForkKV . Upon receiving an agent request, the system enqueues it into the queue. The scheduler retrieves the request, parses the agent context, and then queries the DualRadixTree to perform a prefix matching against the existing base cache. To construct the memory state for the new agent, the system inherits this matched base cache and allocates an exclusive memory region for the residual cache of the specified adapter. Following memory allocation, the scheduler dispatches the request to the agent runner, where ForkKV loads the requested LoRA adapters and establishes the agent loop to inter-leave model reasoning with external tool invocations. At the core of the agent runner is the GPU executor, which serves concurrent inference workloads across multiple agents. During execution, the cache controller directly loads and stores the base and residual cache according to the memory regions assigned by the scheduler. Operating on these retrieved data blocks, our custom ResidualAt-tention kernel computes attention natively over the disaggregated memory layout. Finally, the agent runner returns the generated outputs to the scheduler to formulate the client response. Request Queue    
+
+> …
+> Scheduler
+> LLMs
+> ar e
+> …
+> RadixTree
+> (base cache)
+> (token_id )
+> LLMs LLMs
+> are
+> …
+> …
+> …
+> (token_id ,agent_id )
+> RadixTree
+> (residual cache)
+> DualRadixTree ( §5.2)
+> Manage
+> Agent Runner
+> …
+> LoRA Adapters
+> Load Offload
+> GPU Executor
+> Dispatch
+> Results
+> Store
+> Agent
+> Requests
+> Agent
+> Response
+> Agent Loop
+> Load
+> …
+> Residual
+> Attention
+> (§5.3)
+> Cache
+> Controller
+> (§5.1)
+> are
+
+Figure 7: Overview of ForkKV 
+
+## 5 System Design 5.1 Disaggregating KV Cache 
+
+Current unified KV cache design introduces a severe memory foot-print bottleneck during concurrent multi-LoRA agent serving. As illustrated in Figure 8(a), to generate Key and Value tensors, the system projects the input 𝑥 through both the base weight 𝑊 and the LoRA matrices 𝐴 𝑖 and 𝐵 𝑖 . Crucially, for Key tensors, the Ro-tary Position Embedding (RoPE) is applied to this fully merged result. The attention mechanism then caches the complete tensor 
+
+𝑥𝑊 + 𝑥𝐴 𝑖 𝐵 𝑖 into a unified KV Cache. This design inherently binds the shared base projection 𝑥𝑊 to adapter-specific updates, forcing every active agent to maintain an isolated, full-sized KV cache. To eliminate this storage redundancy, ForkKV introduces a dis-aggregated KV cache architecture, as depicted in Figure 8(b). For Key and Value processing, ForkKV decouples the base model ac-tivations from the adapter states. The system first computes the base projection 𝑥𝑊 , applies RoPE to the Key tensors, and stores the resulting states in a unified base cache ( bCache ). Concurrent requests with shared contexts can then access this bCache via zero-copy sharing. To further minimize memory allocation, ForkKV 
+
+avoids computing the full adapter offset 𝑥𝐴 𝑖 𝐵 𝑖 . Instead, the system truncates the computation at the LoRA down-projection and stores the intermediate result 𝑥𝐴 𝑖 directly in a residual cache ( rCache ). Notably, the RoPE operation is not applied to rCache because their output dimensions mismatch. The low-rank property of the 𝐴 𝑖 
+
+matrix ensures that the rCache maintains a minimal memory foot-print, drastically reducing the overall memory requirements of the serving system. To quantify these memory savings mathematically, we formulate the memory consumption ratio 𝑀 𝑅 between the unified and disag-gregated KV cache architectures. Consider 𝑁 concurrent agents processing a shared context sequence of length 𝑠 :
+
+𝑀 𝑅 = 𝑀𝑒𝑚 𝑑𝑖𝑠𝑎𝑔𝑔. 
+
+𝑀𝑒𝑚 𝑢𝑛𝑖 𝑓 𝑖𝑒𝑑 
+
+= 𝑀𝑒𝑚 (𝑥𝑊 ) + 𝑁 · 𝑀𝑒𝑚 (𝑥𝐴 𝑖 )
+
+𝑁 · 𝑀𝑒𝑚 (𝑥𝑊 + 𝑥𝐴 𝑖 𝐵 𝑖 )
+
+= 𝑠𝑛 + 𝑁 · 𝑠𝑟 𝑁 · 𝑠𝑛 = 1
+
+𝑁 + 𝑟 𝑛 
+
+(3) ForkKV : Scaling Multi-LoRA Agent Serving via Copy-on-Write Disaggregated KV Cache 𝑥        
+
+> 𝑊 A!
+> 𝑥 𝑊 𝑥 A!
+> B!
+> xW+xA!B!RoPE
+> KV Cache
+> 𝑥
+> 𝑊 A!
+> 𝑥 𝑊 𝑥 A!
+> rCache bCache
+> RoPE
+> (a) Unified KV Cache (b) Disaggregated KV Cache
+> ❌
+> Attention Kernels
+
+Figure 8: Unified v.s. Disaggregated KV Cache. Note that for simplicity, the cache blocks represent the storage of both K and V, but RoPE is only applied to K prior to caching. 
+
+where 𝑛 denotes the output dimension of the base weight matrix 
+
+𝑊 , and 𝑟 represents the rank of the LoRA down-projection matrix 
+
+𝐴 𝑖 . In standard configurations, 𝑟 ≪ 𝑛 (e.g., 𝑛 = 1024 and 𝑟 = 16 ). Consequently, as the number of concurrent agents 𝑁 grows large, the term 1/𝑁 approaches 0, reducing the memory ratio to 𝑀 𝑅 ≈
+
+𝑟 /𝑛 . This theoretical bound demonstrates that ForkKV drastically minimizes the per-agent memory consumption, allowing the system to support massive multi-LoRA agent workflows without memory exhaustion. 
+
+## 5.2 Tree-Structured Cache with Fork Semantics 
+
+DualRadixTree Architecture. Managing a disaggregated KV cache requires a novel memory abstraction because traditional unified pools fail to accommodate the distinct sizes and lifecycles of shared and unique memory components. To bridge this gap and efficiently manage the memory space of concurrent agents, we in-troduce the DualRadixTree architecture that physically decouples the unified KV cache into a globally shared bCache and an agent-specific rCache , as shown in Figure 9. The bCache is managed by a base RadixTree where the search key 𝐾𝑒𝑦 𝑏𝑎𝑠𝑒 is defined strictly by the sequence of token ids. This design guarantees that all con-current requests possessing shared contexts can access the same underlying memory in the bCache via zero-copy mechanisms. In parallel with the base structure, we deploy a residual RadixTree to index the rCache and manage the distinct generation branches of individual agents. Because the rCache is unique to each agent, the search key 𝐾𝑒𝑦 𝑟𝑒𝑠 in this residual tree extends the traditional token sequence with a specific agent id. Through this decoupled structural design, the DualRadixTree provides the exact memory abstraction required to materialize the disaggregated KV cache paradigm. By maintaining a unified logical memory view for each agent, this data structure successfully eliminates the need to allocate a full-sized KV cache for every agent as traditional prefix caching requires. 
+
+Fork Semantics with CoW. To orchestrate this decoupled memory architecture for incoming agent requests, ForkKV introduces an OS-inspired fork semantics with CoW, as demonstrated by Figure 9. When a new agent is launched, the system first queries the base RadixTree to perform prefix matching to identify the longest shared smart       
+
+> LLMs
+> are can
+> useful help
+> Step1: Inherit
+> (Extend if miss)
+> smart
+> LLMs
+> are can
+> useful help
+> study
+> can
+> help
+> LLMs
+> study Step2: Copy -on -Write
+> bCache rCache
+> Agent Memory Space
+> +
+> RadixTree (base)
+> 𝐾𝑒𝑦 !"#$ = (token_id)
+> RadixTree (residual)
+> 𝐾𝑒𝑦 %$# = (token_id, agent_id )
+> LLMs
+> can
+> help
+> stud y
+> New Agent
+> (shared across agents) (unique to each agent)
+
+Figure 9: DualRadixTree Architecture. A new agent logically forks its memory space from former agents by inheriting the shared bCache (Step1: Prefix Match) and exclusively allo-cating the rCache (Step2: Copy-on-Write). 
+
+context. If input tokens miss the existing prefix, the system dynam-ically extends the tree by allocating new shared memory blocks. The agent then inherits this context by mapping the globally shared 
+
+bCache into its logical memory space. This process is analogous to a newly forked OS process mapping the read-only physical pages of its parent. Following this inheritance, the system executes a CoW operation to allocate exclusive memory blocks for the rCache .These unique allocations are tracked within the residual RadixTree to store an isolated state for the agent, functioning analogously to the private CoW pages of a child process. By orchestrating this explicit two-step allocation, our fork semantics establish a dynamic management mechanism for the logical memory space of agents, translating theoretical memory decoupling into a practical system design alongside the DualRadixTree architecture. 
+
+Decoupled Eviction Policy. In traditional prefix caching, the monolithic memory layout enforces a rigid eviction process: a cached sequence is evicted as an indivisible unit, resulting in a binary state of either a complete cache hit or a complete miss. How-ever, directly applying this eviction policy to the disaggregated KV cache creates a strict architectural mismatch because the bCache and rCache exhibit fundamentally different memory footprints and access frequencies. A cascading eviction mechanism would couple these two memory pools, forcing a low-contention pool to discard active cache, thereby triggering entirely avoidable recomputation. To eliminate this redundancy, ForkKV introduces a decoupled eviction policy that isolates the lifecycle management of the base and residual caches by assigning independent Least Recently Used (LRU) states to each radix tree. This architectural isolation pro-vides critical flexibility under heavy memory pressure. If a massive 
+
+bCache node is evicted while its lightweight rCache counterpart persists, the scheduler avoids treating subsequent requests as com-plete cache misses. Instead, the system executes a partial hit where the execution engine recomputes only the missing base projection 
+
+𝑥𝑊 , reinserts it into the base tree, and directly reuses the surviving 
+
+𝑥𝐴 𝑖 from the residual tree. This graceful degradation maximizes the overall cache hit rate for complex multi-round agent workflows. Shao et al. 
+
+## 5.3 ResidualAttention 
+
+Computing attention scores accurately requires reconstructing the KV cache from its disaggregated components. To minimize HBM memory and computational overhead, we fuse KV cache recon-struction directly into the attention computation within the SRAM. Driven by this architectural choice, we implement ResidualAtten-tion , an attention kernel specifically tailored for the disaggregated KV cache architecture. As illustrated in Algorithm 1, our approach executes in three distinct stages. The first stage conducts on-the-fly Key cache reconstruction by streaming block-wise tiles and apply-ing deferred RoPE operations. Next, the kernel computes attention scores independently for the base and residual components. Finally, the third phase leverages matrix associativity to fuse the attention output. By executing these steps entirely on-chip, ResidualAttention 
+
+maps the decoupled cache layout into a high-throughput parallel ex-ecution model. The following subsections detail the core algorithm and architectural innovations driving this design. 
+
+On-the-fly Key Reconstruction with Deferred RoPE. The left portion of Figure 10 illustrates the cache reconstruction and atten-tion computation process during the first stage. Our kernel streams the decoupled base cache 𝐾 𝑏𝑎𝑠𝑒 and residual cache 𝐾 𝑟𝑒𝑠 directly into the fast on-chip SRAM in a block-wise manner. Once inside the SRAM, the kernel reconstructs the complete cache on the fly. This reconstruction proceeds in two steps. First, we reconstruct the full-size LoRA Key cache 𝐾 𝑙𝑜𝑟𝑎 derived from 𝑥𝐴 𝑖 𝐵 𝑖 . We perform a LoRA up-projection using 𝐾 𝑟𝑒𝑠 𝐵 𝑘 and then apply RoPE to the resulting intermediate state. As detailed in Section 5.1, RoPE on rCache is deferred during the earlier linear projection phase due to an output dimension mismatch. Applying it at this stage equips 𝐾 𝑙𝑜𝑟𝑎 with the exact token position information. Second, we materialize the com-bined Key cache using 𝐾 𝑏𝑎𝑠𝑒 and the processed residual components 
+
+𝐾 𝑙𝑜𝑟𝑎 . The kernel then computes the attention logits 𝑄𝐾 𝑇 and per-forms subsequent operations like the online softmax update. This integrated approach successfully avoids memory-expensive cache reconstruction operation in HBM and inefficient sequential in-place cache updates. Simultaneously, it guarantees the accuracy of the disaggregated KV cache transformation by ensuring the correct preservation of positional encodings. 
+
+Fusing Attention Scores via Matrix Associativity. After obtain-ing the attention logits, a straightforward approach to compute the final output Í 𝑠𝑚 (𝑄𝐾 𝑇 )𝑉 is to reconstruct the Value cache 
+
+𝑉 𝑏𝑎𝑠𝑒 + 𝑉 𝑟𝑒𝑠 𝐵 𝑣 inside the inner loop responsible for iterating over sequence blocks. This approach mirrors the reconstruction mecha-nism used for the Key cache. However, this eager projection method introduces prohibitive computational overhead and memory foot-print. Executing the LoRA up-projection operation 𝑉 𝑟𝑒𝑠 𝐵 𝑣 at every loop step not only introduces significant redundant computation, but also demands large SRAM capacity to store this intermediate tensor, which inevitably triggers SRAM contention and severely degrades GPU parallelism. To resolve these inefficiencies, we decouple the attention com-putation for the base and residual components, and then fuse their partial outputs at the very end of the kernel execution. The right portion of Figure 10 illustrates both this decoupled computation and delayed projection process. This strict mathematical equivalence is guaranteed by the associativity of matrix multiplication: 𝑸 : 𝑁 ×𝑑                        
+
+> 𝑸𝑲 𝑻 :𝑁 ×𝑁
+> Outer Loop
+> Inner Loop
+> 𝑲 𝒃𝒂𝒔𝒆
+> 𝑻 :d×𝑁
+> 𝑲 𝒓𝒆𝒔
+> 𝑻 :r×𝑁
+> Compute blocks
+> on SRAM
+> 𝑽 𝒃𝒂𝒔𝒆 :𝑁 ×𝑑
+> 𝑽 𝒓𝒆𝒔 :𝑁 ×𝑟
+> 𝒂𝒄𝒄 𝒓 :𝑁 ×𝑟
+> 𝑸𝑲 𝑻 :𝑁 ×𝑁
+> 𝐾 =𝐾 '()* +𝐾 +,-(
+> 𝑎𝑐𝑐 =sm (𝑄𝐾 .)𝑉 '()*
+> 𝑎𝑐𝑐 -=sm (𝑄𝐾 .)𝑉 -*)
+> 𝒂𝒄𝒄 :𝑁 ×𝑑
+> 𝐾 +,-( =RoPE (𝐾 -*) 𝐵 /)
+> 𝑶 =sm (𝑸𝑲 𝑻 )𝑽 =𝒂𝒄𝒄 +𝒂𝒄𝒄 𝒓 ×𝑩 𝒗
+> Outer Loop
+> Inner Loop
+> Store blocks
+> 𝑩 𝒌 /𝑩 𝒗 :r×𝑁 (LoRA up proj )
+
+Figure 10: Illustration of ResidualAttention. Algorithm 1 ResidualAttention 
+
+Require: Query blocks 𝑄 
+
+Require: bCache blocks (𝐾 𝑏𝑎𝑠𝑒 , 𝑉 𝑏𝑎𝑠𝑒 ), rCache blocks (𝐾 𝑟𝑒𝑠 , 𝑉 𝑟𝑒𝑠 )
+
+Require: LoRA up-projection weights 𝐵 𝑘 , 𝐵 𝑣  
+
+> 1:
+
+Initialize: acc ← 0𝑀 ×𝐷 𝑣 , acc 𝑟 ← 0𝑀 ×𝑅  
+
+> 2:
+
+Initialize states: 𝑚 ← −∞ , 𝑙 ← 0 
+
+> 3:
+
+Load 𝐵 𝑘 , 𝐵 𝑣 to SRAM  
+
+> 4:
+
+for each block 𝑛 in sequence do  
+
+> 5:
+
+// Stage1: On-the-fly Key Reconstruction with Deferred RoPE  
+
+> 6:
+
+Load 𝑄 , 𝐾 𝑏𝑎𝑠𝑒 , 𝑉 𝑏𝑎𝑠𝑒 , 𝐾 𝑟𝑒𝑠 , 𝑉 𝑟𝑒𝑠 to SRAM  
+
+> 7:
+
+Load cached sin-cos table for RoPE to SRAM  
+
+> 8:
+
+𝐾 𝑙𝑜𝑟𝑎 ← RoPE (𝐾 𝑟𝑒𝑠 · 𝐵 𝑘 ) 
+
+> 9:
+
+𝐾 ← 𝐾 𝑏𝑎𝑠𝑒 + 𝐾 𝑙𝑜𝑟𝑎  
+
+> 10:
+
+// Stage2: Compute Separate Attention Scores (base/residual)  
+
+> 11:
+
+𝑆 ← 𝑄 · 𝐾 𝑇 · scale  
+
+> 12:
+
+𝑚 𝑛𝑒𝑤 ← max (𝑚, max (𝑆 ))  
+
+> 13:
+
+𝑙 𝑛𝑒𝑤 ← 𝑙 · exp (𝑚 − 𝑚 𝑛𝑒𝑤 ) + Í exp (𝑆 − 𝑚 𝑛𝑒𝑤 ) 
+
+> 14:
+
+𝑃 ← exp (𝑆 − 𝑚 𝑛𝑒𝑤 ) 
+
+> 15:
+
+acc ← acc · exp (𝑚 − 𝑚 𝑛𝑒𝑤 ) + 𝑃 · 𝑉 𝑏𝑎𝑠𝑒  
+
+> 16:
+
+acc 𝑟 ← acc 𝑟 · exp (𝑚 − 𝑚 𝑛𝑒𝑤 ) + 𝑃 · 𝑉 𝑟𝑒𝑠  
+
+> 17:
+
+𝑚 ← 𝑚 𝑛𝑒𝑤 , 𝑙 ← 𝑙 𝑛𝑒𝑤  
+
+> 18:
+
+end for  
+
+> 19:
+
+// Stage3: Fuse Attention Scores via Matrix Associativity  
+
+> 20:
+
+acc 𝑓 𝑖𝑛𝑎𝑙 ← acc + acc 𝑟 · 𝐵 𝑣  
+
+> 21:
+
+Write 𝑂 ← acc 𝑓 𝑖𝑛𝑎𝑙 /𝑙 to HBM  
+
+> 22:
+
+return 𝑂 ∑︁ 
+
+𝑠𝑚 (𝑄𝐾 𝑇 )𝑉 =∑︁ 𝑠𝑚 (𝑄𝐾 𝑇 ) · ( 𝑉 𝑏𝑎𝑠𝑒 + 𝑉 𝑟𝑒𝑠 𝐵 𝑣 )
+
+=∑︁ 𝑠𝑚 (𝑄𝐾 𝑇 )𝑉 𝑏𝑎𝑠𝑒 + ( ∑︁ 𝑠𝑚 (𝑄𝐾 𝑇 )𝑉 𝑟𝑒𝑠 )𝐵 𝑣 
+
+(4) where 𝑉 𝑏𝑎𝑠𝑒 and 𝑉 𝑟𝑒𝑠 denote the base and residual Value cache re-spectively, and 𝐵 𝑣 is the LoRA up-projection weight matrix. We push the 𝐵 𝑣 multiplication entirely out of the inner loop and com-pute this up-projection only once at the end of the kernel. To sup-port the decoupled attention computation, the kernel maintains a lightweight global accumulator for residual attention scores along-side the base cache. By leveraging this approach, we drastically minimize both computational overhead and the SRAM allocation. ForkKV : Scaling Multi-LoRA Agent Serving via Copy-on-Write Disaggregated KV Cache 
+
+## 6 Implementation 
+
+We implement ForkKV on top of SGLang (v0.5.6) with approxi-mately 3K lines of Python code and custom Triton kernels. Our implementation introduces system-wide modifications across the control plane, model executor, and kernel layers to natively support the disaggregated KV cache layout. 
+
+Disaggregated KV Cache. To support the physical decoupling of the KV cache at runtime, we design a custom LoRA replacement module for the linear projection layer. This module separates the adapter-specific residual activations from the base model activa-tions and store these residual activations into a dedicated KV cache pool indexed by the residual RadixTree. 
+
+Control Plane and DualRadixTree Storage. We extend the na-tive RadixCache of SGLang into a coordinated DualRadixTree ar-chitecture to manage the decoupled memory layout. We also adapt the scheduler to orchestrate this two-tiered KV cache pool across phases like chunked prefill, non-chunked prefill, and decode. 
+
+ResidualAttention. We implement this custom hardware-aware attention kernel in Triton. This kernel is adapted from the RadixAt-tention kernel of SGLang and have two separate versions for prefill and decode. This structural separation allows the attention mecha-nism to cater specifically to the distinct memory access patterns and workload characteristics of each execution phase. 
+
+## 7 Evaluation 7.1 Setup 
+
+Models and Hardware Settings. We evaluate ForkKV on three open-source large language models: Llama3-8B [ 2], Qwen2.5-7B [ 55 ], and Qwen2.5-14B [55]. All models are deployed in BF16 precision. We conduct our end-to-end experiments across two hardware plat-forms: a server equipped with a single L40 GPU and 128 vCPUs, and a server containing two RTX 5000 GPUs with 48 vCPUs. Specif-ically, Llama3-8B is served on the L40 GPU, while Qwen2.5-7B and Qwen2.5-14B are evaluated on one and two RTX 5000 GPUs respectively. 
+
+System Performance Benchmark. To evaluate the serving through-put and efficiency of ForkKV , we benchmark under two represen-tative agentic execution patterns: 
+
+• ReAct [ 68 ]: An iterative reasoning and acting paradigm where the context window grows sequentially. We use it to evaluate KV cache management efficiency during sustained, multi-turn agent workloads. 
+
+• MapReduce [ 40 ]: A parallel processing workflow that divides a large task into multiple concurrent subtasks. We use it to stress-test ForkKV ’s memory sharing capability when handling mas-sive simultaneous forks from a single shared context. To simulate the scenarios where concurrent agents operate on the same context and execute different tasks, we synthesize the model input using two components: a massive static part shared across all agents and a dynamic part containing task-specific instruc-tions. We construct these two-stage inputs using three long-context datasets, as summarized in Table 1. LooGLE [30 ] features long docu-ments from various sources such as arXiv, Wikipedia, and movie/TV scripts. In our evaluation, we leverage the movie/TV scripts as the static part and use the corresponding questions as the dynamic part. LooGLE NarrativeQA APIGen Static Context 32742 49119 64911 Avg. Dynamic Instr 24 12 23 
+
+Table 1: The length of shared static context and task-specific dynamic instructions (average) in the sampled datasets. 
+
+NarrativeQA [ 26 ] is a widely acknowledged long-context dataset for testing reading comprehension capabilities, featuring documents even longer than those in LooGLE. We follow a similar methodol-ogy here by using the narrative document as the static part and the comprehension question as the dynamic part. Finally, APIGen [ 39 ]is a tool-calling dataset designed to evaluate instruction-following and structured output capabilities. We aggregate the available tool descriptions to construct the large shared static context and use the specific instructions as the dynamic inputs. Furthermore, we configure 8 agent workflows for both the Re-Act and MapReduce paradigms, where baselines face severe per-formance degradation. In these workflows, each individual agent utilizes a distinct LoRA adapter with a rank of 16, following the setting in prior works [ 10 , 77 ]. Figure 2 illustrates the underlying architecture of these workflows. We generate continuous requests with an average arrival rate of 2 requests per second to evaluate the system under sustained heavy load. Within each workflow loop, we simulate agent-tool interactions by injecting a constant latency of 0.1 seconds and returning a mock tool response of 100 random tokens. For the agent generation step, we set the maximum output length to 256 tokens. 
+
+System Performance Baselines. We compare ForkKV against two baselines in the system performance benchmark: 
+
+• vLLM [ 27 ]: A state-of-the-art serving engine that utilizes Page-dAttention for efficient KV cache memory management. It also implements prefix caching for efficient KV cache reuse. We use vLLM v0.12.0 as our baseline. 
+
+• SGLang [ 74 ]: Another state-of-the-art framework featuring Radix-Attention, which enables automatic KV cache reuse for shared-prefix requests. We use SGLang v0.5.6 as our baseline. We select SGLang and vLLM as our baselines because they provide state-of-the-art LLM serving capabilities. Both frameworks inte-grate a comprehensive set of performance acceleration features, ranging from widely adopted mechanisms like prefix caching to advanced techniques such as CUDA Graphs and asynchronous scheduling. While dedicated LoRA serving systems [ 10 , 52 , 60 ] also provide specialized LoRA serving capabilities, they generally lack full support for these system-level optimizations. 
+
+Generation Quality Benchmark. To verify that ForkKV intro-duces negligible accuracy loss, we evaluate the generation quality using the following datasets and metrics: 
+
+• HotpotQA [ 66 ]: This is a multi-hop question answering dataset. It’s intended to evaluate the model’s complex reasoning and information integration capabilities across multiple contexts. We include 200 test cases. Shao et al. 
+
+Figure 11: End-to-end throughput evaluation. The figure compares the serving throughput (tasks/s) of ForkKV against prefix caching baselines on ReAct and MapReduce workloads across three models and three datasets. 
+
+Figure 12: Performance under varying number of workflows with Llama3-8B on the LooGLE dataset. Every individual agent in different workflows uses different LoRA adapters. 
+
+• APIGen [ 39 ]: In addition to system benchmarking, we utilize 200 test cases from APIGen to benchmark the model’s instruction-following and structured API calls generation capabilities. We adopt F1-score [28 ], a metric that measures the similarity be-tween the model’s output and the ground-truth answer of the ques-tion based on the number of overlapping words. 
+
+Generation Quality Baselines. We compare ForkKV against two KV cache sharing policies in the generation quality benchmark: 
+
+• Prefix Caching [27 , 74 ]: This policy strictly reuses the KV cache of an identical context only when the requests share the exact same LoRA adapter. It is mathematically lossless and serves as the accuracy upper bound for our evaluation. 
+
+• Full Reuse : This policy aggressively reuses the KV cache of a shared context across different LoRA adapters, entirely ignoring the distinct activations introduced by each adapter. We include this to establish a baseline for the accuracy drop that ForkKV 
+
+aims to mitigate. 
+
+## 7.2 End-to-End Results 
+
+Throughput Improvement. Figure 11 compares the end-to-end throughput of ForkKV against prefix caching baselines across three datasets and three models under the ReAct and MapReduce 
+
+Figure 13: Performance under different requests arrival rate with Llama3-8B on the LooGLE dataset. 
+
+paradigms. Overall, ForkKV achieves 1.25 × to 3.04 × the through-put of the baselines on ReAct workflows, and 1.68 × to 2.60 × the throughput on MapReduce workflows. These consistent speedups demonstrate the scalability of ForkKV in handling both sequen-tial and concurrent agent workflows. Beyond the overall gains, we draw several key insights from different system configurations. First, ForkKV yields the most significant speedups in scenarios with severe memory contention. For instance, ForkKV achieves 3.04 × the baseline throughput on the larger Qwen2.5-14B model but only 1.25 × on the smaller Qwen2.5-7B model using the LooGLE dataset under ReAct workflow. The smaller model requires less memory for base weights and the KV cache. This reduced memory footprint makes the memory savings from ForkKV less prominent while amplifying the computational overhead of the disaggregated KV cache design. Second, ForkKV maintains robust performance gains across datasets with varying sequence lengths. Although the throughput values vastly differ across datasets, the relative speedups on LooGLE, NarrativeQA, and APIGen remain stable at 1.20 ×, 1.32 ×, 1.09 × respectively. This stability confirms that ForkKV 
+
+remain highly effective regardless of task type or sequence length. 
+
+Performance under Varying Number of Workflows. Figure 12 illustrates the throughput of ForkKV compared to prefix caching baselines as the number of concurrent agent workflows scales. ForkKV : Scaling Multi-LoRA Agent Serving via Copy-on-Write Disaggregated KV Cache 
+
+Figure 14: Underlying causes of ForkKV performance gains. 
+
+ForkKV reduces (a) the average per-agent memory usage, which consequently improves (b) the cache hit rate and in-creases (c) the average decode batch size. 
+
+ForkKV initially exhibits lower throughput than the baselines un-der a light load of 4 ReAct workflows. At this low concurrency level, the KV cache consumption of active agents remains small relative to the available GPU memory. Standard prefix caching can therefore retain all KV cache blocks without triggering evic-tions, preserving high baseline performance by avoiding costly recomputations. In contrast, ForkKV introduces disaggregated KV cache with dedicated architectural and kernel support to reduce the per-agent memory footprint. However, this specialized design incurs noticeable computational overhead when GPU memory is abundant, which accounts for the initial performance drop. This limitation can be mitigated by adaptive scheduling, which monitors GPU memory utilization and dynamically falls back to standard KV cache when memory is abundant. Despite the initial performance gap, the architectural design of ForkKV yields significant benefits as the number of concurrent workflows scales and memory demand exceeds hardware capacity. Under these high-contention conditions, 
+
+ForkKV achieves 1.84-2.33 × and 1.31-2.51 × the throughput of the baselines on ReAct and MapReduce paradigms respectively. These results confirm that ForkKV successfully delivers high performance during heavy memory contention. 
+
+Performance under Different Requests Arrival Rate. Figure 13 demonstrates the throughput of ForkKV compared to prefix caching baselines as the request arrival rate increases. ForkKV consistently outperforms the baselines across varying request rates. As the arrival rate scales, standard prefix caching struggles with costly recomputation caused by frequent cache evictions. Conversely, 
+
+ForkKV manages this increased load efficiently due to the shrinked per-agent memory footprint enabled by disaggregated KV cache. Consequently, ForkKV achieves approximately 2.52 × and 2.05 × the throughput of the baselines during the steady state. These results validate that ForkKV successfully maintains high performance across a wide range of request arrival rates. 
+
+Understanding ForkKV ’s Improvement. ForkKV achieves higher throughput by significantly reducing the per-agent memory foot-print. Specifically, while prefix caching stores a separate KV cache for each LoRA-based agent, ForkKV alleviates this inefficiency by decoupling the KV cache into a shared full-sized bCache and a LoRA-specific lightweight rCache . As Figure 14a illustrates, this design reduces the average per-agent memory footprint by 12.7 ×
+
+compared to traditional prefix caching. This drastic reduction in 
+
+Figure 15: Sensitivity study of varying LoRA ranks and out-put lengths with Llama3-8B on the ReAct workflow. 
+
+Model Sharing Policy HotpotQA APIGen Prefix Caching 57.63 39.77 Llama3-8B ForkKV 57.17 38.17 Full Reuse 54.02 17.82 Prefix Caching 57.14 92.28 Qwen2.5-7B ForkKV 56.37 91.52 Full Reuse 55.47 90.08 Prefix Caching 70.91 94.56 Qwen2.5-14B ForkKV 70.66 94.16 Full Reuse 68.86 93.66 
+
+Table 2: Generation quality evaluated with F1-score (%). 
+
+memory consumption translates to performance gains in two dis-tinct ways. First, the freed GPU capacity allows ForkKV to retain more agent contexts within a limited GPU capacity. Consequently, as Figure 14b shows, the cache hit rate of ForkKV improves by 6.93 × over prefix caching baselines, which directly accelerates gen-eration by reducing the frequency of recomputation. Second, the lower memory footprint per agent enables a 12.0 × larger decode batch size as demonstrated in Figure 14(c). This expanded batch size allows for greater parallelism during agent serving. In practice, these two advantages hide the overhead introduced by the new architecture and deliver substantial speedups. 
+
+## 7.3 Accuracy Verification 
+
+Section 3.2 suggests that ForkKV introduces negligible degradation in generation quality. To verify this claim, we evaluate ForkKV 
+
+against standard prefix caching and full KV cache reuse across three distinct models and two datasets. Table 2 summarizes these compar-ative results. The evaluation shows that ForkKV achieves an accu-racy highly comparable to the prefix caching baseline, exhibiting an average quality drop of only 0.71 points across all evaluated settings. Furthermore, the maximum observed decrease is just 1.60 points on Llama3-8B when tested with the APIGen dataset. In contrast, full KV cache reuse suffers from severe performance degradation and incurs an average accuracy drop of 5.40 points. This degradation is particularly obvious on complex tasks like APIGen, where the accuracy of Llama3-8B drops by a substantial 21.95 points from 39.77 to 17.82. By avoiding these extreme performance penalties, Shao et al. 
+
+ForkKV successfully preserves generation quality across diverse models and tasks while enabling efficient KV cache sharing. 
+
+## 7.4 Sensitivity Analysis 
+
+To have a better understanding of ForkKV , we conduct sensitivity analysis across different configurations with Llama3-8B on the ReAct workflow. 
+
+Varying LoRA Ranks. To study the impact of LoRA ranks on 
+
+ForkKV , we modify the underlying LoRA ranks of agents across a representative set 𝑟 ∈ { 8, 16 , 32 } [ 10 , 52 , 60 , 77 ]. Figure 15a shows 
+
+ForkKV achieves 2.36-2.88 × the baseline throughput over this set-ting. Noticeably, the absolute throughput of ForkKV decreases as the rank increases because a larger rank linearly expands the resid-ual cache size, which increases the memory footprint per agent and limits the maximum batch size during inference. However, since small ranks ( 𝑟 < 64 ) can already provide high generation quality for various NLP tasks [ 21 ], ForkKV is highly effective in serving multi-LoRA agents under practical configurations. 
+
+Varying Output Lengths. We evaluate the system by varying the output length of each agent within the workflow. Figure 15b shows 
+
+ForkKV achieves 2.69-3.36 × the baseline throughput across differ-ent lengths. Longer agent outputs continuously accumulate newly generated KV cache and severely challenge the system memory capacity. However, as discussed in Section 3.2, ForkKV consistently maintains a low memory footprint per agent. This minimal mem-ory overhead allows our system to absorb the growing memory demands and sustain a strictly larger concurrent batch size than the baseline. Consequently, ForkKV guarantees highly efficient serving performance regardless of the specific generation length. 
+
+## 8 Related Work 
+
+Agentic Workflow Serving. The rapid evolution of autonomous agents has spurred the development of specialized serving systems for complex agent workflows, which mainly optimize via efficient scheduling [ 8, 12 , 18 , 32 , 33 , 40 ] and KV cache routing [ 6 , 46 , 61 ]for general-purpose LLMs. In contrast, ForkKV targets multi-LoRA agent serving, enabling base cache sharing across distinct agents to minimize memory footprint and alleviate batch size restrictions. 
+
+System-level Optimization on LoRA Systems. The popularity of LoRA has driven the need for efficient multi-tenant LoRA systems where numerous adapters share a single base model [ 10 , 11 , 22 , 31 ,52 , 60 , 70 , 73 , 76 – 78 ]. Pioneering works like Punica [ 10 ] introduce custom CUDA kernels to efficiently batch requests across differ-ent adapters. Building upon this foundation, subsequent research has explored advanced scheduling policies [ 11 , 60 , 77 ], memory optimizations [ 22 , 52 ], GPU kernel optimizations [ 70 , 76 , 78 ], and offloading techniques [ 31 , 73 ] for efficient serving. While prior works primarily target chatbot scenarios, ForkKV tackles the se-vere memory redundancy caused by diverging LoRA activcations in multi-agent workflows through KV cache disaggregation. 
+
+Copy-on-Write (CoW) in Data Management Systems. Origi-nating as a classic OS-level technique to enable lock-free parallel operations and reduce memory footprints, CoW is widely used to optimize data management systems [ 7, 17 , 25 , 29 , 43 , 57 ]. In-spired by these approaches, ForkKV adapts the CoW mechanism to manage the KV cache for highly-branched shared contexts across agents, effectively extending this paradigm to multi-LoRA agent serving scenarios. 
+
+KV Cache Optimization. Existing KV cache optimization strate-gies primarily focus on lossless memory layout improvements [ 48 ,49 , 62 , 63 , 74 ], lossy compression [ 37 , 69 ], and cross-chunk or cross-model sharing [ 19 , 36 , 67 ]. In concurrent work, LRAgent [ 23 ]proposes to decompose the KV cache into shared and adapter-dependent components for multi-LoRA agent serving with neg-ligible accuracy loss. Distinct from these approaches, our work uniquely introduces an OS-inspired DualRadixTree for decoupled cache management and an efficient attention kernel fused with deferred RoPE operations. 
+
+## 9 Conclusion 
+
+In this paper, we present ForkKV, a highly efficient multi-LoRA agent serving system that resolves the critical memory footprint bottlenecks caused by KV cache divergence. Inspired by the OS fork primitive with copy-on-write, ForkKV utilizes a DualRadixTree ar-chitecture to disaggregate the KV cache into a globally shareable base and lightweight adapter-specific residuals. To make this dis-aggregated memory layout computationally efficient, we design 
+
+ResidualAttention , an attention kernel that fuses cache reconstruc-tion directly in SRAM. Our experiments demonstrate that ForkKV achieves up to 3.0 × throughput of state-of-the-art serving systems while preserving generation quality. 
+
+## Acknowledgments 
+
+We would like to express our sincere gratitude to Zhanda Zhu from the University of Toronto for his valuable contributions to this research work. His expertise, dedication, and generous support have significantly enhanced the quality of our study. His insightful suggestions and technical assistance were instrumental in achieving our research objectives. We are also grateful to Zhihao Jia from Carnegie Mellon University for his valuable discussions during the early stages of this work. His perspectives and insights helped shape the foundation of our research. 
+
+## References                  
+
+> [1] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav Gulavani, Alexey Tumanov, and Ramachandran Ramjee. 2023. Taming {Throughput-Latency} Tradeoff in {LLM} Inference with {Sarathi-Serve}. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) .117–134. [2] AI@Meta. 2024. Llama 3 Model Card. (2024). https://github.com/meta-llama/ llama3/blob/main/MODEL_CARD.md [3] Joshua Ainslie, James Lee-Thorp, Michiel De Jong, Yury Zemlyanskiy, Federico Lebrón, and Sumit Sanghai. 2023. Gqa: Training generalized multi-query trans-former models from multi-head checkpoints. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing . 4895–4901. [4] Anthropic. 2025. Prompt caching .https://platform.claude.com/docs/en/build-with-claude/prompt-caching [5] Anthropic. 2026. anthropic/claude-code .https://github.com/openai/codex [6] Zhuohang Bian, Feiyang Wu, Teng Ma, and Youwei Zhuo. 2025. Tokencake: A KV-Cache-centric Serving Framework for LLM-based Multi-Agent Applications. arXiv:2510.18586 doi:10.48550/arXiv.2510.18586 [7] Hokeun Cha, Xiangpeng Hao, Tianzheng Wang, Huanchen Zhang, Aditya Akella, and Xiangyao Yu. 2023. Blink-hash: An adaptive hybrid index for in-memory time-series databases. Proceedings of the VLDB Endowment 16, 6 (2023), 1235– 1248. [8] Gohar Irfan Chaudhry, Esha Choukse, Haoran Qiu, Íñigo Goiri, Rodrigo Fonseca, Adam Belay, and Ricardo Bianchini. 2025. Murakkab: Resource-Efficient Agentic Workflow Orchestration in Cloud Platforms. arXiv:2508.18298 [cs.MA] https: //arxiv.org/abs/2508.18298
+
+ForkKV : Scaling Multi-LoRA Agent Serving via Copy-on-Write Disaggregated KV Cache 
+
+[9] Baian Chen, Chang Shu, Ehsan Shareghi, Nigel Collier, Karthik Narasimhan, and Shunyu Yao. 2023. Fireact: Toward language agent fine-tuning. arXiv preprint arXiv:2310.05915 (2023). [10] Lequn Chen, Zihao Ye, Yongji Wu, Danyang Zhuo, Luis Ceze, and Arvind Kr-ishnamurthy. 2024. Punica: Multi-tenant lora serving. Proceedings of Machine Learning and Systems 6 (2024), 1–13. [11] Ronghuai Chen, Ce Yu, Hao Fu, Xiaoteng Hu, and Bin Yang. 2025. MixLoRA: An Efficient Multi-Tenant Framework for Concurrently Serving Diverse LoRA Mod-els in Large Language Models. In Proceedings of the 54th International Conference on Parallel Processing . ACM, San Diego CA USA, 11–21. doi:10.1145/3754598. 3754605 [12] Yinwei Dai, Zhuofu Chen, Anand Iyer, and Ravi Netravali. 2025. Aragog: Just-in-Time Model Routing for Scalable Serving of Agentic Workflows. arXiv:2511.20975 doi:10.48550/arXiv.2511.20975 [13] DeepSeek-AI. 2024. DeepSeek-V3 Technical Report. arXiv:2412.19437 [cs.CL] https://arxiv.org/abs/2412.19437 [14] DeepSeek-AI. 2025. DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning. arXiv:2501.12948 [cs.CL] https://arxiv.org/abs/2501. 12948 [15] Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. 2023. QLoRA: Efficient Finetuning of Quantized LLMs. arXiv preprint arXiv:2305.14314 
+
+(2023). [16] Nelson Elhage, Neel Nanda, Catherine Olsson, Tom Henighan, Nicholas Joseph, Ben Mann, Amanda Askell, Yuntao Bai, Anna Chen, Tom Conerly, et al . 2021. A mathematical framework for transformer circuits. Transformer Circuits Thread 1, 1 (2021), 12. [17] Michael Fruth and Stefanie Scherzinger. 2024. The case for dbms live patching. 
+
+Proceedings of the VLDB Endowment 17, 13 (2024), 4557–4570. [18] Yichao Fu, Junda Chen, Siqi Zhu, Zheyu Fu, Zhongdongming Dai, Yonghao Zhuang, Yian Ma, Aurick Qiao, Tajana Rosing, Ion Stoica, et al . 2024. Efficiently scaling llm reasoning with certaindex. arXiv preprint arXiv:2412.20993 (2024). [19] In Gim, Guojun Chen, Seung-seob Lee, Nikhil Sarda, Anurag Khandelwal, and Lin Zhong. 2024. Prompt Cache: Modular Attention Reuse for Low-Latency Inference. In Proceedings of Machine Learning and Systems , P. Gibbons, G. Pekhimenko, and C. De Sa (Eds.), Vol. 6. 325–338. [20] Google. 2025. Context cache . https://docs.cloud.google.com/vertex-ai/generative-ai/docs/context-cache/context-cache-overview [21] Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. 2022. LoRA: Low-Rank Adaptation of Large Language Models. In International Conference on Learning Representations .https://openreview.net/forum?id=nZeVKeeFYf9 [22] Nikoleta Iliakopoulou, Jovan Stojkovic, Chloe Alverti, Tianyin Xu, Huber-tus Franke, and Josep Torrellas. 2025. Chameleon: Adaptive Caching and Scheduling for Many-Adapter LLM Inference Environments. In Proceedings of the 58th IEEE/ACM International Symposium on Microarchitecture (MICRO ’25) . Association for Computing Machinery, New York, NY, USA, 217–231. doi:10.1145/3725843.3756083 [23] Hyesung Jeon, Hyeongju Ha, and Jae-Joon Kim. 2026. LRAgent: Efficient KV Cache Sharing for Multi-LoRA LLM Agents. arXiv preprint arXiv:2602.01053 
+
+(2026). [24] Rohan Kadekodi, Zhan Jin, Keisuke Kamahori, Yile Gu, Sean Khatiri, Noah H. Bayindirli, Sergey Gorbunov, and Baris Kasikci. 2025. AgentFlux: Decoupled Fine-Tuning & Inference for On-Device Agentic Systems. arXiv:2510.00229 [cs.AI] https://arxiv.org/abs/2510.00229 [25] Alfons Kemper and Thomas Neumann. 2011. HyPer: A hybrid OLTP&OLAP main memory database system based on virtual memory snapshots. In 2011 IEEE 27th International Conference on Data Engineering . IEEE, 195–206. [26] Tomáš Kočiský, Jonathan Schwarz, Phil Blunsom, Chris Dyer, Karl Moritz Her-mann, Gábor Melis, and Edward Grefenstette. 2018. The NarrativeQA Reading Comprehension Challenge. Transactions of the Association for Computational Linguistics 6 (2018), 317–328. doi:10.1162/tacl_a_00023 [27] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAtten-tion. In Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles .[28] Fast Forward Labs. [n. d.]. Evaluating QA: Metrics, Predictions, and the Null Re-sponse. https://github.com/fastforwardlabs/ff14_blog/blob/master/_notebooks/ 2020-06-09-Evaluating_BERT_on_SQuAD.ipynb [29] Sarath Lakshman, Apaar Gupta, Rohan Suri, Scott Lashley, John Liang, Srinath Duvuru, and Ravi Mayuram. 2022. Magma: A high data density storage engine used in couchbase. Proceedings of the VLDB Endowment 15, 12 (2022), 3496–3508. [30] Jiaqi Li, Mengmeng Wang, Zilong Zheng, and Muhan Zhang. 2023. LooGLE: Can Long-Context Language Models Understand Long Contexts? arXiv preprint arXiv:2311.04939 (2023). [31] Suyi Li, Hanfeng Lu, Tianyuan Wu, Minchen Yu, Qizhen Weng, Xusheng Chen, Yizhou Shan, Binhang Yuan, and Wei Wang. 2025. TOPPINGS: CPU-assisted, rank-aware adapter serving for LLM inference. In Proceedings of the 2025 USENIX Conference on Usenix Annual Technical Conference (Boston, MA, USA) (USENIX ATC ’25) . USENIX Association, USA, Article 37, 17 pages. [32] Chaofan Lin, Zhenhua Han, Chengruidong Zhang, Yuqing Yang, Fan Yang, Chen Chen, and Lili Qiu. 2024. Parrot: Efficient serving of {LLM-based } applications with semantic variable. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . 929–945. [33] Banruo Liu, Wei-Yu Lin, Minghao Fang, Yihan Jiang, and Fan Lai. 2025. Circinus: Efficient Query Planner for Compound ML Serving. arXiv:2504.16397 [cs.DB] https://arxiv.org/abs/2504.16397 [34] Shih-Yang Liu, Chien-Yi Wang, Hongxu Yin, Pavlo Molchanov, Yu-Chiang Frank Wang, Kwang-Ting Cheng, and Min-Hung Chen. 2024. DoRA: Weight-Decomposed Low-Rank Adaptation. arXiv preprint arXiv:2402.09353 (2024). [35] Xiao Liu, Hao Yu, Hanchen Zhang, Yifan Xu, Xuanyu Lei, Hanyu Lai, Yu Gu, Hangliang Ding, Kaiwen Men, Kejuan Yang, Shudan Zhang, Xiang Deng, Aohan Zeng, Zhengxiao Du, Chenhui Zhang, Sheng Shen, Tianjun Zhang, Yu Su, Huan Sun, Minlie Huang, Yuxiao Dong, and Jie Tang. 2023. AgentBench: Evaluating LLMs as Agents. arXiv preprint arXiv: 2308.03688 (2023). [36] Yuhan Liu, Yuyang Huang, Jiayi Yao, Shaoting Feng, Zhuohan Gu, Kuntai Du, Hanchen Li, Yihua Cheng, Junchen Jiang, Shan Lu, Madan Musuvathi, and Esha Choukse. 2024. DroidSpeak: KV Cache Sharing for Cross-LLM Communication and Multi-LLM Serving. arXiv:2411.02820 doi:10.48550/arXiv.2411.02820 [37] Yuhan Liu, Hanchen Li, Yihua Cheng, Siddhant Ray, Yuyang Huang, Qizheng Zhang, Kuntai Du, Jiayi Yao, Shan Lu, Ganesh Ananthanarayanan, Michael Maire, Henry Hoffmann, Ari Holtzman, and Junchen Jiang. 2024. CacheGen: KV Cache Compression and Streaming for Fast Large Language Model Serving. In 
+
+Proceedings of the ACM SIGCOMM 2024 Conference . ACM, Sydney NSW Australia, 38–56. doi:10.1145/3651890.3672274 [38] Ye Liu, Kevin Qinghong Lin, Chang Wen Chen, and Mike Zheng Shou. 2025. VideoMind: A Chain-of-LoRA Agent for Long Video Reasoning. arXiv:2503.13444 [cs.CV] https://arxiv.org/abs/2503.13444 [39] Zuxin Liu, Thai Hoang, Jianguo Zhang, Ming Zhu, Tian Lan, Shirley Kokane, Juntao Tan, Weiran Yao, Zhiwei Liu, Yihao Feng, et al . 2024. APIGen: Automated Pipeline for Generating Verifiable and Diverse Function-Calling Datasets. arXiv preprint arXiv:2406.18518 (2024). [40] Michael Luo, Xiaoxiang Shi, Colin Cai, Tianjun Zhang, Justin Wong, Yichuan Wang, Chi Wang, Yanping Huang, Zhifeng Chen, Joseph E. Gonzalez, and Ion Stoica. 2025. Autellix: An Efficient Serving Engine for LLM Agents as General Programs. arXiv:2502.13965 doi:10.48550/arXiv.2502.13965 [41] Sourab Mangrulkar, Sylvain Gugger, Lysandre Debut, Younes Belkada, Sayak Paul, and Benjamin Bossan. 2022. PEFT: State-of-the-art Parameter-Efficient Fine-Tuning methods. https://github.com/huggingface/peft. [42] meta llama. 2024. Introducing Llama 3.1: Our most capable models to date . https: //ai.meta.com/blog/meta-llama-3-1/ [43] Anton Okolnychyi, Chao Sun, Kazuyuki Tanimura, Russell Spitzer, Ryan Blue, Szehon Ho, Yufei Gu, Vishwanath Lakkundi, and DB Tsai. 2024. Petabyte-scale row-level operations in data lakehouses. Proceedings of the VLDB Endowment 17, 12 (2024), 4159–4172. [44] OpenAI. 2025. Prompt caching . https://platform.openai.com/docs/guides/prompt-caching [45] OpenAI. 2026. openai/codex . https://github.com/anthropics/claude-code [46] Zaifeng Pan, Ajjkumar Patel, Zhengding Hu, Yipeng Shen, Yue Guan, Wan-Lu Li, Lianhui Qin, Yida Wang, and Yufei Ding. 2025. KVFlow: Efficient Prefix Caching for Accelerating LLM-Based Multi-Agent Workflows. arXiv:2507.07400 doi:10.48550/arXiv.2507.07400 [47] Shishir G Patil, Tianjun Zhang, Xin Wang, and Joseph E Gonzalez. 2024. Go-rilla: Large language model connected with massive apis. Advances in Neural Information Processing Systems 37 (2024), 126544–126565. [48] Liu Qianli, Hong Zicong, Chen Fahao, Li Peng, and Guo Song. 2025. Mell: Memory-Efficient Large Language Model Serving via Multi-GPU KV Cache Management. arXiv:2501.06709 doi:10.48550/arXiv.2501.06709 [49] Ruoyu Qin, Zheming Li, Weiran He, Jialei Cui, Feng Ren, Mingxing Zhang, Yongwei Wu, Weimin Zheng, and Xinran Xu. 2024. Mooncake: Trading More Storage for Less Computation — A KVCache-centric Architecture for Serving LLM Chatbot. In 23rd USENIX Conference on File and Storage Technologies (FAST 25) . USENIX Association, Santa Clara, CA, 155–170. [50] Timo Schick, Jane Dwivedi-Yu, Roberto Dessì, Roberta Raileanu, Maria Lomeli, Eric Hambro, Luke Zettlemoyer, Nicola Cancedda, and Thomas Scialom. 2023. Toolformer: Language models can teach themselves to use tools. Advances in neural information processing systems 36 (2023), 68539–68551. [51] Noam Shazeer. 2019. Fast transformer decoding: One write-head is all you need. 
+
+arXiv preprint arXiv:1911.02150 (2019). [52] Ying Sheng, Shiyi Cao, Dacheng Li, Coleman Hooper, Nicholas Lee, Shuo Yang, Christopher Chou, Banghua Zhu, Lianmin Zheng, Kurt Keutzer, Joseph E. Gon-zalez, and Ion Stoica. 2023. S-LoRA: Serving Thousands of Concurrent LoRA Adapters. arXiv preprint arXiv:2311.03285 (2023). [53] Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen Bo, and Yunfeng Liu. 2024. Roformer: Enhanced transformer with rotary position embedding. 
+
+Neurocomputing 568 (2024), 127063. Shao et al. 
+
+[54] Cursor Team. 2025. Cursor . https://cursor.com/ [55] Qwen Team. 2024. Qwen2.5: A Party of Foundation Models. https://qwenlm. github.io/blog/qwen2.5/ [56] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. Attention is all you need. Advances in neural information processing systems 30 (2017). [57] Ruihong Wang, Jianguo Wang, Prishita Kadam, M Tamer Özsu, and Walid G Aref. 2023. dlsm: An lsm-based index for memory disaggregation. In 2023 IEEE 39th International Conference on Data Engineering (ICDE) . IEEE, 2835–2849. [58] Xiao Wang, Tianze Chen, Qiming Ge, Han Xia, Rong Bao, Rui Zheng, Qi Zhang, Tao Gui, and Xuan-Jing Huang. 2023. Orthogonal subspace learning for lan-guage model continual learning. In Findings of the Association for Computational Linguistics: EMNLP 2023 . 10658–10671. [59] Bingyang Wu, Shengyu Liu, Yinmin Zhong, Peng Sun, Xuanzhe Liu, and Xin Jin. 2024. Loongserve: Efficiently serving long-context large language models with elastic sequence parallelism. In Proceedings of the ACM SIGOPS 30th Symposium on Operating Systems Principles . 640–654. [60] Bingyang Wu, Ruidong Zhu, Zili Zhang, Peng Sun, Xuanzhe Liu, and Xin Jin. 2024. dLoRA: Dynamically orchestrating requests and adapters for LoRA LLM serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . 911–927. [61] Yongtong Wu, Shaoyuan Chen, Yinmin Zhong, Rilin Huang, Yixuan Tan, Wentao Zhang, Liyue Zhang, Shangyan Zhou, Yuxuan Liu, Shunfeng Zhou, Mingxing Zhang, Xin Jin, and Panpan Huang. 2026. DualPath: Breaking the Storage Bandwidth Bottleneck in Agentic LLM Inference. arXiv:2602.21548 [cs.DC] https://arxiv.org/abs/2602.21548 [62] Zhiqiang Xie, Ziyi Xu, Mark Zhao, Yuwei An, Vikram Sharma Mailthody, Scott Mahlke, Michael Garland, and Christos Kozyrakis. 2025. Strata: Hierarchical Context Caching for Long Context Language Model Serving. arXiv:2508.18572 doi:10.48550/arXiv.2508.18572 [63] Yi Xiong, Hao Wu, Changxu Shao, Ziqing Wang, Rui Zhang, Yuhong Guo, Junping Zhao, Ke Zhang, and Zhenxuan Pan. 2024. LayerKV: Optimizing Large Language Model Serving with Layer-wise KV Cache Management. arXiv:2410.00428 doi:10. 48550/arXiv.2410.00428 [64] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, Chujie Zheng, Dayiheng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jialong Tang, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jing Zhou, Jingren Zhou, Junyang Lin, Kai Dang, Keqin Bao, Kexin Yang, Le Yu, Lianghao Deng, Mei Li, Mingfeng Xue, Mingze Li, Pei Zhang, Peng Wang, Qin Zhu, Rui Men, Ruize Gao, Shixuan Liu, Shuang Luo, Tianhao Li, Tianyi Tang, Wenbiao Yin, Xingzhang Ren, Xinyu Wang, Xinyu Zhang, Xuancheng Ren, Yang Fan, Yang Su, Yichang Zhang, Yinger Zhang, Yu Wan, Yuqiong Liu, Zekun Wang, Zeyu Cui, Zhenru Zhang, Zhipeng Zhou, and Zihan Qiu. 2025. Qwen3 Technical Report. 
+
+arXiv preprint arXiv:2505.09388 (2025). [65] John Yang, Carlos E Jimenez, Alexander Wettig, Kilian Lieret, Shunyu Yao, Karthik R Narasimhan, and Ofir Press. 2024. SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering. In The Thirty-eighth Annual Conference on Neural Information Processing Systems . https://arxiv.org/abs/2405. 15793 [66] Zhilin Yang, Peng Qi, Saizheng Zhang, Yoshua Bengio, William W. Cohen, Ruslan Salakhutdinov, and Christopher D. Manning. 2018. HotpotQA: A Dataset for Diverse, Explainable Multi-hop Question Answering. In Conference on Empirical Methods in Natural Language Processing (EMNLP) .[67] Jiayi Yao, Hanchen Li, Yuhan Liu, Siddhant Ray, Yihua Cheng, Qizheng Zhang, Kuntai Du, Shan Lu, and Junchen Jiang. 2025. CacheBlend: Fast Large Lan-guage Model Serving for RAG with Cached Knowledge Fusion. In Proceedings of the Twentieth European Conference on Computer Systems . ACM, Rotterdam Netherlands, 94–109. doi:10.1145/3689031.3696098 [68] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik R Narasimhan, and Yuan Cao. 2022. React: Synergizing reasoning and acting in language models. In The eleventh international conference on learning representations .[69] Xiaozhe Yao, Qinghao Hu, and Ana Klimovic. 2025. Deltazip: Efficient serv-ing of multiple full-model-tuned llms. In Proceedings of the Twentieth European Conference on Computer Systems . 110–127. [70] Zhengmao Ye, Dengchun Li, Zetao Hu, Tingfeng Lan, Jian Sha, Shicong Zhang, Lei Duan, Jie Zuo, Hui Lu, Yuanchun Zhou, et al . 2025. mLoRA: Fine-Tuning LoRA Adapters via Highly-Efficient Pipeline Parallelism in Multiple GPUs. Proceedings of the VLDB Endowment 18, 6 (2025), 1948–1961. [71] Xiaoyan Yu, Tongxu Luo, Yifan Wei, Fangyu Lei, Yiming Huang, Hao Peng, and Liehuang Zhu. 2024. Neeko: Leveraging dynamic lora for efficient multi-character role-playing agent. In Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing . 12540–12557. [72] Aohan Zeng, Mingdao Liu, Rui Lu, Bowen Wang, Xiao Liu, Yuxiao Dong, and Jie Tang. 2024. Agenttuning: Enabling generalized agent abilities for llms. In 
+
+Findings of the Association for Computational Linguistics: ACL 2024 . 3053–3077. [73] Hang Zhang, Jiuchen Shi, Yixiao Wang, Quan Chen, Yizhou Shan, and Minyi Guo. 2025. Improving the Serving Performance of Multi-LoRA Large Language Models via Efficient LoRA and KV Cache Management. arXiv preprint arXiv:2505.03756 
+
+(2025). [74] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. SGLang: Efficient Execution of Structured Language Model Programs. In Advances in Neural Information Processing Systems ,A. Globerson, L. Mackey, D. Belgrave, A. Fan, U. Paquet, J. Tomczak, and C. Zhang (Eds.), Vol. 37. Curran Associates, Inc., 62557–62583. [75] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xuanzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: Disaggregating prefill and decoding for goodput-optimized large language model serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . 193–210. [76] Changhai Zhou, Yuhua Zhou, Shiyang Zhang, Yibin Wang, and Zekai Liu. 2024. Dynamic Operator Optimization for Efficient Multi-Tenant LoRA Model Serving. In Proceedings of the AAAI Conference on Artificial Intelligence , Vol. 39. 22910– 22918. [77] Ruidong Zhu, Ziyue Jiang, Zhi Zhang, Xin Liu, Xuanzhe Liu, and Xin Jin. 2025. Cannikin: No Lagger of SLO in Concurrent Multiple LoRA LLM Serving. IEEE Transactions on Parallel and Distributed Systems 36, 9 (July 2025), 1972–1984. doi:10.1109/TPDS.2025.3590014 [78] Zhanda Zhu, Qidong Su, Yaoyao Ding, Kevin Song, Shang Wang, and Gennady Pekhimenko. 2025. LoRAFusion: Efficient LoRA Fine-Tuning for LLMs. arXiv preprint arXiv:2510.00206 (2025).
