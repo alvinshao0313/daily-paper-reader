@@ -1,0 +1,1330 @@
+Title: S$^3$: Structured Sparsity Specification
+
+URL Source: https://arxiv.org/pdf/2604.11315v1
+
+Published Time: Tue, 14 Apr 2026 02:06:31 GMT
+
+Number of Pages: 20
+
+Markdown Content:
+# S3: Structured Sparsity Specification 
+
+Ayoub Ghriss 
+
+Department of Computer Science Colorado University, Boulder 
+
+ayoub.ghriss@polytechnique.org 
+
+Abstract 
+
+We introduce the Structured Sparsity Specifica-tion (S 3), an algebraic framework for defining, composing, and implementing structured sparse patterns. S 3 specifies sparsity through three components: a View that reshapes the tensor via layout composition, a Block spec-ification that defines the atomic pruning unit, and the sparsity decision Scope . Both Block and Scope support Coupling across ten-sors for coordinated sparsification. S3 en-ables precise specification of diverse spar-sity structures, from fine-grained N:M pat-terns to coarse channel pruning, and inte-grates seamlessly with Optimal Brain Dam-age (OBD) and Surgeon (OBS). We formalize the framework mathematically, demonstrate its expressiveness on canonical patterns, and validate it experimentally via structured OBS and OBD implementations 1 built entirely on S 3, which surpasses well-established sec-ond order heuristics on output reconstruction across common configurations. 
+
+1 Introduction 
+
+Quantization has become the dominant approach to compressing large neural networks, delivering sub-stantial inference savings with minimal accuracy loss. Sparsity offers a complementary axis of compression that can compose with quantization for compounded gains, yet its practical impact has been limited. Un-structured pruning achieves high theoretical compres-sion ratios, but its irregular memory access patterns and workload imbalance often negate these benefits on modern hardware (He and Xiao, 2024). Structured sparsity, which removes coherent blocks of parameters such as channels, filters, or attention heads, is more hardware-friendly but traditionally lacks the flexibility to express complex patterns, limiting its applicability. 
+
+> 1
+
+https://sparsekit.readthedocs.io 
+
+Moreover, the current landscape of structured spar-sity is fragmented with the "structure" qualification used to describe specific patterns: N:M methods tar-get specific hardware (NVIDIA sparse tensor cores), block sparsity aligns with matrix multiplication tiles, and channel pruning operates at the semantic level of neural network layers. Each paradigm requires its own pruning implementation, and no common for-malism exists to relate them or to develop algorithms that generalize across patterns. We address this gap by introducing Structured Spar-sity Specification (S 3), a framework that unifies di-verse sparsity patterns under a common algebraic for-malism, composes simple specifications into complex hierarchical structures, and integrates directly with second-order pruning criteria through well-defined index mappings. Our contributions: • A formal specification language based on layout algebra that can express any hyperrectangular sparsity pattern through View, Block, and Scope primitives. • Structured extensions of OBD and OBS (S-OBD, S-OBS) with derived blockwise saliency scores, optimal weight updates, and efficient Schur com-plement maintenance. • Experimental validation showing that S-OBS im-plementation, with specification-agnostic code, outperforms SparseGPT by 16–20% across four distinct sparsity configurations. 
+
+2 Related Work 
+
+Neural network pruning has evolved from simple magnitude-based methods (Han et al., 2015) to prin-cipled second-order approaches. Optimal Brain Dam-age (OBD) (LeCun et al., 1989) uses diagonal Hes-sian approximations to score parameter importance, while Optimal Brain Surgeon (OBS) (Hassibi and Stork, 1993) incorporates the full inverse Hessian and de-rives optimal weight updates that compensate for removed parameters. The Lottery Ticket Hypothe-       
+
+> arXiv:2604.11315v1 [cs.LG] 13 Apr 2026 (a) NVIDIA Ampere tensor cores partition the left multiplicand (16 ×16) and right multipli-cand (16 ×8) so that each thread-group of 4 threads provides one row/column of the left-/right operand. (b) By structuring the sparsity so that each thread-group handles the same exact number of rows per 32 ×16 left multiplicand, we design a new sparsity pattern that is hardware-native without the need for special hardware support.
+
+Figure 1: S 3 can target low-level hardware patterns to avoid any slowdowns due to memory access conflicts. For m16n8k16 
+
+matrix multiplication patterns, we can target the thread-group as one block. 
+
+sis (Frankle and Carlin, 2019) provided further moti-vation by showing that dense networks contain sparse subnetworks matching full accuracy, suggesting that most parameters are redundant. For large language models, where retraining is prohibitively expensive, Wanda (Sun et al., 2023) and SparseGPT (Frantar and Alistarh, 2023) adapt OBD and OBS principles to the zero-shot setting with efficient Hessian approxima-tions. A parallel line of work has explored structured sparsity constraints that can be exploited by hardware. N:M sparsity enforces exactly N non-zero values per M
+
+consecutive elements, directly mapping to NVIDIA’s sparse tensor cores (NVIDIA, 2020). Block sparsity ze-ros entire contiguous blocks, enabling efficient dense operations on the surviving blocks (Gray et al., 2017). Channel and filter pruning remove entire convolu-tional channels or attention heads (Li et al., 2017; Michel et al., 2019). Early work on structured sparse coding (Mairal et al., 2011) used sums of ℓ∞ norms (Tib-shirani, 2018; Chen et al., 1998; Mallat, 2008) to en-force scope-level consistency, establishing a principled framework to design arbitrary patterns that can be adapted to today’s hardware-aligned structures. De-spite this variety, each pattern typically requires its own pruning implementation; S 3 provides a unified specification that covers all of these as special cases. Dynamic sparse training (Mocanu et al., 2017; Evci et al., 2020) takes a different approach: instead of pruning a trained model, it maintains a fixed spar-sity budget throughout training while periodically up-dating the mask. These methods demonstrate that static masks are suboptimal, but the resulting pat-terns are unstructured and cannot leverage hardware-accelerated sparsity formats. We discuss how S 3 can serve as a structural backbone for dynamic sparse training. Our sparsity formalism was inspired by the CuTe li-brary (NVIDIA, 2023), which implements a layout algebra (Colfax Research, 2025) of shape-stride pairs with composition operations for GPU kernel design. We extend this representation from the domain of memory addressing to sparsity specification, using layout composition to define views over dense tensors that expose block and scope structure. 
+
+3 Preliminaries 
+
+Layout Algebra (NVIDIA, 2023); see Colfax Research (2025, Chapter 2) for a comprehensive treatment pro-vides a rigorous tensor layout formalism that we lever-age in our framework. A layout L = s : d with shape s ∈ Nn and stride 
+
+d ∈ Zn is a mapping from a logical coordinate space to linear memory indices. 
+
+Definition 1 (Layout Function) . For a layout L = s : d
+
+with n dimensions, the index function ϕL : Zn → Z is: 
+
+ϕL(i0, . . . , in−1) = 
+
+> n−1
+
+# ∑
+
+> k=0
+
+ik · dk (1) 
+
+where 0 ≤ ik < sk for all k. Definition 2 (Layout Size) . The size of layout L is defined as: 
+
+|L| =
+
+> n−1
+
+# ∏
+
+> k=0
+
+sk (2) 
+
+Definition 3 (Layout Cosize) . The cosize represents the memory footprint: cosize (L) = max  
+
+> i∈dom (L)
+
+ϕL(i) + 1 =
+
+> n−1
+
+# ∑
+
+> k=0
+
+(sk − 1) · dk + 1(3) 
+
+Definition 4 (Layout Composition) . Given layouts 
+
+A = sA : dA and B = sB : dB where |A| = |B| , the composition A ◦ B produces a new layout where B indexes into the logical space of A:
+
+ϕA◦B (j) = ϕA(ϕ−1 
+
+> B
+
+(j)) (4) The key takeaway is that any tensor can be described by a layout L = s : d that may itself be the composi-tion or division of simpler layouts. This composition-ality is central to S 3: it allows us to factor the View out of the Block and Scope specifications. 
+
+4 The S 3 Framework 
+
+S3 specifies structured sparsity through three compo-nents: 1. View : A layout that reshapes the tensor domain for sparsity operations. 2. Block : The atomic sparsity unit, i.e., the smallest set of parameters that are pruned together. 3. Scope : Defines the sparsity decision scope, i.e., the set of blocks over which a sparsity level is enforced. Both Blocks and Scopes support Coupling to coordi-nate pruning across multiple tensors. S 3 can operate on any subset of the tensor’s domain; elements outside the domain remain dense. For ease of exposition, we omit the domain from the specification and treat the target domain as a virtual tensor. 
+
+Remark (View Factorization) . In principle, both Block and Scope admit independent view layouts VB and VG.However, by layout composition (Definition 4), VG ◦VB yields a single view V. We therefore factor the view out of both specifications without loss of generality, resulting in a cleaner three-component decomposition: View, Block, Scope. 
+
+4.1 View 
+
+The View defines how the underlying tensor is logi-cally reorganized before block and scope boundaries are imposed. 
+
+Definition 5 (View) . Given a tensor T with physical lay-out Lphys = sphys : dphys , the View V is a layout satisfying: 
+
+|V | = |L phys | (5) 
+
+The view defines a coordinate transformation ψ :
+
+dom (V ) → dom (Lphys ) mapping logical coordinates to physical tensor coordinates. 
+
+Example 6. For a matrix W ∈ R64 ×64 (see ?? ) with row-major storage Lphys = ( 64, 64 ) : (64, 1 ), a view for 16 × 16 
+
+block-wise sparsity: 
+
+V = ( 4, 4, 16, 16 ) : (512, 16, 64, 1 ) (6) 
+
+This reshapes the matrix into a 4 × 4 grid of 16 × 16 blocks, so that the block specification can be expressed easily. 
+
+4.2 Block Specification 
+
+The Block Specification ( BlockSpec in the implemen-tation, Appendix I) represents the extent of each block within the viewed space. 
+
+Definition 7 (Block Shape) . Given View V with n dimen-sions, the Block Shape b = ( b0, b1, . . . , bn−1) satisfies: s(V ) 
+
+> k
+
+≡ 0 mod bk , ∀k ∈ { 0, . . . , n − 1} (7) 
+
+where s (V ) 
+
+> k
+
+is the k-th shape component of V.
+
+The block layout LB inherits strides from the view: 
+
+LB
+
+> def
+
+= b : d(V ), as such, the Block is simply character-ized by its shape b ∈ Zn.
+
+Definition 8 (Block Grid) . The block grid layout is: 
+
+Lgrid = s(B) : dgrid , (8) 
+
+where the number of blocks along each dimension is g(B)
+
+> kdef
+
+=
+
+s(V ) 
+
+> k
+
+/bk, and the stride to the next dimension dgrid ,kdef 
+
+=
+
+bk · d(V ) 
+
+> k
+
+.
+
+All blocks are assumed to have the same size |B| =
+
+∏n−1 
+
+> k=0
+
+bk . When the tensor dimensions are not evenly divisible, the view can pad the domain so that all blocks are uniform. Since the block is the atomic spar-sity unit, S 3 is agnostic to the choice of view. 
+
+Example 9. For the 16 × 16 block view above, block shape 
+
+(1, 1, 16, 16 ) yields a squeezed block grid of shape (8, 8 ).The grid strides are (512, 16 ), giving the starting address of each block whose elements are strided via (64, 1 ).(a) 2:4 Sparsity. V = Lphys , b = ( 1, 1 ),                                            
+
+> s= ( 1, 4 ),k=2. Scalar blocks; scopes of 4 consecutive columns.
+> (b) 4:8 Sparsity. V=Lphys ,b=(1, 2 ),s= ( 1, 4 ),k=2. Column-pair blocks; scopes of 4 blocks.
+> (c) 1:2 thread-group coupled sparsity as seen in Figure 1b,
+> V= ( 2, 8, 16 ):(128,16,1 ),b=(1, 1, 16 ),s= ( 2, 1, 1 ),k=1. 16-col blocks; rows 8 apart com-pete.
+> (d) Coupled 2:4. V=(M,K
+> 8, 4, 2 ):
+> (K, 8, 1, 4 ),b= ( 1, 1, 1, 2 ),s= ( 1, 1, 4, 1 ),
+> k=2. Column-pair blocks couple cols 4 apart to reduce metadata.
+
+Figure 2: Experimental sparsity patterns: structure (top) and pruned result (bottom). Cell fill color encodes block identity; colored outlines delimit scopes; dark gray cells are pruned to zero. All four patterns are expressed by the same three primitives (View, Block, Scope) with different shapes, and pruned by the same S-OBS algorithm. 
+
+4.3 Scope Specification 
+
+Scopes organize blocks for sparsification decisions. The Scope operates on the block grid: blocks are to the Scope what elements are to the Block. 
+
+Definition 10 (Scope Shape) . The Scope Shape s =(g0, g1, . . . , gm−1) defines the extent of each scope over the block grid, satisfying divisibility constraints analogous to Block Shape. The number of blocks per scope: 
+
+|S| B =
+
+> m−1
+
+# ∏
+
+> k=0
+
+gk (9) 
+
+Definition 11 (Block-to-Scope Mapping) . The function 
+
+γ : [0, |L grid |) → [0, |L grid |/|S| B) maps block index to scope index. 
+
+Definition 12 (Scope Block Enumeration) . For scope ℓ,the set of block indices is: Blocks (ℓ) = {j : γ(j) = ℓ} (10) 
+
+Definition 13 (Scope Element Enumeration) . For scope 
+
+ℓ, the set of element indices is: Elements G (ℓ) = [
+
+> j∈Blocks (ℓ)
+
+Elements (j) (11) 
+
+4.4 Coupling 
+
+Coupling coordinates sparsity decisions across mul-tiple tensors so that they are pruned jointly. This is essential for maintaining structural consistency; for ex-ample, matching input and output channels, or prun-ing attention heads across Q, K, V, and O projections. Each coupling is defined by a permutation π(i) per tensor that reorders the block grid dimensions. The permutation brings the dimension to be coupled into the last position, so that blocks at the same grid co-ordinate (after permutation) are concatenated across tensors. 
+
+Definition 14 (Coupled Block Specification) . Given Ktensors with block specifications B(1), . . . , B(K) and per-mutations π(1), . . . , π(K), the coupled specification B⊗ =
+
+B(1) ⊗ · · · ⊗ B (K) requires that the permuted grid shapes agree: 
+
+s(B,1 ) 
+
+> π(1)
+
+= s(B,2 ) 
+
+> π(2)
+
+= · · · = s(B,K) 
+
+> π(K)
+
+(12) 
+
+where s(B,i) 
+
+> π(i)
+
+denotes the grid shape of B(i) with dimensions reordered by π(i).
+
+For a grid coordinate ℓ in the common permuted grid, the coupled block concatenates elements across ten-sors: CoupledBlock (ℓ) = 
+
+> K
+
+[
+
+> i=1
+
+Elements (i)
+
+π(i)−1
+
+(ℓ)
+
+
+
+(13) with coupled block size |B ⊗| = ∑Ki=1 |B (i)|. Blocks at the same position compete jointly during pruning. Definition 15 (Coupled Scope Specification) . Given K scope specifications S(1), . . . , S(K) with permutations 
+
+π(1), . . . , π(K) aligning the scope grids, the coupled block at position ℓ contains all blocks from every tensor at that coordinate: CoupledScope (ℓ) = 
+
+> K[
+> i=1
+
+Blocks (i)
+
+π(i)−1
+
+(ℓ)
+
+
+
+(14) 
+
+Within each coupled block, k -sparsity is applied over the concatenated block saliencies from all tensors. 
+
+4.5 Experimental Sparsity Patterns 
+
+We illustrate how S 3 encodes the four sparsity patterns used in our experiments (Section 6). Additional canon-ical patterns (unstructured, channel, head pruning, partial tensor) appear in Appendix D. For a weight matrix W ∈ RM×K:
+
+2:4 sparsity. The view is the physical layout ( V =
+
+Lphys ). Scalar blocks ( b = ( 1, 1 )) are blocked into sets of four consecutive columns ( s = ( 1, 4 )), and k = 2blocks are retained per scope. 
+
+4:8 sparsity. The view is again the physical layout. Each block spans two adjacent columns ( b = ( 1, 2 )), and scopes contain four blocks ( s = ( 1, 4 )) with k = 2, keeping 4 of every 8 columns at block granularity. 
+
+Coupled 2:4. A strided view pairs columns that are 8 apart within each 16-column segment: V =(M, K/ 16, 8, 2 ) : (K, 16, 1, 8 ), so that element [m, g, i, j]
+
+maps to Wm, 16 g+i+8j. Blocks of size b = ( 1, 1, 1, 2 )
+
+each contain a column pair, and blocks s = ( 1, 1, 4, 1 )
+
+collect four such pairs; retaining k = 2 enforces 2:4 spar-sity over coupled columns. The coupling amortizes mask metadata over pairs, improving the compression ratio from 9 / 16 to 17 / 32 for half-precision weights (Appendix E.5). 
+
+16-column block sparsity. A strided view couples rows that are 8 apart within 16-row chunks: V =(8, 2, K) : (K, 8 K, 1 ), mapping [p, r, c] to Wp+8r, c.Blocks of 16 contiguous columns ( b = ( 1, 1, 16 )) are blocked in row-pairs ( s = ( 1, 2, 1 )) with k = 1, yield-ing 50% block sparsity where paired rows share the same column mask. This pattern is hardware-friendly because it preserves contiguous memory access along the GEMM reduction dimension (Appendix E.4). 
+
+5 Integration with Pruning Algorithms 
+
+S3 provides the structural foundation for pruning al-gorithms. We derive the key operations for Optimal Brain Damage (OBD) (LeCun et al., 1989) and Optimal Brain Surgeon (OBS) (Hassibi and Stork, 1993). While recent methods such as SparseGPT (Frantar and Alis-tarh, 2023) and Wanda (Sun et al., 2023) implement effi-cient approximations of these criteria for large models, their formulations are tied to specific sparsity patterns. We return to the foundational OBD/OBS framework and derive structured extensions (S-OBD, S-OBS) that operate on arbitrary S 3 specifications. 
+
+5.1 Block-Level Quantities 
+
+Since Elements (j) enumerates the indices of block 
+
+j (see Appendix C for the formal definition), any per-element quantity lifts to blocks by restricting its indices to Elements (j). In particular, the block gradient is ∇j L = (∂L/∂we)e∈Elements (j), the block Hessian is Hj = (∂2 L/∂we1 ∂we2 )e1,e2∈Elements (j),and the cross-block Hessian is Hj1,j2 =(∂2 L/∂we1 ∂we2 )e1∈Elements (j1),e2∈Elements (j2). The same principle applies to coupled blocks and blocks via their respective element sets. 
+
+5.2 Optimal Brain Damage (OBD) 
+
+We extend OBD saliencies based on diagonal Hessian approximations to block-structured sparsity. 
+
+Definition 16 (Block OBD Saliency) . Under a diagonal Hessian approximation, the saliency of block j is: SOBD j = 12 ∑
+
+> e∈Elements (j)
+
+Hee w2 
+
+> e
+
+(15) At the scope level, pruning reduces to k-sparsity: within each scope ℓ, retain the k blocks with largest saliency SOBD  
+
+> j
+
+and prune the rest. 
+
+5.3 Optimal Brain Surgeon (OBS) 
+
+OBS uses the full inverse Hessian for optimal weight updates. 
+
+Definition 17 (Block OBS Saliency) . For block j with weight vector wj:SOBS j = 12 wTj
+
+
+
+[H−1]jj 
+
+−1
+
+wj (16) 
+
+where [H−1]jj is the diagonal block of the inverse Hessian. 
+
+Saliencies are aggregated across tensors for coupled specifications: Scoup  
+
+> ℓ
+
+= ∑Ki=1 S(i) 
+
+> ℓ
+
+.
+
+Theorem 1 (Optimal Weight Update for Block Prun-ing) . When pruning block j , the optimal update to remain-ing weights is: 
+
+δw = −H−1:, Ij
+
+
+
+[H−1]jj 
+
+−1
+
+wj (17) Algorithm 1 Structured OBS Pruning via S 3
+
+Require: Weight tensor W, Hessian inverse H−1, S 3
+
+spec S, blocks to keep k
+
+Ensure: Pruned weights W′, mask M 
+
+> 1:
+
+M ← 1 ▷ Initialize mask  
+
+> 2:
+
+for each scope ℓ in S do  
+
+> 3:
+
+for each block j ∈ Blocks (ℓ) do  
+
+> 4:
+
+wj ← Elements S (j) 
+
+> 5:
+
+Sj ← 12 wTj ([ H−1]jj )−1wj 
+
+> 6:
+
+P ← Blocks (ℓ) \ top-k(Sj) ▷ Blocks to prune  
+
+> 7:
+
+for j ∈ P in order of increasing Sj do  
+
+> 8:
+
+δw ← − H−1:, Ij ([ H−1]jj )−1wj 
+
+> 9:
+
+W ← W + δw ▷ Optimal weight update  
+
+> 10:
+
+Mj ← 0 ▷ Prune block  
+
+> 11:
+
+Update H−1 via Theorem 2  
+
+> 12:
+
+return W ⊙ M, M
+
+where Ij = Elements (j) and H−1:, Ij are the columns of H−1
+
+corresponding to block j elements. 
+
+5.4 Efficient Block OBS via Schur Complement 
+
+For iterative pruning, we maintain H−1 efficiently. Af-ter pruning block j, the updated inverse Hessian fol-lows from the Schur complement: 
+
+Theorem 2 (Inverse Hessian Update) . After pruning block j with index set I j:
+
+H′− 1 = H−1 − H−1:, Ij
+
+
+
+[H−1]jj 
+
+−1
+
+H−1 
+
+> Ij,:
+
+(18) 
+
+5.5 SparseGPT and Wanda as heuristics 
+
+SparseGPT (Frantar and Alistarh, 2023) uses row-wise OBS with the empirical Hessian H = 1 
+
+> N
+
+XT X, where 
+
+X ∈ RN×K is the calibration input. The block exten-sion applies OBS independently per row-block inter-section, using block-diagonal Hessian approximations. Wanda (Sun et al., 2023) is a special case that uses magnitude ×activation scoring without compensation (Appendix H). 
+
+5.6 Theoretical Analysis 
+
+We now establish formal properties of S 3: what pat-terns it can express, the computational cost of block-structured pruning, and what sparsity ratios are achievable under the scope constraint. 
+
+Expressiveness We show that S 3 is universal over axis-aligned patterns and complete for N:M sparsity. 
+
+Theorem 3 (Universality) . S3 can express any axis-aligned hyperrectangular sparsity pattern over a tensor. Proof. Any axis-aligned hyperrectangle in tensor coor-dinates can be mapped to a block via an appropriate view. The view reshapes the tensor such that the hy-perrectangle aligns with a contiguous block. Since views are arbitrary (subject to size preservation), any such pattern is expressible. 
+
+Theorem 4 (N:M Completeness) . For any N < M , the N:M sparsity pattern is expressible in S 3.Proof. Set V to reshape the tensor with innermost di-mension M. Set b = ( 1, . . . , 1 ) (scalar blocks). Set s to block M consecutive elements. The scope constraint enforces exactly N non-zero per M elements. The scope constraint discretizes the set of achievable sparsity ratios. 
+
+Theorem 5 (Achievable Sparsity) . For S 3 specification with block size |S| B blocks: 
+
+ρ ∈
+
+ k
+
+|S| B
+
+: k ∈ { 0, 1, . . . , |S| B}
+
+
+
+(19) 
+
+where ρ is the achievable block sparsity ratio within each scope. 
+
+Complexity Analysis The block structure deter-mines the cost of OBS-based pruning. 
+
+Theorem 6 (Block OBS Complexity) . Block OBS with B blocks of size b requires O(B · b3) saliency computation through block Hessian inverse, O(B2 · b2) weight updates, and O(k · B · b3) pruning iterations with Schur updates for k blocks. 
+
+6 Experiments 
+
+We validate S 3 by implementing the Structured OBS (S-OBS) entirely through the framework’s View, Block, and Scope abstractions. All sparsity patterns below are specified as S 3 configurations and pruned by the same algorithm (Algorithm 1). We focus on zero-shot (post-training) pruning, where a pre-trained model is sparsified in one pass using only a small calibration set, without any retraining or fine-tuning. This setting is the most practical for large language models, where retraining is prohibitively expensive. Following the experimental protocol of Wanda (Sun et al., 2023), we use 1024 calibration sam-ples of 1024 tokens from the English scope of the Colos-sal Clean Crawled Corpus (C4) (Raffel et al., 2019) and evaluate perplexity on WikiText-2 (Merity et al., 2016). Model Method PPL ( ↓) PPL Increase Time Qwen3-0.6B Dense 26.13 — —S-OBD 369.78 +1315.1% 79s SparseGPT 126.23 +383.0% 165s S-OBS 154.16 +489.9% 223s Qwen3-1.7B Dense 21.05 — —S-OBD 125.75 +497.4% 167s SparseGPT 56.36 +167.7% 352s S-OBS 46.26 +119.8% 963s Qwen3-4B Dense 16.44 — —SparseGPT 30.11 +83.1% 435s S-OBS 27.93 +69.9% 4206s Table 1: End-to-end 2:4 pruning of Qwen3 models. WikiText-2 word perplexity, 1024 C4 calibration samples. S-OBS achieves lower perplexity on Qwen3-1.7B and Qwen3-4B but not on Qwen3-0.6B, despite lower per-linear errors on all three (Appendices F and G). 
+
+Setup We use SparseGPT (Frantar and Alistarh, 2023) as our baseline and report the relative output Frobenius norm X( ˆW−W)T F/ XW T F , where ˆW
+
+is the pruned weight matrix. All experiments run on a single NVIDIA A100 (40GB), with S-OBS implemented via S 3 (per-row H−1 with Schur updates). We run a toy experiment where we extract the first linear layer from Qwen3-4B (Yang et al., 2025): weight matrix W ∈ R2560 ×9728 and calibration inputs X ∈
+
+R244449 ×9728 .Table 2 summarizes results across four sparsity config-urations, each expressed as a different S 3 specification (see Appendix D for the full specifications) but pruned by the same S-OBS implementation. All four patterns use the same pruning algorithm (Algorithm 1) with different S 3 specifications. No pattern-specific code is required. S-OBS consistently outperforms SparseGPT by 16– 20%. The improvement is remarkably stable across all four patterns, from fine-grained 2:4 to coarse 16-column block sparsity, demonstrating that per-row Hessian compensation generalizes across structures. The quality gap comes from per-row compensation, not mask selection. Replacing SparseGPT’s diagonal mask selection ( w2/d2) with exact (42) enumeration yields no improvement. The gap arises entirely from maintaining a per-row H−1 with Schur updates, ver-sus SparseGPT’s shared column-sequential approxi-mation. 
+
+6.1 End-to-End LLM Pruning 
+
+We evaluate S-OBS on full model pruning to assess whether per-layer output error improvements trans-late into end-to-end perplexity gains.        
+
+> Config S-OBS SparseGPT Impr. Time 2:4 11.87% 14.12%
+
++16.0% 53s Coupled 2:4 15.75% 19.01% +17.1% 217s 4:8 15.92% 19.00% +16.2% 279s 16-col block 26.91% 33.46% +19.6% 108s Table 2: Structured OBS via S 3 vs. SparseGPT on the first decoder layer of Qwen3-4B across four sparsity configura-tions (50% sparsity). S-OBS reports the best variant (True OBS with per-row Schur updates). “Impr.” is relative loss reduction (1 − S-OBS/SparseGPT ) × 100. 
+
+We prune Qwen3-1.7B layer-by-layer with 2:4 spar-sity ( b = ( 1, 1 ), s = ( 1, 4 )), using 1024 C4 calibration samples of length 1024. Each decoder layer is pro-cessed independently: we capture inputs to all seven linear projections (Q, K, V, O, Gate, Up, Down) via a single forward pass, prune each projection, then prop-agate through the pruned layer to obtain inputs for the next. Perplexity is evaluated on WikiText-2 after every fourth layer and at the final layer. Table 1 and Figure 3a show that S-OBS achieves 17.9% lower perplexity degradation than SparseGPT (46.26 vs. 56.36), with the gap widening steadily as more layers are pruned. S-OBS consistently achieves lower per-layer output error. Figure 4a shows that S-OBS achieves lower H-based output error on 177 of 196 individual linear projections. The heatmap (Figure 4b) confirms this ad-vantage spans all sublayer types and nearly all layers. Per-linear gains translate to model-level gains on Qwen3-1.7B. The per-layer decoder output error (Fig-ure 3b) shows S-OBS is better in 25 of 28 layers, and this advantage compounds into a substantial perplex-ity improvement. SparseGPT overtakes S-OBS in the final 3 lay-ers because the Hessian becomes increasingly ill-conditioned in later layers as pruning errors accumu-late in the propagated activations. The effect is most pronounced for projections with large input dimen-sion ( K ≫ ncal , e.g . the down_proj with K = 6144 vs. 
+
+ncal = 1024), where the rank-deficient Hessian inverse used by S-OBS becomes less reliable. SparseGPT’s column-sequential updates are more robust in this regime. The per-linear output error advantage of S-OBS is con-sistent across model sizes; however, it does not always translate to better perplexity. On Qwen3-0.6B, S-OBS wins on 178 of 196 linear layers yet achieves higher final perplexity (154.2 vs. 126.2) because the late-layer decoder error reversal is more severe in smaller mod-els. Notably, decoder error varies substantially across layers; middle layers appear more prunable than early (a) Perplexity progression (b) Decoder output error 
+
+Figure 3: End-to-end 2:4 pruning of Qwen3-1.7B. Figure 3a: WikiText-2 perplexity after pruning every fourth decoder layer. S-OBS maintains a growing advantage throughout, reaching 46.3 vs. 56.4 for SparseGPT. Figure 3b: Per-layer decoder output error. S-OBS achieves lower error in 25 of 28 layers; SparseGPT is slightly better only in the final three.  
+
+> (a) Per-linear output error (b) Improvement heatmap
+
+Figure 4: Per-linear analysis of Qwen3-1.7B 2:4 pruning. Figure 4a: Output error scatter (H-based metric). Points below the diagonal indicate S-OBS achieves lower error. S-OBS wins on 177 of 196 linear layers. Figure 4b: Relative improvement heatmap across layers and sublayer types. Blue indicates S-OBS is better. S-OBS dominates except for a few MLP projections in the final layers. 
+
+or late ones, though this observation is conditioned on the C4 calibration data and may not generalize across domains. We present the full Qwen3-0.6B results in Appendix F and per-projection error with further dis-cussion in Appendix G (Figures 9 and 10). 
+
+S-OBS runtime. S-OBS maintains a per-row K × K
+
+inverse Hessian, making its cost O(M · K2) per lin-ear projection. On Qwen3-4B ( d = 2560, dff = 9728), the down_proj (K = 9728) alone accounts for 73% of the total pruning time because K is 3.8 × larger than for attention projections ( K = 2560), and the per-row Schur update scales quadratically. SparseGPT avoids this bottleneck via column-sequential updates that are 
+
+O(M · K) per column, at the cost of lower pruning quality. 
+
+7 Conclusion 
+
+We have presented S 3 (Structured Sparsity Specifica-tion), a unified algebraic framework for neural net-work pruning. By decomposing sparsity into a com-posed View and two shape-based specifications (Block and Scope) with coupling across tensors, S 3 provides a principled approach to specifying diverse sparsity patterns under a common formalism. Using S 3, we implemented Structured OBS (S-OBS) with per-row Hessian inverse maintenance via Schur complement updates. On a single layer, S-OBS sur-passes SparseGPT by 16–20% across four distinct spar-sity configurations, all pruned by the same algorithm with different S 3 specifications. End-to-end pruning of Qwen3-1.7B with 2:4 sparsity yields 17.9% lower perplexity degradation than SparseGPT (46.3 vs. 56.4). Crucially, our experiments show that the quality gap comes from per-row Hessian compensation, not mask selection: replacing SparseGPT’s diagonal scoring with exact subset enumeration yields no improvement, while S-OBD (no compensation) performs far worse than both methods. The framework has limitations. S-OBS is 2–3 × slower than SparseGPT due to per-row Schur updates, though this is a one-time cost amortized over the entire de-ployment lifetime of the pruned model. The more fundamental limitation is that the per-row inverse Hes-sian becomes rank-deficient when calibration samples are fewer than the input dimension, causing late-layer degradation that prevents end-to-end gains on smaller models. Beyond post-training pruning, S 3 can also serve as a structural backbone for dynamic sparse training (Appendix I.2). References 
+
+Chen, S. S., Donoho, D. L., and Saunders, M. A. (1998). Atomic decomposition by basis pursuit. SIAM Jour-nal on Scientific Computing , 20(1):33–61. Colfax Research (2025). Categorical foundations for CuTe layouts. Technical report, Colfax Research. Chapter 2. Evci, U., Gale, T., Menick, J., Castro, P. S., and Elsen, E. (2020). Rigging the lottery: Making all tickets win-ners. In Proceedings of the 37th International Conference on Machine Learning (ICML) .Frankle, J. and Carlin, M. (2019). The lottery ticket hy-pothesis: Finding sparse, trainable neural networks. In International Conference on Learning Representations (ICLR) .Frantar, E. and Alistarh, D. (2023). Sparsegpt: Massive language models can be accurately pruned in one-shot. In International Conference on Machine Learning (ICML) .Gray, S., Radford, A., and Kingma, D. P. (2017). Gpu kernels for block-sparse weights. Technical report, OpenAI. Han, S., Pool, J., Tran, J., and Dally, W. J. (2015). Learn-ing both weights and connections for efficient neural networks. In Advances in Neural Information Process-ing Systems (NeurIPS) .Hassibi, B. and Stork, D. G. (1993). Second order derivatives for network pruning: Optimal brain sur-geon. In Advances in Neural Information Processing Systems (NeurIPS) .He, Y. and Xiao, L. (2024). Structured pruning for deep convolutional neural networks: A survey. IEEE Transactions on Pattern Analysis and Machine Intelli-gence , 46(5):2900–2919. LeCun, Y., Denker, J. S., and Solla, S. A. (1989). Optimal brain damage. In Advances in Neural Information Processing Systems (NeurIPS) .Li, H., Kadav, A., Durdanovic, I., Samet, H., and Graf, H. P. (2017). Pruning filters for efficient convnets. In 
+
+International Conference on Learning Representations (ICLR) .Mairal, J., Jenatton, R., Obozinski, G., and Bach, F. (2011). Convex and network flow optimization for structured sparsity. Journal of Machine Learning Re-search , 12(81):2681–2720. Mallat, S. (2008). A Wavelet Tour of Signal Processing, Third Edition: The Sparse Way . Academic Press, Inc., USA, 3rd edition. Merity, S., Xiong, C., Bradbury, J., and Socher, R. (2016). Pointer sentinel mixture models. Michel, P., Levy, O., and Neubig, G. (2019). Are sixteen heads really better than one? In Advances in Neural Information Processing Systems (NeurIPS) .Mocanu, D. C., Mocanu, E., Stone, P., Nguyen, P. H., Gibescu, M., and Liotta, A. (2017). Evolutionary training of sparse artificial neural networks: A net-work science perspective. CoRR , abs/1707.04780. NVIDIA (2020). Nvidia ampere architecture. Technical report, NVIDIA. NVIDIA (2023). Cute: Cuda templates for linear al-gebra subroutines. https://github.com/NVIDIA/ cutlass .Raffel, C., Shazeer, N., Roberts, A., Lee, K., Narang, S., Matena, M., Zhou, Y., Li, W., and Liu, P. J. (2019). Ex-ploring the limits of transfer learning with a unified text-to-text transformer. CoRR , abs/1910.10683. Sun, M., Liu, Z., Bair, A., and Kolter, J. Z. (2023). A simple and effective pruning approach for large lan-guage models. arXiv preprint arXiv:2306.11695 .Tibshirani, R. (2018). Regression shrinkage and se-lection via the lasso. Journal of the Royal Statistical Society: Series B (Methodological) , 58(1):267–288. Yang, A., Li, A., Yang, B., Zhang, B., Hui, B., Zheng, B., Yu, B., Gao, C., Huang, C., Lv, C., Zheng, C., Liu, D., Zhou, F., Huang, F., Hu, F., Ge, H., Wei, H., Lin, H., Tang, J., Yang, J., Tu, J., Zhang, J., Yang, J., Yang, J., Zhou, J., Zhou, J., Lin, J., Dang, K., Bao, K., Yang, K., Yu, L., Deng, L., Li, M., Xue, M., Li, M., Zhang, P., Wang, P., Zhu, Q., Men, R., Gao, R., Liu, S., Luo, S., Li, T., Tang, T., Yin, W., Ren, X., Wang, X., Zhang, X., Ren, X., Fan, Y., Su, Y., Zhang, Y., Zhang, Y., Wan, Y., Liu, Y., Wang, Z., Cui, Z., Zhang, Z., Zhou, Z., and Qiu, Z. (2025). Qwen3 technical report. Appendix 
+
+A Notation 
+
+Throughout this document, we will use the following notations: 
+
+Symbol Description 
+
+T A dense tensor 
+
+s = ( s0, . . . , sn−1) Shape tuple (extents) 
+
+d = ( d0, . . . , dn−1) Stride tuple 
+
+L = s : d Layout specification 
+
+|L| Size of a layout cosize (L) Cosize (memory footprint) 
+
+D Domain specification 
+
+oD, eD Domain offset and extent 
+
+B Block specification 
+
+S Scope specification 
+
+⊗ Coupling operator Table 3: Notation summary. 
+
+B Domain Specification 
+
+The Domain specifies which sub-tensor is subject to sparsification. Elements outside the domain are untouched by pruning. 
+
+Definition 18 (Domain) . A domain D over tensor T with physical layout Lphys is defined by: 
+
+• Offset oD = ( o0, . . . , on−1): Starting coordinates in the physical tensor 
+
+• Extent eD = ( e0, . . . , en−1): Size of the domain along each dimension satisfying o k + ek ≤ s(Lphys ) 
+
+> k
+
+for all k. 
+
+Definition 19 (Domain Size) . The number of elements in the domain: 
+
+|D| =
+
+> n−1
+
+# ∏
+
+> k=0
+
+ek (20) 
+
+Definition 20 (Domain Layout) . The domain induces a layout LD with: 
+
+LD = eD : d(Lphys ) (21) 
+
+The domain maps local coordinates iD ∈ dom (LD ) to physical coordinates: 
+
+ψD (iD ) = oD + iD (22) 
+
+Definition 21 (Domain Element Set) . The set of physical linear indices covered by domain D:Elements (D) = 
+
+n
+
+ϕLphys (oD + iD ) : iD ∈ dom (LD )
+
+o
+
+(23) 
+
+Example 22 (Sub-matrix Domain) . For a matrix W ∈ R128 ×128 with row-major storage, to sparsify only a 16 × 16 block starting at (32, 64 ):
+
+oD = ( 32, 64 ), eD = ( 16, 16 ) (24) 
+
+The domain covers 16 × 16 = 256 elements. The remaining 128 2 − 256 = 16128 elements are outside the domain and will not be pruned. B.1 Generalized Domain via Layout 
+
+For non-contiguous or strided sub-tensor selection, we generalize the domain using a layout. 
+
+Definition 23 (Generalized Domain) . A generalized domain DG is specified by: 
+
+• Domain Layout LD: Defines the logical shape of the domain 
+
+• Embedding ϕD : dom (LD ) → [0, |L phys |): Maps domain coordinates to physical linear indices 
+
+Example 24 (Strided Domain) . To select every other row of a 128 × 128 matrix (rows 0, 2, 4, . . . , 126 ): 
+
+LD = ( 64, 128 ) : (256, 1 ) (25) 
+
+This creates a domain of shape 64 × 128 where the row stride is 256 = 2 × 128 , effectively selecting alternate rows. 
+
+Example 25 (Diagonal Blocks Domain) . To select k diagonal b × b blocks from a kb × kb matrix: 
+
+LD = ( k, b, b) : (( b + 1) · kb · b, kb , 1 ) (26) 
+
+This selects the diagonal blocks while skipping off-diagonal regions. 
+
+B.2 Domain Composition 
+
+Multiple domains can be composed to create complex selection patterns. 
+
+Definition 26 (Domain Union) . For domains D1, D2 over the same tensor: Elements (D1 ∪ D 2) = Elements (D1) ∪ Elements (D2) (27) 
+
+Definition 27 (Domain Complement) . The complement domain ¯D contains all elements not in D:Elements ( ¯D) = [ 0, |T | ) \ Elements (D) (28) 
+
+B.3 Constraint: Block View over Domain 
+
+With domains, the Block View constraint is relaxed: 
+
+Definition 28 (Block View over Domain) . Given domain D with layout LD, the Block View VB satisfies: 
+
+|V B| = |D| (29) 
+
+The Block View reshapes the domain , not the full tensor. 
+
+C Block Specification Details 
+
+C.1 Block Index Mapping Theorem 7 (Block-to-Element Mapping) . For block index j ∈ Zn and intra-block offset o ∈ Zn with 0 ≤ ok < bk:idx (j, o) = 
+
+> n−1
+
+# ∑
+
+> k=0
+
+(jk · bk + ok) · d(V ) 
+
+> k
+
+(30) 
+
+Proof. The view coordinate corresponding to block j at offset o is: v = ( j0 · b0 + o0, . . . , jn−1 · bn−1 + on−1).Applying the view layout function: ϕV (v) = ∑n−1 
+
+> k=0
+
+vk · d(V ) 
+
+> k
+
+= ∑n−1 
+
+> k=0
+
+(jk · bk + ok) · d(V ) 
+
+> k
+
+.
+
+Definition 29 (Block Element Enumeration) . For block j, the set of linear indices is: Elements (j) = 
+
+(
+
+idx (j, o) : o ∈
+
+> n−1
+
+# ∏
+
+> k=0
+
+[0, bk)
+
+)
+
+(31) 
+
+Definition 30 (Element-to-Block Mapping) . The function β : [0, |T | ) → [0, |S| B) maps element index to block index: 
+
+β(e) = 
+
+> n−1
+
+# ∑
+
+> k=0
+
+ vk(e)
+
+bk
+
+
+
+· ∏
+
+> ℓ< k
+
+g(B) 
+
+> ℓ
+
+(32) 
+
+where v k(e) is the k-th view coordinate of element e. k-half 0 (cols 0 7) k-half 1 (cols 8 15) group group group group           
+
+> 0
+> T0
+> 1
+> T0
+> 2
+> T1
+> 3
+> T1
+> 4
+> T2
+> 5
+> T2
+> 6
+> T3
+> 7
+> T3
+> 8
+> T0
+> 9
+> T0
+> 10
+> T1
+> 11
+> T1
+> 12
+> T2
+> 13
+> T2
+> 14
+> T3
+> 15
+> T3
+> k-cols:
+> TID:
+> Standard 2:4 (scopes of 4 consecutive k-columns)
+> k-half 0 (cols 0 7) k-half 1 (cols 8 15) group group
+> 0
+> T0
+> 1
+> T0
+> 2
+> T1
+> 3
+> T1
+> 4
+> T2
+> 5
+> T2
+> 6
+> T3
+> 7
+> T3
+> 8
+> T0
+> 9
+> T0
+> 10
+> T1
+> 11
+> T1
+> 12
+> T2
+> 13
+> T2
+> 14
+> T3
+> 15
+> T3
+> k-cols:
+> TID:
+> Coupled 2:4 (atomic blocks = column pairs { i,i+8}, scopes of 4 pairs)
+> Thread TID=0 Thread TID=1 Thread TID=2 Thread TID=3
+
+Figure 5: Standard 2:4 (top) vs. Coupled 2:4 (bottom) over a single A-fragment row of mma.m16n8k16 (16 k-columns). Cell color encodes the owning TID; faded cells are pruned. Arcs link the column pair {c, c+8}; solid arcs are retained pairs, dashed arcs are pruned pairs. Standard 2:4 requires independent masks for each k-half. Coupled 2:4 uses one mask for both halves, halving the metadata and improving the compression ratio from 9/16 to 17/32 (Appendix E.5). 
+
+D Canonical Sparsity Patterns 
+
+We demonstrate S 3’s expressiveness by encoding canonical pruning patterns. Each pattern is fully determined by the View V, Block Shape b, and Scope Shape s; Table 4 summarizes five representative patterns. The four experimental patterns from Section 4.5 are visualized in Figure 2. 
+
+D.1 Unstructured Sparsity 
+
+Unstructured sparsity treats every scalar as an independent block. The view is the identity ( V = Lphys ), block shape is all-ones ( b = ( 1, 1, . . . , 1 )), and a single block spans the entire tensor ( s = ( |T | , )). Retaining the top-k
+
+blocks by saliency recovers standard magnitude or OBS pruning at arbitrary sparsity ratios. 
+
+D.2 N:M Sparsity 
+
+For 2:4 sparsity on a matrix W ∈ RM×K, the view is the physical layout and scopes block columns into consecutive fours: 
+
+V = ( M, K) : (K, 1 ), b = ( 1, 1 ), s = ( 1, 4 ) (33) Each scope contains four scalar blocks along the column dimension, and retaining k = 2 per scope enforces exactly 2-of-4 sparsity. Generalizing to N : M only requires changing the innermost block dimension to M and setting k = N.
+
+D.3 Block Sparsity 
+
+For b × b block sparsity the view is again the identity, but the block shape absorbs the spatial extent: b = ( b, b).The scope shape controls how blocks compete: setting s equal to the number of block rows yields row-wise sparsity, while a global block enforces a tensor-wide budget. 
+
+D.4 Channel Pruning 
+
+For a convolutional layer W ∈ RCout ×Cin ×H×W , the view flattens spatial and input dimensions so that each output channel becomes a single block: 
+
+V = ( Cout , Cin ·H·W) : (Cin ·H·W, 1 ), b = ( 1, Cin ·H·W) (34) A global block ( s = ( Cout , )) then selects channels by saliency. D.5 Attention Head Pruning 
+
+For multi-head attention with h heads and dimension d, Q, K, and V projections use block shape (1, d/h, d) along the head dimension, while the output projection uses (d, 1, d/h) to match. Coupling all four matrices along the head dimension ensures that pruning a head simultaneously removes the corresponding rows and columns across Q, K, V, and O. 
+
+D.6 Partial Tensor Sparsification 
+
+S3 can sparsify only a sub-region of a tensor via the Domain specification (Appendix B). As an example, consider a sparse MLP with a dense residual pathway: for W ∈ Rd×d, the first d/ 4 output rows are kept dense while the remaining 3 d/ 4 rows receive 2:4 sparsity. The domain offsets oD = ( d/ 4, 0 ), eD = ( 3d/ 4, d) select the sparse region, within which the standard 2:4 specification applies: 
+
+V = ( 3d/4, d/4, 4 ) : (d, 4, 1 ), b = ( 1, 1, 1 ), s = ( 1, 1, 4 ) (35)   
+
+> Pattern View
+
+V Block b Scope s Keep Unstructured (M, K) : (K, 1 ) (1, 1 ) (M, K) k 
+
+> N:M (2:4)
+
+(M, K) : (K, 1 ) (1, 1 ) (1, 4 ) 2Block b×b (M, K) : (K, 1 ) (b, b) (1, K/b) k 
+
+> Channel
+
+(Cout , Cin HW ) (1, Cin HW ) (Cout , ) k 
+
+> Head
+
+(h, d/h, d) (1, d/h, d) (h, 1, 1 ) k  
+
+> Table 4: Canonical sparsity patterns expressed in S 3. Strides are implied by standard row-major order. The Keep column is the number of blocks retained per scope.
+
+D.7 Experimental Patterns: Complete Specifications 
+
+For a weight matrix W ∈ RM×K, the four patterns used in the experiments are fully determined by the following View, Block, and Scope shapes. 
+
+2:4 sparsity. 
+
+V = Lphys , b = ( 1, 1 ), s = ( 1, 4 ), k = 2 (36) Scalar blocks are scoped into blocks of four consecutive columns; retaining k = 2 enforces exactly 2-of-4 sparsity per row. 
+
+4:8 sparsity. 
+
+V = Lphys , b = ( 1, 2 ), s = ( 1, 4 ), k = 2 (37) Each 2-column block is the atomic unit; blocks of four blocks span 8 consecutive columns, and k = 2 retains half. 
+
+Coupled 2:4. A strided view pairs columns that are 8 positions apart within each 16-column segment. Element 
+
+[m, g, i, j] maps to Wm, 16 g+i+8j:
+
+V = ( M, K/16, 8, 2 ) : (K, 16, 1, 8 ), b = ( 1, 1, 1, 2 ), s = ( 1, 1, 4, 1 ), k = 2 (38) Each block bundles a coupled column pair; blocks of four such pairs enforce 2:4 sparsity over paired columns jointly. The compression ratio improves from 9/16 to 17/32 (Appendix E.5). 
+
+16-column block sparsity. A strided view couples rows that are 8 apart within 16-row chunks. Element [p, r, c]
+
+maps to Wp+8r, c:
+
+V = ( 8, 2, K) : (K, 8 K, 1 ), b = ( 1, 1, 16 ), s = ( 1, 2, 1 ), k = 1 (39) Each block spans 16 contiguous columns; paired rows (0 and 8, 1 and 9, . . . ) share the same column mask, yielding 50% block sparsity. This pattern preserves contiguous memory access along the GEMM reduction dimension (Appendix E.4). 0 4 8 12                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       
+
+> k
+> 0
+> 4
+> 8
+> 12
+> m
+> 0011223300112233
+> 4455667744556677
+> 889910 10 11 11 889910 10 11 11
+> 12 12 13 13 14 14 15 15 12 12 13 13 14 14 15 15
+> 16 16 17 17 18 18 19 19 16 16 17 17 18 18 19 19
+> 20 20 21 21 22 22 23 23 20 20 21 21 22 22 23 23
+> 24 24 25 25 26 26 27 27 24 24 25 25 26 26 27 27
+> 28 28 29 29 30 30 31 31 28 28 29 29 30 30 31 31
+> 0011223300112233
+> 4455667744556677
+> 889910 10 11 11 889910 10 11 11
+> 12 12 13 13 14 14 15 15 12 12 13 13 14 14 15 15
+> 16 16 17 17 18 18 19 19 16 16 17 17 18 18 19 19
+> 20 20 21 21 22 22 23 23 20 20 21 21 22 22 23 23
+> 24 24 25 25 26 26 27 27 24 24 25 25 26 26 27 27
+> 28 28 29 29 30 30 31 31 28 28 29 29 30 30 31 31
+> 0246
+> n
+> 0
+> 4
+> 8
+> 12
+> k
+> 04812 16 20 24 28
+> 04812 16 20 24 28
+> 15913 17 21 25 29
+> 15913 17 21 25 29
+> 2610 14 18 22 26 30
+> 2610 14 18 22 26 30
+> 3711 15 19 23 27 31
+> 3711 15 19 23 27 31
+> 04812 16 20 24 28
+> 04812 16 20 24 28
+> 15913 17 21 25 29
+> 15913 17 21 25 29
+> 2610 14 18 22 26 30
+> 2610 14 18 22 26 30
+> 3711 15 19 23 27 31
+> 3711 15 19 23 27 31
+> 0246
+> n
+> 0
+> 4
+> 8
+> 12
+> m
+> 00112233
+> 44556677
+> 889910 10 11 11
+> 12 12 13 13 14 14 15 15
+> 16 16 17 17 18 18 19 19
+> 20 20 21 21 22 22 23 23
+> 24 24 25 25 26 26 27 27
+> 28 28 29 29 30 30 31 31
+> 00112233
+> 44556677
+> 889910 10 11 11
+> 12 12 13 13 14 14 15 15
+> 16 16 17 17 18 18 19 19
+> 20 20 21 21 22 22 23 23
+> 24 24 25 25 26 26 27 27
+> 28 28 29 29 30 30 31 31
+
+Figure 6: Thread-fragment assignment for mma.sync.aligned.m16n8k16 . Cell color encodes the owning thread (hue = thread block g = ⌊t/ 4⌋, brightness = within-block offset t mod 4). Dashed lines mark the k-half boundary ( k = 8). Each thread owns 8 fp16 elements of A, 4 of B, and 4 fp32 elements of C. The 2-column k-pair structure of A and B is the hardware reason why 2:4 and 4:8 sparsity patterns are natural: surviving elements fill exactly the k-col pairs owned by a single thread. 
+
+E Hardware Mapping 
+
+E.1 Tensor Core Warp Fragment Layout 
+
+NVIDIA tensor cores execute matrix multiply-accumulate on fixed tile shapes. The mma.sync.aligned.m16n8k16 
+
+instruction (Ampere and later) is the fundamental fp16 tile: it multiplies a 16 ×16 A fragment by a 16 ×8 B fragment and accumulates into a 16 ×8 C fragment, with all 32 threads of a warp participating simultaneously. Figure 6 shows the per-thread element assignment for each matrix. Let t denote the lane index (0 ≤ t < 32), 
+
+g = ⌊t/4 ⌋ (thread block, 0 ≤ g < 8), and τ = t mod 4 (within-block offset). • A (16 ×16, row-major): thread t owns m-rows {g, g+8} and k-columns {τ·2, τ·2+1, τ·2+8, τ·2+9},comprising two k-column pairs, one per k-half. • B (16 ×8, col-major): thread t owns k-rows {τ·2, τ·2+1, τ·2+8, τ·2+9} and n-column g.• C (16 ×8): thread t owns m-rows {g, g+8} and n-columns {τ·2, τ·2+1}.The 2-column granularity in A and B directly motivates our sparsity choices. For 2:4 sparsity, each scope of 4 consecutive k-columns corresponds to exactly two consecutive thread-owned column pairs; retaining 2 of 4 means keeping one complete pair per thread. For 4:8, scopes span two such pairs per k-half, and retaining 4 of 8 keeps one pair per k-half per thread. The 16-column block sparsity aligns with the full k-extent of a single mma tile, so each surviving block maps to a contiguous set of A columns owned by all 4 threads in a thread block. 
+
+E.2 Coupled 2:4 vs. Standard 2:4 
+
+Standard 2:4 sparsity blocks 4 consecutive k-columns and retains 2. Each block of 4 elements requires its own 4-bit mask to record which 2 survive. Coupled 2:4 instead treats the column pair {c, c+8} as the atomic pruning unit and forms scopes of 4 such pairs. Two pairs are retained per scope, enforcing 2-of-4 sparsity over pairs rather than over individual columns. Because both columns in a pair share the same mask bit, the metadata for the second k-half is eliminated entirely: one 4-bit mask covers 8 values instead of 4. This halves the metadata overhead from 4 / 32 = 12.5% to 4/64 = 6.25% of the compressed payload. The reduction is particularly significant for sub-byte quantized weights. At 4-bit precision, standard 2:4 metadata adds 0.5 bits per weight ( ∼10% memory overhead), whereas coupled 2:4 reduces this to 0.25 bits ( ∼5%). Figure 5 illustrates the difference. Method Dense PPL PPL ( ↓) PPL Increase Time S-OBD 26.13 369.78 +1315.1% 79s SparseGPT 26.13 126.23 +383.0% 165s S-OBS 26.13 154.16 +489.9% 223s Table 5: End-to-end 2:4 pruning of Qwen3-0.6B (28 layers). WikiText-2 word perplexity, 1024 C4 calibration samples. S-OBD (no compensation) performs substantially worse than both SparseGPT and S-OBS, confirming that compensation is critical. 
+
+E.3 NVIDIA Sparse Tensor Cores 
+
+NVIDIA Ampere and later architectures accelerate 2:4 structured sparsity in hardware. The corresponding S 3
+
+specification uses scalar blocks blocked into fours along the innermost dimension: 
+
+VB = ( M, K/4, 4 ) : (K, 4, 1 ), b = ( 1, 1, 1 ) (40) 
+
+VG = ( M, K/4, 4 ) : (1, M, M · K/4 ), s = ( 1, 1, 4 ) (41) 
+
+E.4 Block-Sparse GEMM 
+
+Efficient block-sparse matrix multiplication requires blocks that align with GEMM tiling. Common tile sizes are 64 × 64, 128 × 128, and 256 × 256, so setting b = ( 64, 64 ) or (128, 128 ) ensures that each non-zero block maps directly to a hardware tile without padding. Column-block sparsity (e.g. 16-column blocks) is particularly hardware-friendly because it preserves contiguous memory access along the reduction dimension of the matrix multiply Y = XW T . Each surviving column block corresponds to a contiguous slice of the input activation X, so the sparse GEMM reduces to a sequence of dense sub-GEMMs with no gather or scatter overhead. The block width (16) aligns with GPU vector load widths (128-bit or 256-bit), ensuring coalesced memory transactions. Row-coupling across the view further guarantees that paired rows share the same column mask, allowing the sparse index metadata to be stored once per pair rather than per row. 
+
+E.5 Coupled 2:4 Compression Ratio 
+
+Standard 2:4 sparsity stores 2 half-precision values (32 bits) plus a 4-bit mask per block of 4 elements, giving a compressed size of 36 bits per 64 uncompressed bits, or a 9/16 compression ratio. Coupled 2:4 applies the same 2:4 pattern over column pairs. Each scope now contains 4 pairs (8 half-precision values, 128 bits uncompressed). Retaining 2 pairs stores 4 values (64 bits) with the same 4-bit mask, for a total of 68 bits. The compression ratio is 68 / 128 = 17 / 32 ≈ 0.531, improving over the standard 9 / 16 ≈ 0.563. The gain arises because the 4-bit mask metadata is amortized over 8 values instead of 4, and the paired columns share a single index structure. 
+
+E.6 Memory Access Patterns 
+
+Coalesced memory access on GPUs requires that threads in a warp read contiguous addresses. In S 3, this translates to designing the view so that the innermost block dimension has stride 1, ensuring that all elements within a block are loaded in a single coalesced transaction. 
+
+F Qwen3-0.6B End-to-End Results 
+
+We repeat the end-to-end 2:4 pruning experiment from Section 6.1 on the smaller Qwen3-0.6B (28 layers, d = 1024, 
+
+dff = 3072). The per-linear error advantage is consistent across model sizes. S-OBS achieves lower H-based output error on 178 of 196 linear layers (Table 5 and fig. 8a), nearly identical to the 177/196 ratio on Qwen3-1.7B. The mean per-linear error is 15.51% for S-OBS vs. 16.88% for SparseGPT. (a) Perplexity progression (b) Decoder output error 
+
+Figure 7: End-to-end 2:4 pruning of Qwen3-0.6B. Figure 7a: WikiText-2 perplexity after pruning every fourth decoder layer. SparseGPT maintains lower perplexity throughout, reaching 126.2 vs. 154.2 for S-OBS. Figure 7b: Per-layer decoder output error. S-OBS achieves lower error in early-to-mid layers, but SparseGPT becomes substantially better in later layers.  
+
+> (a) Per-linear output error (b) Improvement heatmap
+
+Figure 8: Per-linear analysis of Qwen3-0.6B 2:4 pruning. Figure 8a: Output error scatter. S-OBS wins on 178 of 196 linear layers, comparable to the 177/196 advantage on Qwen3-1.7B. Figure 8b: Improvement heatmap. S-OBS dominates early-to-mid layers but loses in the final layers, particularly for projections with large input dimension ( down_proj , K = 3072). 
+
+However, per-linear gains do not translate to perplexity gains on small models. Despite winning the per-linear metric on 91% of layers, S-OBS achieves substantially higher perplexity (154.2 vs. 126.2). This contrasts with Qwen3-1.7B, where S-OBS achieves both lower per-linear errors and lower perplexity (46.3 vs. 56.4). The late-layer decoder error reversal is more severe in smaller models. The decoder output error (Figure 7b) shows that SparseGPT overtakes S-OBS much earlier and by a larger margin than on Qwen3-1.7B. This is consistent with the Hessian rank-deficiency explanation from Section 6.1: smaller models have lower hidden dimension ( d = 1024) relative to the calibration set size ( n = 1024), so K/n ratios are already at or above 1.0 for attention projections ( K = 2048 for q_proj ) and 3.0 for MLP projections ( K = 3072 for down_proj ). The compounding of late-layer errors overwhelms the gains from early layers, leading to worse end-to-end perplexity despite better per-linear metrics. 
+
+G Per-Linear-Type Error Progression 
+
+In both models, S-OBS (solid) achieves lower per-linear error than SparseGPT (dashed) across nearly all projection types and layers (Figure 9). The decoder error plots confirm that this advantage compounds in early-to-mid layers but reverses in later layers, especially for the smaller model. The decoder error varies substantially across layers: early layers (0–2) exhibit high error that drops sharply, middle layers maintain low error, and late layers show a gradual increase. This suggests that some layers are inherently more “prunable” than others, likely because middle layers develop more redundant representations during pre-training, while early layers (close to the embedding) and late layers (close to the prediction head) carry less redundancy. However, both the pruning decisions and the error measurements are conditioned on the C4 calibration data. Whether the same layers remain easy to prune under a different data domain (e.g. code, mathematics, or multilingual text) is an open question. The Hessian H = 1 
+
+> N
+
+XT X captures second-order statistics of the calibration distribution; a domain shift could change which directions are important, potentially altering both the optimal pruning masks and the per-layer error profile. Investigating the sensitivity of layer-wise prunability to calibration domain is left for future work. 0 5 10 15 20 25 
+
+> Decoder layer
+> 7.5
+> 10.0
+> 12.5
+> 15.0
+> 17.5
+> 20.0
+> 22.5
+> 25.0
+> Output error (%)
+> K
+> Q
+> O
+> V
+
+Qwen3-1.7B Attention projection error (2:4) 
+
+> S-OBS
+> SparseGPT
+
+(a) 1.7B attention (Q/K/V/O) 0 5 10 15 20 25 
+
+Decoder layer 
+
+> 0
+> 5
+> 10
+> 15
+> 20
+> 25
+> Output error (%)
+> Down
+> Gate
+> Up
+
+Qwen3-1.7B MLP projection error (2:4)  
+
+> S-OBS
+> SparseGPT
+
+(b) 1.7B MLP (Gate/Up/Down) 0 5 10 15 20 25 
+
+> Decoder layer
+> 10.0
+> 12.5
+> 15.0
+> 17.5
+> 20.0
+> 22.5
+> 25.0
+> Output error (%)
+> K
+> Q
+> O
+> V
+
+Qwen3-0.6B Attention projection error (2:4) 
+
+> S-OBS
+> SparseGPT
+
+(c) 0.6B attention (Q/K/V/O) 0 5 10 15 20 25 
+
+Decoder layer 
+
+> 0
+> 5
+> 10
+> 15
+> 20
+> 25
+> Output error (%)
+> Down
+> Gate
+> Up
+
+Qwen3-0.6B MLP projection error (2:4)  
+
+> S-OBS
+> SparseGPT
+
+(d) 0.6B MLP (Gate/Up/Down) 0 5 10 15 20 25 
+
+Decoder layer 
+
+> 0
+> 5
+> 10
+> 15
+> 20
+> 25
+> 30
+> Decoder error (%)
+
+Qwen3-1.7B Decoder error after pruning (2:4) 
+
+> SparseGPT
+> S-OBS
+
+(e) 1.7B decoder error 0 5 10 15 20 25 
+
+Decoder layer 
+
+> 5
+> 10
+> 15
+> 20
+> 25
+> 30
+> Decoder error (%)
+
+Qwen3-0.6B Decoder error after pruning (2:4)  
+
+> SparseGPT
+> S-OBS
+
+(f) 0.6B decoder error 
+
+Figure 9: Per-projection output error and decoder error across decoder layers (2:4 pruning, 1024 C4 calibration samples). Solid = S-OBS, dashed = SparseGPT. Top row: attention projections (Q/K/V/O). Middle row: MLP projections (Gate/Up/Down). Bottom row: full decoder output error. Left column: Qwen3-1.7B. Right column: Qwen3-0.6B. Per-linear metric (top/middle): ptr (∆W H ∆WT ) / tr (W H W T ) where ∆W = ˆW − W, H = 1
+
+N XT X. Decoder metric (bottom): ˆY − Y F / ∥Y∥F where Y
+
+and ˆY are the decoder layer outputs before and after pruning. S-OBS achieves lower per-linear error across nearly all layers and projection types, but the decoder-level advantage reverses in later layers, more severely for the smaller model. 0 5 10 15 20 25 30 35                   
+
+> Decoder layer
+> 5
+> 10
+> 15
+> 20
+> 25
+> Output error (%)
+> Q
+> K
+> O
+> V
+> Qwen3-4B Attention projection error (2:4)
+> S-OBS
+> SparseGPT (a) 4B attention (Q/K/V/O) 0510 15 20 25 30 35
+> Decoder layer
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> Output error (%)
+> Down
+> Gate
+> Up
+> Qwen3-4B MLP projection error (2:4)
+> S-OBS
+> SparseGPT (b) 4B MLP (Gate/Up/Down) 0510 15 20 25 30 35
+> Decoder layer
+> 5
+> 10
+> 15
+> 20
+> Decoder error (%)
+> Qwen3-4B Decoder error after pruning (2:4)
+> SparseGPT
+> S-OBS
+> (c) 4B decoder error
+
+Figure 10: Qwen3-4B (36 layers): per-projection output error and decoder error (2:4 pruning, 1024 C4 calibration samples). Same format as Figure 9. S-OBS wins on all 252 linear projections. The decoder error spike at layer 16 is shared by both methods, suggesting an inherently sensitive layer. 
+
+H Wanda with Block Structure 
+
+Wanda Sun et al. (2023) scores each element by combining weight magnitude with input activation norms: 
+
+SWanda 
+
+ij = |Wij | · ∥ X:, j∥2 (42) The block saliency is SWanda 
+
+k = ∑(i,j)∈Elements (k) SWanda 
+
+ij , and scope-level pruning applies k-sparsity over block scores. This is equivalent to S-OBD with a diagonal Hessian approximation Hjj ≈ ∥ X:, j∥22/N and no weight compensation. 
+
+I Implementation 
+
+We release sparsekit , a PyTorch library that implements S 3. The documentation is bundled with the submission and can be browsed locally (see the included README.md ). 
+
+I.1 Library Architecture 
+
+sparsekit is organized in three layers that correspond directly to the three S 3 primitives, plus a pruners layer on top. 
+
+Layer 1: View ( sparsekit.view ). View(param, shape, stride) is a lightweight dataclass that wraps an 
+
+nn.Parameter with an arbitrary n-dimensional shape-stride pair. Data access is via torch.as_strided , which constructs a zero-copy view into the parameter’s storage; there is no memory allocation. Crucially, writes to 
+
+view.data propagate directly back to the underlying parameter via the @data.setter , so all in-place pruning operations are transparent to the rest of the model. The class exposes two key constructors. View.from_existing(param) wraps a plain Parameter with its physical layout (identity view). View(param, shape, stride) constructs an arbitrary strided view; the caller is respon-sible for ensuring the shape-stride pair is consistent with the parameter’s storage. The View is the only place where the physical layout appears; all higher-level code is agnostic to it. 
+
+Layer 2: Block Specification ( sparsekit.block ). BlockSpec(view, shape) defines the atomic sparsity unit. The block shape b must divide the view shape element-wise; the library validates this at construction time. The 
+
+block grid (the array of block indices) has shape s(B) = ( sk/bk)n−1 
+
+> k=0
+
+and is computed lazily as a cached_property .
+
+BlockSpec provides a rich set of reduction operations (norms, min, max) that operate over block elements, and index utilities that map between block grid coordinates and physical parameter positions. These index mappings are the key bridge between the abstract specification and actual tensor indexing in the pruner. 
+
+BlockCoupling holds a list of BlockSpec s and exposes them as a single virtual block whose element set is the union of all member blocks at the same grid coordinate (after applying the per-tensor permutation). This implements Definition 14. 
+
+Layer 3: Scope Specification ( sparsekit.scope ). ScopeSpec(block, shape) operates on the block grid : blocks are to blocks what elements are to blocks. The scope shape s divides the block grid shape, yielding a scope grid of shape (s(B) 
+
+> k
+
+/gk).The key operation is hard_threshold , which implements k-sparsity within each scope in a fully vectorized manner: it computes a per-scope k-th largest threshold, then zeros out all blocks below that threshold via an in-place mask applied through the View.apply_mask write-through mechanism. No gather/scatter is needed because the block view is contiguous in the scope’s logical layout. 
+
+ScopeCoupling mirrors BlockCoupling at the scope level, concatenating block saliencies across tensors before ranking. 
+
+Layer 4: Pruners ( sparsekit.pruners ). StructuredOBS(scope_spec, H) implements Algorithm 1 on top of any ScopeSpec . It accepts the empirical Hessian H = 1 
+
+> N
+
+XT X and pre-computes H−1 (with damping) once. Per-row pruning proceeds by: 1. Extracting the per-row sub-matrix Cm ∈ RK×K as an fp16 clone of H−1 (halves memory bandwidth). 2. Scoring each block by Sj = 12 wTj [Cm]−1 
+
+> jj
+
+wj.3. Zeroing the |S| B − k lowest-saliency blocks and applying the Schur update Cm −= Cm[: , Ij][ Cm]−1 
+
+> jj
+
+Cm[Ij, :]
+
+via torch.addmm (fused, no temporary allocation). Row-coupled patterns (e.g. 16-column block) are handled by a separate code path that operates on multi-row view chunks and uses sequential Schur updates with ng = 1 to avoid cross-row contamination. 
+
+I.2 Dynamic Sparse Training 
+
+The experiments in the main paper focus on zero-shot (post-training) pruning, where a pre-trained model is sparsified without retraining. S 3 also supports dynamic sparse training, where the sparsity mask evolves during training while maintaining a fixed sparsity budget. In dynamic sparse training Mocanu et al. (2017); Evci et al. (2020), the training loop alternates between standard gradient updates on the active (non-zero) parameters and periodic mask updates that prune low-saliency connections and regrow new ones. S 3 provides the structural backbone for this process: the View, Block, and Scope specifications define which parameters compete for retention, the saliency criteria (S-OBD or S-OBS) determine which blocks to prune, and the regrowth step activates new blocks within the same block structure. The regrowth policy can target blocks with high gradient magnitude (RigL Evci et al. (2020)) or random blocks (SET Mocanu et al. (2017)); in both cases the block-level saliency scores from Section 5 serve directly as the pruning criterion, and the Scope constraint ensures that the budget k is respected after every update step. Dynamic sparse training with S 3-structured masks is left for future work. I.3 Expressing the Four Experimental Patterns  
+
+> 1
+
+from sparsekit import View, BlockSpec, ScopeSpec, StructuredOBS  
+
+> 23
+
+# 2:4 sparsity (W: M x K, keep 2 of 4 consecutive columns)  
+
+> 4
+
+v = View.from_existing(W)  
+
+> 5
+
+block = BlockSpec(v, shape=(1, 1))  
+
+> 6
+
+part = ScopeSpec(block, shape=(1, 4))  
+
+> 78
+
+# 4:8 sparsity (2-column blocks, keep 2 of 4 blocks)  
+
+> 9
+
+v = View.from_existing(W)  
+
+> 10
+
+block = BlockSpec(v, shape=(1, 2))  
+
+> 11
+
+part = ScopeSpec(block, shape=(1, 4))  
+
+> 12 13
+
+# Coupled 2:4 (pair columns 8 apart within each 16-col segment)  
+
+> 14
+
+v = View(W, shape=(M, K//16, 8, 2), stride=(K, 16, 1, 8))  
+
+> 15
+
+block = BlockSpec(v, shape=(1, 1, 1, 2))  
+
+> 16
+
+part = ScopeSpec(block, shape=(1, 1, 4, 1))  
+
+> 17 18
+
+# 16-column block (rows 8 apart share one column mask)  
+
+> 19
+
+v = View(W, shape=(8, 2, K), stride=(K, 8*K, 1))  
+
+> 20
+
+block = BlockSpec(v, shape=(1, 1, 16))  
+
+> 21
+
+part = ScopeSpec(block, shape=(1, 2, 1))  
+
+> 22 23
+
+# Pruning: same call for all patterns  
+
+> 24
+
+H = (X.T @ X) / X.shape[0] # empirical Hessian (K x K)  
+
+> 25
+
+obs = StructuredOBS(part, H)  
+
+> 26
+
+obs.prune_true_obs(nnz=k) # in-place, writes through View 
+
+The identical prune_true_obs call works for all four patterns; all structural differences are encoded in part . This is the concrete realization of the claim that S 3 decouples the sparsity structure from the pruning algorithm.
