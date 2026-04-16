@@ -1,0 +1,2075 @@
+Title: Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions
+
+URL Source: https://arxiv.org/pdf/2604.07931v1
+
+Published Time: Fri, 10 Apr 2026 00:42:58 GMT
+
+Number of Pages: 20
+
+Markdown Content:
+# Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 
+
+Jing Wang 1 2 Yu-Yang Qian 1 2 Ke Xue 1 2 Chao Qian 1 2 Peng Zhao 1 2 Zhi-Hua Zhou 1 2 
+
+Abstract 
+
+Output-length prediction is important for efficient LLM serving, as it directly affects batching, mem-ory reservation, and scheduling. For prompt-only length prediction, most existing methods use a one-shot sampled length as the label, im-plicitly treating each prompt as if it had one true target length. We show that this is unreliable: even under a fixed model and decoding setup, the same prompt induces a prompt-conditioned output length distribution , not a deterministic scalar, and this distribution is consistent with 
+
+heavy-tailed behavior. Motivated by this, we cast length prediction as robust estimation from heavy-tailed prompt-conditioned length distribu-tions. We propose prompt-conditioned length dis-tribution (ProD) methods, which construct train-ing targets from multiple independent generations of the same prompt. Two variants are developed to reuse the served LLM’s hidden states: ProD-M ,which uses a median-based target for robust point prediction, and ProD-D, which uses a distribu-tional target that preserves prompt-conditioned uncertainty. We provide theoretical justifications by analyzing the estimation error under a surro-gate model. Experiments across diverse scenarios show consistent gains in prediction quality. 
+
+1. Introduction 
+
+Large language models (LLMs) have achieved remark-able success across a wide range of tasks, including chat-bots (Ouyang et al., 2022), mathematical reasoning (Guo et al., 2025), and agentic tasks (Xi et al., 2025). As the inference cost of LLMs grows with increasing parameter size, the generation length associated with different prompts emerges as a key factor for efficiency. For example, in serv-
+
+> 1
+
+State Key Laboratory of Novel Software Technology, Nanjing University, Nanjing 210023, China 2School of Artificial Intelli-gence, Nanjing University, Nanjing 210023, China. Correspon-dence to: Zhi-Hua Zhou <zhouzh@lamda.nju.edu.cn>. 
+
+Preprint 
+
+ing scenarios (Zheng et al., 2023a), knowing the output length in advance enables better KV cache reservation and improved scheduling, directly enhancing throughput and reducing latency. In agentic workflows (Liu et al., 2024) where each action triggers one or more LLM calls, predict-ing the output length allows the orchestrator to improve end-to-end latency. These scenarios make length prediction 
+
+a key building block for efficient LLM inference. From a broader perspective, modern LLM serving is a 
+
+learning-augmented scheduling problem: the system must allocate time-shared computational resources across con-current requests, including GPU memory, compute slots, batch positions, etc. The quality of these allocation deci-sions hinges on learned predictions about future resource demands. This viewpoint is precisely captured by the CoRE-learning framework (Zhou, 2024), which argues that when computational resources are time-shared, learning and scheduling become inseparable; the learning component must produce signals that directly inform scheduling deci-sions, not merely optimize standalone prediction accuracy. Output length prediction is a concrete and central instantia-tion of this paradigm: it provides the serving scheduler with a per-request estimate of computational cost, bridging the gap between a learned predictor and the resource allocation it is meant to support. Given this trend, length prediction for LLMs has attracted growing attention. Previous works have devoted consider-able effort to predicting output length. S3 (Jin et al., 2023) trains an auxiliary model to predict the output sequence length before generation. LTR (Fu et al., 2024) employs a learning-to-rank model to predict the relative order of out-put lengths within a batch. TRAIL (Shahout et al., 2025) attaches a lightweight classifier to the target LLM’s inter-mediate embeddings to predict output length in an online manner, and EGTP (Xie et al., 2026) further improves rep-resentation quality through entropy-weighted informative token representations for more accurate length prediction. Despite achieving remarkable empirical success, these meth-ods typically treat output length prediction as a deterministic scalar, i.e., use a one-shot sampled length as the label. How-ever, for LLM decoding, generations from the same prompt and fixed configuration can produce noticeably different 1
+
+> arXiv:2604.07931v1 [cs.LG] 9 Apr 2026
+
+Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions Math Coding LongSequence Chat  
+
+> 0
+> 25
+> 50
+> 75
+> 100
+> 125
+> 150
+> Prompt-level Median-MAE (tokens)
+> Qwen Llama
+
+(a) Noise radius across 8 settings. 0 200 400 600 800 1000  
+
+> Output length (tokens)
+> 0.0000
+> 0.0025
+> 0.0050
+> 0.0075
+> 0.0100
+> 0.0125
+> 0.0150
+> 0.0175
+> Density
+> Math
+> Coding
+> LongSequence
+
+(b) Heavy-tail examples on Qwen. 0 200 400 600 800 1000  
+
+> Output length (tokens)
+> 0.000
+> 0.002
+> 0.004
+> 0.006
+> 0.008
+> 0.010
+> 0.012
+> 0.014
+> Density
+> Math
+> Coding
+> LongSequence
+
+(c) Heavy-tail examples on Llama. 
+
+Figure 1. Key observations about prompt-conditioned output length. Figure (a) summarizes prompt-level median-centered noise radius across the Math, Coding, LongSequence, and Chat scenarios via repeated-sampling Median-MAE. Figures (b) and (c) show representative repeated-sampling length distributions for Math, Coding, and LongSequence prompts under Qwen and Llama. Additional per-setting supporting plots are provided in Appendix A.4. 
+
+output lengths in the form of a distribution , revealing an inherent variance. Moreover, the prompt-conditioned output length distribution is often consistent with a clear heavy-tail 
+
+tendency, where occasional long generations shift the sam-ple mean far from the stable central value. Consequently, training a predictor with a one-shot sampled length conflicts with the distributional nature of the LLM’s output length, yielding a statistically misaligned objective. In this work, we reveal a fundamental yet overlooked fact: 
+
+output length is drawn from a prompt-conditioned distribu-tion rather than being a deterministic scalar . As shown in Figure 1, under a fixed model and decoding configuration, the same prompt can yield completions whose lengths vary by multiples of each other. This fundamentally changes the statistical nature of the prediction problem: the prompt-conditioned length distribution is consistent with heavy-tailed behavior, so occasional extremely long generations can shift the sample mean far from the stable central ten-dency, making single-sample supervision an unreliable and statistically misaligned training signal. To tackle this problem, we reframe length prediction through the lens of Prompt-conditioned length Distributions (ProD ). We show that under the MAE criterion, the Bayes-optimal prediction is the conditional median, and propose two com-plementary supervision strategies built on repeated sam-pling. (i) ProD-M : Median supervision draws multiple in-dependent generations per prompt and uses their median as the training label, compressing the heavy-tailed distribution into a single robust point target. (ii) ProD-D : Distributional supervision projects the sampled lengths onto a binned his-togram and uses it as a soft training target, requiring the predictor to match the full length distribution. Both variants reuse the served LLM’s last-layer hidden states as input representations, requiring no auxiliary model or additional inference cost. Theoretical analysis indicates that increas-ing the repeated-sampling budget exponentially reduces the failure probability of the estimation bound, justifying the soundness of our method. Experiments on Qwen-2.5-7B and Llama-3-8B across four benchmarks show that our method reduces average prediction error by up to 25% over previous SOTA methods. 
+
+Organization. Section 2 introduces our approach. Sec-tion 3 empirically evaluates the proposed method. Section 4 reviews the related work and provides further discussion. Finally, Section 5 concludes the paper. 
+
+2. Proposed Approach 
+
+In this section, we first identify two key observations in the length-prediction problem. We then present the problem formulation and develop two components for robust length prediction: (i) estimation by repeated sampling and (ii) 
+
+prediction by robust statistics. 
+
+2.1. Key Observations 
+
+Output-length prediction under a fixed served model and decoding configuration is fundamentally a stochastic condi-tional inference problem, rather than deterministic regres-sion to one length label. To make this concrete, we study Qwen-2.5-7B and Llama-3-8B across four scenarios: Math, Coding, LongSequence, and Chat. Figure 1 highlights two recurring facts. First, once the served model and decoding setup are fixed within a setting, repeated generations of the same prompt still exhibit a median-centered noise radius. Second, even for a fixed prompt, the induced length dis-tribution often has a clear heavy tail rather than a single deterministic target. Appendix A.4 gives the full setting details, sample counts, and caveats. In the following, we discuss the two key observations. 
+
+Prompt-conditioned length has noise radius. Figure 1a reports prompt-level Median-MAE from 16 repeated gener-ations per prompt, aggregated over all eight model–scenario settings. The setting-wise medians are already tens of to-kens in every case: for Math they are 27 .8 and 16 .1 tokens 2Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 
+
+on Qwen and Llama, for Coding 21 .7 and 23 .0, for LongSe-quence 42 .9 and 38 .0, and for Chat 35 .3 and 33 .4. Thus, the same prompt induces a substantial stochastic spread in out-put length. After normalizing by the prompt-wise median length, the median noise ratio still remains non-trivial, from 
+
+11 .5% on Qwen/Math to 18 .2% on Llama/LongSequence. Math is the most stable regime in this summary, whereas LongSequence and Chat carry several of the largest medians and upper tails. The prompt-only predictor is therefore not recovering a deterministic label, but estimating a prompt-conditioned output length distribution .
+
+Prompt-conditioned length is heavy-tailed. Figures 1b and 1c show six frozen representative prompts from the Math, Coding, and LongSequence scenarios. Their max-to-median ratios are 2.91 ×, 2.42 ×, and 1.98 × for Qwen, and 2.99 ×, 3.27 ×, and 4.03 × for Llama. These prompts, therefore, consistent with a clear heavy-tail tendency rather than tight concentration around one typical length. Ap-pendix A.4 keeps these caveats explicit and extends the same light/heavy diagnostic to all eight settings, including the less regular Chat regime. This matters for supervision design: when the tail is occasionally long, a small number of unusually long generations can move the conditional mean substantially, whereas the conditional median remains much more stable. These two observations motivate us to formulate the prompt-conditioned length prediction problem below. The first ob-servation rules out treating output length as a deterministic regression target, so the predictor should target a central functional of the conditional distribution. The second obser-vation further suggests that this functional should be robust to occasional long generations, which makes conditional-median estimation the natural starting point under MAE. 
+
+2.2. Formulation: Prompt-Conditioned Distribution 
+
+We investigate conditional length prediction for autoregres-sive large language models under a fixed served model and decoding configuration. For the i-th request, let xi ∈ X 
+
+denote the input prompt. During decoding, after revealing the first t output tokens {ysi }ts=1 , the currently observed context is zti ≜ {xi, {ysi }ts=1 } , z 0 
+
+> i
+
+= xi. Let ϕ(zti ) ∈ Rd
+
+denote the representation of the available history at state 
+
+zti . Starting from state zti and continuing decoding until EOS, let Lti denote the remaining number of tokens to be generated. During LLM decoding, Lti is generally random even for the same state zti . We assume that there exists a representation ϕ(·) such that ϕ(zti ) is a sufficient statistic for length prediction, in the sense that ∀i, t , the length dis-tribution is conditional on ϕ(zti ), i.e., P (Lti | ϕ(zti )) . The prompt-only setting is the special case t = 0 , for which 
+
+z0 
+
+> i
+
+= xi and Li ≜ L0 
+
+> i
+
+.We consider the static case where the predictor only ob-serves the prompt representation ϕ(xi) and outputs a scalar estimate bLi of the total output length. We evaluate such predictors using conditional mean absolute error (MAE): 
+
+Rpt (bLi | ϕ(xi)) ≜ ELi∼p⋆(·| ϕ(xi)) 
+
+h
+
+|Li − bLi|
+
+i
+
+. (2.1) This objective directly matches the first observation: the predictor must summarize a stochastic prompt-conditioned distribution rather than recover a single ground-truth label. It also aligns with the second observation: when the con-ditional distribution can be heavy-tailed, a robust central estimate is operationally more stable than a supervision target that is overly sensitive to rare long generations. 
+
+2.3. Estimation by Repeated Sampling 
+
+We now instantiate the prompt-only estimator motivated above. The logic has four steps. Under MAE, the correct population target is a conditional median. A single realized output length is only one stochastic draw from that target distribution. Repeated sampling lets us replace that noisy single draw with a more stable sample median. We then use a simplified linear surrogate to isolate why this supervision choice improves estimation reliability. We begin with the population target. For any integer-valued candidate prediction a, define the conditional point risk as 
+
+Rpt (a | ϕ(xi)) ≜ E [|Li − a| | ϕ(xi)] . Since Li is integer-valued, a direct discrete-difference calculation gives 
+
+Rpt (a+1 |ϕ(xi)) −R pt (a|ϕ(xi)) = 2 P [Li ≤ a | ϕ(xi)] −1.
+
+Hence, Rpt (a | ϕ(xi)) decreases as long as P(Li ≤
+
+a | ϕ(xi)) < 1/2 and increases once P(Li ≤ a | ϕ(xi)) >
+
+1/2. Therefore, among all predictors measurable with re-spect to ϕ(xi), the Bayes-optimal point target under MAE is a conditional median of Li given ϕ(xi).The main supervision difficulty is that a single realized output length is only one stochastic sample from this con-ditional distribution. Using that single sample directly as a training label injects sampling randomness into super-vision, exactly the noise source highlighted by Observa-tion 1. To better align the supervision signal with the conditional-median target above, we draw r independent generations for each prompt xi, obtain the corresponding output lengths {Li, 1, . . . , L i,r }, and use their sample me-dian ¯Li ≜ median [ Li, 1, . . . , L i,r ] as the supervision label. This design is also consistent with Observation 2: when prompt-conditioned length distributions can be consistent with heavy-tailed behavior, the sample median is a more robust empirical target than either a single sampled length or an average dominated by a few unusually long genera-tions. Repeated sampling is used only to construct robust labels during training; it is not part of the predictor input or inference procedure at test time. 3Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 
+
+To isolate the statistical value of repeated-sampling me-dian supervision, we analyze a simplified linear surrogate estimator. Specifically, we model the output length as 
+
+Li = ϕ(xi)⊤θ∗ + ηi, where θ∗ ∈ Rd is an unknown pa-rameter satisfying ∥θ∗∥2 ≤ S. We also assume bounded representations, i.e., ∥ϕ(xi)∥2 ≤ 1 for all xi ∈ D . This linear model is not intended to exactly match the deployed nonlinear predictor; rather, it serves as a tractable analytical surrogate for separating the supervision effect of repeated sampling from the full modeling complexity of the deployed system. Motivated by Observation 2, we allow for noise that may not be strongly concentrated. The following as-sumption is a proof-convenient sufficient condition for the analysis, rather than a literal claim that every empirical distribution exactly follows this form: 
+
+Assumption 1. The noise η is symmetric around zero and satisfies 
+
+E
+
+h
+
+|η|1+ ϵ | x
+
+i
+
+≤ v, 
+
+for some ϵ ∈ (0 , 1] and v > 0.Although our statistical target under MAE is the conditional median rather than the conditional mean, we retain symme-try as a proof-convenient sufficient condition: it implies a zero conditional median and enables robust control of the repeated-sampling median labels. Given N training prompts, we construct one median label 
+
+¯Li for each prompt and fit a ridge estimator: 
+
+bθN = arg min 
+
+> θ
+
+λ ∥θ∥22 +
+
+> N
+
+X
+
+> i=1
+
+ ϕ(xi)⊤θ − ¯Li
+
+2 ,
+
+where λ > 0 is the regularization coefficient. The following lemma quantifies the estimation effect of using repeated-sampling median labels in this surrogate setting. 
+
+Theorem 1 (Expected absolute error bound) . For any δ ∈
+
+(0 , 1) , define C ≜ (4 v) 11+ ϵ , ρ δ ≜ 2C ln   8Nδ
+
+ + 4 C−ϵv.Then, with probability at least 1 − δ − 4N e −r/ 8, for all 
+
+x ∈ X :
+
+ϕ(x)⊤θ∗ − ϕ(x)⊤ bθN ≤ βN ∥ϕ(x)∥V −1
+
+> N
+
+.
+
+where βN ≜
+
+q
+
+ρ2 
+
+> δ
+
+N 1−ϵ 
+
+> 1+ ϵ
+
++ 2 Cρ δ d N 1−ϵ 
+
+> 1+ ϵ
+
+log  1 + Nλd 
+
+ +
+
+√λS . In particular, if r ≥ 8 log (4 N/δ ), then the above bound holds with probability at least 1 − 2δ.
+
+This Theorem clarifies the role of repeated sampling in our analysis from two perspectives. First, the failure probability contains the additional term 4N e −r/ 8, which decays expo-nentially with the repeated-sampling budget r. In particular, when r ≥ 8 log(4 N/δ ), this term is absorbed into the main confidence level, and the bound holds with probability at least 1 − 2δ. Thus, increasing the repeated-sampling budget directly improves the reliability of the supervision labels and, in turn, the resulting estimation guarantee. Second, the prediction error scales with ∥ϕ(x)∥V −1
+
+> N
+
+, the standard self-normalized uncertainty term. When the feature of a test prompt is better covered by the training feature covariance 
+
+VN , this quantity becomes smaller, leading to a tighter pre-diction error bound. The proof is provided in Appendix B. 
+
+2.4. Prediction by Robust Statistics 
+
+Since our goal is to isolate the value of repeated sampling itself, we keep the predictor architecture fixed and vary only how repeated observations are converted into training sig-nals. Specifically, we let ϕ(xi) be the last-layer hidden state of the last prompt token, following the lightweight probing style of TRAIL (Shahout et al., 2025). On top of this repre-sentation, we use the same two-layer MLP for both variants: the first layer maps ϕ(xi) ∈ Rd to a 512 -dimensional hid-den vector with a ReLU nonlinearity, and the second layer outputs logits over a shared grid of K length bins. Let 
+
+qθ (· | xi) ≜ softmax( gθ (ϕ(xi))) ∈ ∆K−1, where gθ de-notes this shared predictor. 
+
+ProD-M. For each training prompt xi, we draw r inde-pendent generations and obtain the corresponding output lengths {Li, 1, . . . , L i,r }. We then compress these repeated observations into a single robust point target via the sample median ¯Li = median( Li, 1, . . . , L i,r ). After discretizing 
+
+¯Li onto the same K-bin grid, we obtain a one-hot target vector ymed  
+
+> i
+
+∈ { 0, 1}K and train the classifier with standard cross-entropy: 
+
+Lmed (θ) ≜ − X
+
+> iK
+
+X
+
+> k=1
+
+ymed  
+
+> i
+
+(k) log qθ (k | xi).
+
+This variant treats repeated sampling as a way to denoise supervision before learning: instead of fitting one stochastic realization, it learns from a prompt-level target that is better aligned with the conditional median under MAE. 
+
+ProD-D. The second variant keeps the same representation, bin grid, and predictor head, but does not collapse the re-peated observations into a single scalar. Instead, we project all repeated lengths {Li, 1, . . . , L i,r } onto the same K bins and form a prompt-level empirical distribution 
+
+pdist  
+
+> i
+
+(k) ≜ 1
+
+r
+
+> r
+
+X
+
+> j=1
+
+1[b(Li,j ) = k] ,
+
+where b(·) maps a length to its bin index. We then use this empirical histogram as a soft target and train the same classifier by soft cross-entropy, 
+
+Ldist (θ) ≜ − X
+
+> iK
+
+X
+
+> k=1
+
+pdist  
+
+> i
+
+(k) log qθ (k | xi).
+
+4Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions                                                                                                
+
+> Table 1. Prompt-only length prediction results. Test MAE (tokens) between each method’s prediction and the prompt-level median output length under 16 -sample repeated sampling. Noise Radius is the prompt-level median-centered noise radius. Lower is better; the best trainable result per column is bold . The exact protocol is in Appendix A.2. Method Qwen Llama Math Coding LongSeq Chat Avg Math Coding LongSeq Chat Avg Constant Median 59.59 56.41 146.11 264.90 131.75 32.07 37.83 95.69 213.31 94.73
+> S341.60 57.28 72.21 185.84 89.23 24.41 41.28 50.01 142.28 64.50 TRAIL-mean 44.04 44.70 72.70 143.50 76.24 26.29 37.93 50.99 116.84 58.01 TRAIL-last 35.13 36.63 57.68 127.47 64.23 24.51 35.74 41.04 95.03 49.08 EGTP 49.50 57.14 69.84 276.27 113.19 28.25 37.98 46.73 148.08 65.26
+> ProD-M 30.80 32.08 55.54 124.53 60.74 20.32 29.96 38.13 94.59 45.75
+> ProD-D 30.35 31.76 51.41 113.60 56.78 19.57 26.61 37.68 93.39 44.31
+> Noise Radius 32.94 25.18 57.18 56.05 42.84 20.39 27.07 56.38 45.71 37.38
+
+Compared with ProD-M, this variant preserves more of the prompt-conditioned uncertainty revealed by repeated sampling: it still uses repeated generations only at training time, but it asks the predictor to match the observed length distribution rather than only its center. When a single scalar prediction is needed, both variants extract the median of the predictive distribution qθ (· | xi):we compute the cumulative sum of the predicted bin prob-abilities, locate the bin where the cumulative mass crosses 
+
+0.5, and linearly interpolate within that bin to obtain a con-tinuous point estimate bLi. Prior methods typically decode via the argmax bin center or the expectation of the bin distri-bution; using the median instead yields a more robust point estimate, as the median is less sensitive to heavy-tailed or skewed predicted distributions. 
+
+3. Experiments 
+
+3.1. Experimental Setup System and hardware. The evaluation is conducted on a server equipped with two Intel Xeon Platinum 8358 32-Core processors (turbo frequency up to 3.4 GHz), two NVIDIA Tesla A100 80GB GPUs, and 1024 GiB of RAM. The system runs Ubuntu 20.04 with CUDA 12.2, and uses vLLM 0.15 .1 (Kwon et al., 2023) as the serving framework. 
+
+Served models and benchmark scenarios. We use Qwen-2.5-7B (Yang et al., 2024) and Llama-3-8B (Meta AI, 2024) as the served models. The main prompt-only benchmark is organized around four anchor scenarios: Math (GSM8K (Cobbe et al., 2021)), Coding (MBPP (Austin et al., 2021)), LongSequence (LongBench (Bai et al., 2024)), and Chat (LMSYS-Chat-1M (Zheng et al., 2024)). We use the official train/test splits for GSM8K ( 7473 /1319 ) and MBPP ( 374 /500 ). For LongBench and LMSYS-Chat-1M, we derive deterministic train/test splits from the repeated-sampling source manifests. This yields LongBench splits of 
+
+3789 /961 on Qwen and 3780 /970 on Llama, and LMSYS-Chat-1M splits of 4070 /930 on both models. 
+
+Baselines. We compare against three external baselines: 
+
+S3 (Jin et al., 2023), EGTP (Xie et al., 2026), and TRAIL (Shahout et al., 2025). We evaluate two offline TRAIL variants: TRAIL-Mean, which averages the final-layer hidden states across all input tokens in the prompt, and TRAIL-Last, which uses only the final-layer hidden state of the last input token as input to the length predic-tor. Our repeated-sampling approach yields two predictors: ProD-M, trained on the prompt-level median output length, and ProD-D, trained on a bin-projected empirical length distribution from the same repeated-sampling pool. We also report two reference lines: Noise Radius, the prompt-level median-centered noise radius, and Constant Median, which always predicts the train-split median length. 
+
+Metrics and protocol. We report mean absolute error (MAE) as the primary metric: for each test prompt, we compute the absolute difference between the predicted out-put length and the ground-truth label, and average over the entire test set. To construct stable supervision targets, we collect 16 generations per prompt on both train and test splits using different random seeds; the ground-truth label for each prompt is defined as the median of these 16 output lengths. The Noise Radius is accordingly defined as the av-erage absolute deviation of the 16 test-side generations from their per-prompt median. Although ProD-D is trained from a binned length-distribution label, it is evaluated against the same median-based target at test time, and all predictors are single-shot at inference. All methods use the official chat template from Xie et al. (2026) and temperature 0.8; further configuration details are in Appendix A.2. 
+
+3.2. Output Length Prediction Evaluation 
+
+We first evaluate prompt-only output length prediction. For a fair comparison, all methods, including both baselines and ours, are trained and evaluated under the same 16 -sample 5Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions        
+
+> Table 2. Single-sample supervision ablation (single-label evaluation). All predictors are trained with one sampled output length per prompt and evaluated against the same single-label target. We report mean ±std test MAE over 8trials. Lower is better; the best per column is bold .
+
+Method Qwen Llama Math Coding LongSeq Chat Math Coding LongSeq Chat 
+
+S3 54.79 ± 0.8 63.38 ± 1.1 96.00 ± 6.6 201.33 ± 4.7 33.31 ± 1.3 52.57 ± 2.9 82.97 ± 3.8 154.78 ± 4.1 TRAIL-mean 59.74 ± 3.0 59.21 ± 2.8 99.58 ± 6.2 174.14 ± 5.6 34.59 ± 1.4 46.71 ± 3.1 87.13 ± 4.4 137.98 ± 6.5 TRAIL-last 54.11 ± 8.2 56.44 ± 7.4 88.07 ± 4.9 154.45 ± 6.0 32.48 ± 1.1 45.29 ± 4.1 76.75 ± 2.9 112.84 ± 5.3 EGTP 67.30 ± 7.5 62.89 ± 1.0 96.84 ± 6.1 278.12 ± 5.3 36.39 ± 1.6 49.55 ± 2.9 81.37 ± 3.6 163.95 ± 5.0 
+
+ProD-M 47.10 ± 0.8 43.43 ± 1.1 86.00 ± 5.2 147.18 ± 4.6 29.32 ± 1.0 40.86 ± 3.8 73.22 ± 3.2 109.73 ± 3.9         
+
+> Table 3. Single-sample supervision ablation (median-target evaluation). All predictors are trained with one sampled output length per prompt, but evaluated against the 16 -sample repeated-sampling median target. We report mean ±std test MAE over 8trials. Lower is better; the best per column is bold .
+
+Method Qwen Llama Math Coding LongSeq Chat Math Coding LongSeq Chat 
+
+S3 43.91 ± 0.5 57.56 ± 0.2 75.65 ± 2.0 186.75 ± 3.6 25.76 ± 0.7 44.69 ± 2.8 55.57 ± 1.2 146.21 ± 3.8 TRAIL-mean 49.84 ± 2.8 52.82 ± 2.6 80.64 ± 3.3 158.33 ± 5.3 27.16 ± 0.3 36.61 ± 1.8 60.07 ± 3.7 129.79 ± 4.4 TRAIL-last 42.46 ± 9.6 49.47 ± 8.0 67.91 ± 1.2 138.46 ± 6.3 24.89 ± 0.2 35.23 ± 1.6 48.11 ± 0.9 102.48 ± 2.6 EGTP 58.56 ± 9.2 56.90 ± 0.3 77.14 ± 3.0 266.55 ± 3.1 29.70 ± 1.1 40.80 ± 2.1 53.55 ± 1.0 156.07 ± 4.5 
+
+ProD-M 33.56 ± 0.4 35.01 ± 1.2 65.44 ± 1.3 130.60 ± 2.6 20.79 ± 0.2 29.05 ± 1.0 43.45 ± 1.4 98.95 ± 1.3 
+
+repeated-sampling protocol: for each prompt, we collect 
+
+16 generations with different random seeds, and define the ground-truth label as the median of these 16 output lengths. The reported metric is mean absolute error (MAE), i.e., the absolute difference between each method’s prediction and the per-prompt median label, averaged over the test set. We additionally report median-centered noise radius reference, defined as the average absolute deviation of the 16 test-side generations from their per-prompt median. This measures how much randomness the decoding process itself intro-duces, and we use it to analyze how close a predictor is to the best it can practically get: once a predictor’s MAE reaches or falls below this level, the remaining error mostly comes from decoding randomness rather than the predictor itself. Table 1 summarizes the results; detailed hyperpa-rameter grids, split manifests, and provenance notes are in Appendix A.2. Across both models, ProD-D achieves the lowest average MAE: 56 .78 on Qwen and 44 .31 on Llama, outperform-ing the strongest external baseline TRAIL-Last ( 64 .23 /
+
+49 .08 ) by 11 .6% and 9.7% , respectively. On several scenar-ios ProD-D even falls below the Noise Radius, for exam-ple, 30 .35 vs. 32 .94 on Qwen-Math and 37 .68 vs. 56 .38 on Llama-LongSequence—indicating that repeated-sampling supervision enables the predictor to estimate the population median more accurately than the finite-sample average de-viation. ProD-M, which uses the same repeated-sampling pool but learns from a simpler median label, is consistently second-best and still surpasses all external baselines. We also note that EGTP underperforms in most settings. In our implementation, we find that the entropy-weighted token selection tends to concentrate on a few early prompt tokens, whose hidden states may not encode the full prompt con-text; this likely explains its gap relative to methods that use the last-token embedding. Chat is the hardest scenario for all methods: even ProD-D has MAE 113 .60 on Qwen and 
+
+93 .39 on Llama, roughly 2× the corresponding Noise Ra-dius ( 56 .05 / 45 .71 ). This gap reflects the high output-length uncertainty of open-ended conversational prompts. 
+
+3.3. Single-sample Supervision Ablation 
+
+To isolate the effect of repeated-sampling supervision, we retrain all predictor families using only a single sampled output length per prompt as the label, and repeat the full pipeline 8 times to report mean ± std MAE. In this single-sample regime, ProD-D is omitted: a single length per prompt cannot induce a non-degenerate distribution target, so the distributional variant collapses to a relabeled point predictor. We therefore compare only ProD-M against the external baselines, providing the strictest test of how much noise is injected once repeated-sampling target construction is removed. We report two complementary evaluations. Table 2 eval-uates each single-sample-supervised predictor against the corresponding single-label test target, so both training and evaluation share the same one-shot noise. Table 3 keeps 6Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 
+
+> Repeat Sampling Number
+> 30
+> 40
+> 50
+> 60
+> MAE
+> ProD-M
+> ProD-D
+> TRAIL-last
+
+(a) Qwen: Math 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16  
+
+> Repeat Sampling Number
+> 55
+> 60
+> 65
+> 70
+> 75
+> MAE
+> ProD-M
+> ProD-D
+> TRAIL-last
+
+(b) Qwen: LongSequence 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16  
+
+> Repeat Sampling Number
+> 120
+> 140
+> 160
+> 180
+> 200
+> MAE
+> ProD-M
+> ProD-D
+> TRAIL-last
+
+(c) Qwen: Chat 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 
+
+> Repeat Sampling Number
+> 20
+> 22
+> 24
+> 26
+> 28
+> MAE
+> ProD-M
+> ProD-D
+> TRAIL-last
+
+(d) Llama: Math 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16  
+
+> Repeat Sampling Number
+> 30
+> 40
+> 50
+> 60
+> 70
+> MAE
+> ProD-M
+> ProD-D
+> TRAIL-last
+
+(e) Llama: LongSequence 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16  
+
+> Repeat Sampling Number
+> 100
+> 110
+> 120
+> MAE
+> ProD-M
+> ProD-D
+> TRAIL-last
+
+(f) Llama: Chat 
+
+Figure 2. Budget fairness: test MAE vs. repeat sampling number under a fixed inference budget. As the repeat sampling number k
+
+increases, only ⌈B/k ⌉ unique training prompts are retained. ProD-M and ProD-D are the repeated-sampling predictors; TRAIL-Last is the full-coverage single-sample baseline. All curves report mean ± std over 8 trials. Coding is deferred to the appendix. 
+
+the same single-sample supervision on the training side but evaluates against the 16 -sample repeated-sampling median target, removing the high-variance test label and thereby isolating how much training-side target quality matters even when evaluation is stabilized. Compared with Table 1, single-sample supervision causes a clear degradation across both models. For example, ProD-M rises from 60 .74 to 80 .93 average MAE on Qwen and from 
+
+45 .75 to 63 .28 on Llama once repeated-sampling targets are replaced by one-shot labels (Table 2). Table 3 confirms that the same trend persists even when evaluation switches back to the more stable median target. These results indicate that the gain of repeated-sampling supervision comes not merely from the predictor architecture, but from the robustness of the target construction itself. 
+
+3.4. Budget Fairness and Repeat Curve 
+
+Repeated-sampling supervision improves prediction quality, but it also consumes more inference during data collection. A natural fairness question arises: if the total number of training-side inferences is held fixed, does allocating part of that budget to repeated sampling still pay off compared to simply covering more unique prompts? 
+
+To answer this, we fix the total training-observation budget and vary the repeat sampling number from 1 to 16 . When the repeat sampling number is k, we retain only ⌈B/k ⌉
+
+unique prompts (where B is the canonical training-set size), each sampled k times, so the total inference count stays budget-aligned. For example, on GSM8K ( B = 7473 ), repeat sampling number 1 means normal training on all 
+
+7473 prompts with one sample each, while repeat sampling number 7 reduces prompt coverage to only ∼1068 unique prompts with 7 samples each. We compare ProD-M and ProD-D under this regime against TRAIL-Last trained on the full prompt set with single samples. All curves are evaluated against the 16 -sample median target and report mean ± std over 8 trials. Figure 2 shows that repeated sampling remains valuable even under a fixed inference budget. As the repeat sampling number increases, the number of unique training prompts drops proportionally, yet the repeated-sampling predictors consistently outperform or match TRAIL-Last, which is trained on the full prompt set with single samples. The effect is most pronounced on LongSequence: on Qwen, ProD-D with 3 repeated samples (seeing only ∼1263 unique prompts) achieves 57 .83 MAE, well below the full-coverage TRAIL-Last baseline ( 67 .91 ); on Llama, ProD-D with 5
+
+repeated samples reaches 40 .80 , compared with 48 .11 for TRAIL-Last. A similar trend holds for Chat: ProD-D with 
+
+3 repeated samples reaches 128 .31 on Qwen vs. 138 .46 for TRAIL-Last, and with 2 repeated samples reaches 97 .15 on Llama vs. 102 .48 for TRAIL-Last. On Math, the best results appear at repeat sampling number 
+
+1, so this scenario does not exhibit an interior optimum. Nev-ertheless, even when the repeat sampling number reaches 
+
+7 on GSM8K, reducing the training set from 7473 to about 7Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 
+
+1068 unique prompts, the repeated predictors remain com-petitive with the full-coverage TRAIL-Last baseline. Over-all, these results confirm that repeated sampling acts as an effective budget-reallocation mechanism: concentrating re-peated observations on fewer prompts can recover, or even surpass, the accuracy of single-sample methods trained on the full prompt set. 
+
+4. Related Work and More Discussions 
+
+Output Length Prediction for LLM Serving. Output-length prediction is primarily motivated by the efficiency demands of LLM serving. In batched inference, shorter requests that finish early must wait for the longest request in the batch to complete, creating idle GPU cycles (“bub-bles”) (Zheng et al., 2023b). Meanwhile, many serving frameworks reserve KV cache space based on the maxi-mum possible output length to prevent out-of-memory fail-ures; this wastes memory, constrains the batch size, and ultimately degrades GPU utilization and throughput (Jin et al., 2023). Moreover, most serving systems default to first-come-first-served (FCFS) scheduling, under which a single long-running request can cause severe head-of-line blocking (Fu et al., 2024). These considerations have driven a growing line of research on output-length prediction. 
+
+Prompt-based Length Prediction. Early work focuses on estimating output length directly from the input prompt before decoding begins. PO (Zheng et al., 2023b) ex-plores self-perception-based prediction by prompting or instruction-tuning LLMs to estimate their own response length prior to generation. S3 (Jin et al., 2023) trains a lightweight DistilBERT proxy to classify each request into predefined length buckets, using the predicted bucket for memory reservation and scheduling. Magnus (Cheng et al., 2024) combines user-input length with application- and user-level semantic features via LaBSE embeddings and a random-forest regressor. SSJF (Qiu et al., 2024) trains a BERT-based proxy predictor that formulates prompt-only output-length estimation as either regression or bucketized classification, and applies the prediction to shortest-job-first scheduling. LTR (Fu et al., 2024) reformulates the prob-lem as learning to rank, training a small OPT-based scorer with ListMLE to predict the relative order of request lengths rather than their absolute values, thereby realizing a more efficient scheduling policy SJF beyond FCFS. 
+
+Embedding-based Length Prediction. More recent work leverages intermediate representations from the served LLM itself to build lighter-weight or online predictors. TRAIL (Shahout et al., 2025) reuses the target LLM’s inter-mediate embeddings for prompt-only length prediction and further refines the remaining-length estimate online during decoding. ELIS (Choi et al., 2025) couples an encoder-based response-length predictor with an iterative shortest-remaining-time-first scheduler that repeatedly re-prioritizes requests by estimated remaining output length. Piotrowski et al. (2025) model layerwise hidden states as a graph and apply a GCN-based regressor to predict the number of re-maining tokens. EGTP (Xie et al., 2026) aggregates prompt representations via entropy-guided pooling over the served LLM’s hidden states for output-length prediction, while its progressive variant PLP extends this idea to remaining-length prediction during decoding. 
+
+More discussion. We note the concurrent work of Zheng et al. (2026), which we became aware of after completing the first version of this paper. They also notice that LLM out-put length is better modeled as a stochastic distribution with heavy-tailed characteristics. Indeed, we appreciate their even more detailed empirical examination of heavy-tailed length distributions. Nonetheless, the two works differ fun-damentally in methodology: their approach fits a parametric distribution to repeated output lengths and learns the dis-tribution parameters, whereas ours uses repeated sampling to construct supervision targets directly from the empirical prompt-level length distribution, with a particular focus on robust target design for prompt-only prediction. 
+
+5. Conclusion 
+
+In this paper, we observe a fundamental yet overlooked mismatch in output-length prediction for LLM serving: for the LLM decoding process, prompt-conditioned out-put length is drawn from a distribution rather than being a deterministic scalar. Existing methods typically treat one sampled completion length as the ground-truth label, tar-geting either stronger representations or finer prediction heads while leaving the supervision target itself unexam-ined. Moreover, the prompt-conditioned length distribution often shows patterns consistent with heavy-tailed behavior, where occasional long generations shift the single-sample label far from the stable central tendency, yielding a statis-tically misaligned training signal. To this end, we propose the prompt-conditioned length distribution (ProD) method, which constructs robust training targets from repeated in-dependent generations of the same prompt and instantiates two variants that balance supervision robustness with infer-ence efficiency: ProD-M compresses repeated observations into a median-based point target aligned with the Bayes-optimal prediction under MAE, while ProD-D projects sam-pled lengths onto a binned histogram that preserves the full prompt-conditioned uncertainty. At inference time, both variants reuse the served LLM’s last-layer hidden states and remain single-shot. Under a simplified linear surro-gate, we further provide a theoretical guarantee showing that increasing the repeated-sampling budget exponentially reduces the failure probability of the estimation bound. Ex-8Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 
+
+periments on Qwen-2.5-7B and Llama-3-8B across math, coding, long-sequence, and chat scenarios demonstrate that ProD-D achieves the lowest average MAE on both back-bones, reducing prediction error by up to 25% over previous state-of-the-art methods, and that this advantage persists even under fixed total inference budgets, confirming that the gain stems from the supervision target itself rather than from additional predictor complexity. This work focuses on the prompt-only setting. Our formula-tion in Section 2.2 already accommodates the general case where the predictor refines its remaining-length estimate it-eratively as decoding progresses. For the next step, we will extend our approach to this iterative regime and integrate the resulting predictions into serving scenarios (Kwon et al., 2023) for learning-augmented scheduling. 
+
+References 
+
+Austin, J., Odena, A., Nye, M. I., Bosma, M., Michalewski, H., Dohan, D., Jiang, E., Cai, C. J., Terry, M., Le, Q. V., and Sutton, C. Program synthesis with large language models. ArXiv preprint , arXiv:2108.07732, 2021. Bai, Y., Lv, X., Zhang, J., Lyu, H., Tang, J., Huang, Z., Du, Z., Liu, X., Zeng, A., Hou, L., Dong, Y., Tang, J., and Li, J. LongBench: A bilingual, multitask benchmark for long context understanding. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (ACL) , pp. 3119–3137, 2024. Cheng, K., Hu, W., Wang, Z., Du, P., Li, J., and Zhang, S. Enabling efficient batch serving for LMaaS via genera-tion length prediction. In Proceedings of the 2024 IEEE International Conference on Web Services (ICWS) , pp. 853–864, 2024. Choi, S., Goo, J., Jeon, E., Yang, M., and Jang, M. ELIS: Efficient LLM iterative scheduling system with response length predictor. ArXiv preprint , arXiv:2505.09142, 2025. Cobbe, K., Kosaraju, V., Bavarian, M., Chen, M., Jun, H., Kaiser, L., Plappert, M., Tworek, J., Hilton, J., Nakano, R., Hesse, C., and Schulman, J. Training verifiers to solve math word problems. ArXiv preprint , arXiv:2110.14168, 2021. Fu, Y., Zhu, S., Su, R., Qiao, A., Stoica, I., and Zhang, H. Efficient LLM scheduling by learning to rank. In 
+
+Advances in Neural Information Processing Systems 37 (NeurIPS) , 2024. Guo, D., Yang, D., Zhang, H., Song, J., Wang, P., Zhu, Q., Xu, R., Zhang, R., Ma, S., Bi, X., et al. Deepseek-r1 incentivizes reasoning in LLMs through reinforcement learning. Nature , 645(8081):633–638, 2025. Jin, Y., Wu, C.-F., Brooks, D., and Wei, G.-Y. S3: In-creasing GPU utilization during generative inference for higher throughput. In Advances in Neural Information Processing Systems 36 (NeurIPS) , 2023. Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C. H., Gonzalez, J., Zhang, H., and Stoica, I. Efficient memory management for large language model serving with pagedattention. In Proceedings of the 29th ACM SIGOPS Symposium on Operating Systems Principles (SOSP) , pp. 611–626, 2023. Liu, Z., Zhang, Y., Li, P., Liu, Y., and Yang, D. A dy-namic LLM-powered agent network for task-oriented agent collaboration. In Proceedings of the 1st Conference on Language Modeling (COLM) , 2024. Meta AI. Introducing Meta Llama 3: The most capable openly available LLM to date, 2024. URL https://ai.meta. com/llama/. Accessed: 2024-06-20. Ouyang, L., Wu, J., Jiang, X., Almeida, D., Wainwright, C. L., Mishkin, P., Zhang, C., Agarwal, S., Slama, K., Ray, A., Schulman, J., Hilton, J., Kelton, F., Miller, L., Simens, M., Askell, A., Welinder, P., Christiano, P. F., Leike, J., and Lowe, R. Training language models to follow instructions with human feedback. In Advances in Neural Information Processing Systems 35 (NeurIPS) ,pp. 27730–27744, 2022. Piotrowski, G., Bystro´ nski, M., Hołysz, M., Binkowski, J., Chodak, G., and Kajdanowicz, T. J. When will the tokens end? graph-based forecasting for LLMs output length. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 4: Student Research Workshop) , pp. 843–848, 2025. Qiu, H., Mao, W., Patke, A., Cui, S., Jha, S., Wang, C., Franke, H., Kalbarczyk, Z. T., Basar, T., and Iyer, R. K. Efficient interactive LLM serving with proxy model-based sequence length prediction. ArXiv preprint ,arXiv:2404.08509, 2024. Shahout, R., Malach, E., Liu, C., Jiang, W., Yu, M., and Mitzenmacher, M. Don’t stop me now: Embedding based scheduling for LLMS. In Proceedings of the 13th Interna-tional Conference on Learning Representations (ICLR) ,pp. to appear, 2025. Xi, Z., Chen, W., Guo, X., He, W., Ding, Y., Hong, B., Zhang, M., Wang, J., Jin, S., Zhou, E., et al. The rise and potential of large language model based agents: A survey. 
+
+Science China Information Sciences , 68(2):121101, 2025. Xie, H., Chen, Y., Wang, L., Hu, L., and Wang, D. Pre-dicting LLM output length via entropy-guided represen-tations. In Proceedings of the 14th International Confer-ence on Learning Representations (ICLR) , 2026. 9Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 
+
+Xue, B., Wang, Y., Wan, Y., Yi, J., and Zhang, L. Efficient al-gorithms for generalized linear bandits with heavy-tailed rewards. In Advances in Neural Information Processing Systems 36 (NeurIPS) , pp. 70880–70891, 2023. Yang, A., Yang, B., Zhang, B., Hui, B., Zheng, B., Yu, B., Li, C., Liu, D., Huang, F., Wei, H., Lin, H., Yang, J., Tu, J., Zhang, J., Yang, J., Yang, J., Zhou, J., Lin, J., Dang, K., Lu, K., Bao, K., Yang, K., Yu, L., Li, M., Xue, M., Zhang, P., Zhu, Q., Men, R., Lin, R., Li, T., Xia, T., Ren, X., Ren, X., Fan, Y., Su, Y., Zhang, Y., Wan, Y., Liu, Y., Cui, Z., Zhang, Z., and Qiu, Z. Qwen2.5 Technical Report. arXiv preprint , arXiv:2412.15115, 2024. Zheng, H., Zhang, Y., Fu, F., Zhou, X., Luo, H., Zhu, H., Zhu, Y., Wang, H., Yan, X., and Jiang, J. Scheduling llm inference with uncertainty-aware output length pre-dictions. ArXiv preprint , arXiv:2604.00499, 2026. Zheng, L., Yin, L., Xie, Z., Sun, C., Huang, J., Yu, C. H., Cao, S., Kozyrakis, C., Stoica, I., Gonzalez, J. E., Barrett, C. W., and Sheng, Y. SGLang: Efficient execution of structured language model programs. In Advances in Neural Information Processing Systems 37 (NeurIPS) ,2023a. Zheng, L., Chiang, W.-L., Sheng, Y., Li, T., Zhuang, S., Wu, Z., Zhuang, Y., Li, Z., Lin, Z., Xing, E. P., Gonzalez, J. E., Stoica, I., and Zhang, H. LMSYS-Chat-1M: A large-scale real-world LLM conversation dataset. In Proceedings of the 12th International Conference on Learning Represen-tations (ICLR) , 2024. Zheng, Z., Ren, X., Xue, F., Luo, Y., Jiang, X., and You, Y. Response length perception and sequence scheduling: An LLM-empowered LLM inference pipeline. In Advances in Neural Information Processing Systems 36 (NeurIPS) ,pp. 65517–65530, 2023b. Zhou, Z.-H. Learnability with time-sharing computational resource concerns. National Science Review , 11(10): nwae204, 2024. 10 Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 
+
+A. Experimental Details 
+
+A.1. Detailed Metrics Metrics for median-centered noise radius. Repeated sampling from the same prompt induces a distribution over output lengths rather than a single deterministic value. We refer to the average absolute deviation of these repeated lengths from their median as the noise radius , which measures the randomness introduced by the decoding process itself. When a predictor’s MAE approaches or falls below this level, the remaining error is mainly due to decoding randomness rather than the predictor’s own limitation. For prompt i, suppose we collect R repeated generations with output lengths {Li,r }Rr=1 . We define its noise radius using the median-based mean absolute error (Median-MAE). Let mi ≜ median 
+
+h
+
+{Li,r }Rr=1 
+
+i
+
+denote the sample median length for prompt i. The corresponding median-based MAE is defined as 
+
+MAE (median)  
+
+> i
+
+= 1
+
+R
+
+> R
+
+X
+
+> r=1
+
+|Li,r − mi| .
+
+We use the median, rather than the mean or the average pairwise MAE, because output-length distributions are often heavy-tailed. The median provides a more robust measure of central tendency and is less sensitive to a small number of unusually long generations. Therefore, Median-MAE more faithfully captures the intrinsic prompt-level variability and serves as a more stable estimate of the noise radius. 
+
+A.2. Detailed Benchmark and Split Protocol 
+
+We organize our benchmark into four semantic scenarios: chat, long-sequence, reasoning, and coding. Specifically, we use LMSYS-Chat-1M (Zheng et al., 2024) represent chat scenario, LongBench (Bai et al., 2024) represent long-sequence scenario, GSM8K (Cobbe et al., 2021) represent reasoning scenario, and MBPP (Austin et al., 2021) represent coding scenario. 
+
+Dataset split details. To ensure a fair evaluation, the main prompt-only benchmark freezes a single anchor dataset per scenario: GSM8K for Math, MBPP for Coding, LongBench for LongSequence, and LMSYS-Chat-1M for Chat. We use the official train/test splits for GSM8K ( 7473 /1319 ) and MBPP ( 374 /500 ). For LongBench, we derive deterministic train/test splits, which yields 3789 /961 on Qwen and 3780 /970 on Llama. For LMSYS-Chat-1M, we derive deterministic splits with 
+
+4070 /930 prompts on both models. 
+
+Inference details. We use a fixed prompting protocol throughout all experiments. For each served model, we apply its official chat template together with the system prompt provided by EGTP (Xie et al., 2026). Unless otherwise stated, all experiments use zero-shot prompting, temperature 0.8, and R = 16 repeated generations per prompt with different random seeds on both train and test. The point target for each prompt is the median of the 16 sampled output lengths. ProD-D instead projects those 16 lengths onto a predefined bin grid and learns from the resulting discrete empirical distribution, but it is still evaluated with test MAE against the same test-side median label. Noise radius reports the average absolute deviation of the 16 test generations from their prompt-level median, and Constant Median predicts the train-split median length for all test prompts. GSM8K, MBPP, and LMSYS-Chat-1M use the standard repeated-sampling path, while LongBench uses a token-aware truncation path with reserved generation budget before the same downstream aggregation, split derivation, and predictor stages. 
+
+Predictor search spaces and provenance. For S3, we sweep num_bins over {7, 10, 13, 15, 20} and use a scene- and model-specific 10-point bin_max grid. The Qwen bin_max candidates are {621, 690, 759, 828, 898, 967, 1036, 1105, 1174, 1243} for GSM8K, {400, 444, 488, 533, 577, 621, 666, 710, 755, 799} for MBPP, {1631, 1812, 1994, 2175, 2356, 2537, 2719, 2900, 3081, 3262} for LongBench, and {3296, 3663, 4029, 4395, 4761, 5128, 5494, 5860, 6226, 6593} for LMSYS-Chat-1M. The corresponding Llama grids are {469, 521, 573, 626, 678, 730, 782, 834, 886, 938}, {433, 481, 529, 577, 626, 674, 722, 770, 818, 866}, {1344, 1494, 1643, 1792, 1942, 2091, 2240, 2390, 2539, 2689}, and {2211, 2456, 2702, 2948, 3193, 3439, 3685, 3930, 4176, 4422} in the same scenario order. The selected S3 configurations are (20, 759), (10, 400), (13, 1631), and (13, 3296) on Qwen, and (15, 678), (7, 481), (13, 1344), and (15, 2211) on Llama. For EGTP, we sweep num_bins over {7, 10, 13, 15, 20} and λ over {0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95}. The selected (num_bins, λ) configurations are (7, 0.70), (20, 0.95), (10, 0.55), and (10, 0.55) on Qwen, and (7, 0.95), 11 Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 200 400 600 800 
+
+> Without system prompt
+> 200
+> 400
+> 600
+> 800
+> With system prompt
+> P(with<without)=0.994
+
+(a) Mean length 10 0 10 1 10 2 10 3 10 4 10 5 10 6 
+
+> Without system prompt
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> 10 4
+> 10 5
+> 10 6
+> With system prompt
+> P(with<without)=0.776
+
+(b) Length variance (log). 0 50 100 150 200  
+
+> MAE
+> 0.00
+> 0.02
+> 0.04
+> 0.06
+> 0.08
+> 0.10
+> 0.12
+> Probability (count / total)  Without system prompt
+> With system prompt
+
+(c) Mean-MAE distribution. −400 −200 0 200 400 
+
+> Delta mean
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> Count
+
+(d) ∆ mean length. −6 −4 −2 0 2 4 6 
+
+> Delta log variance
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> Count
+
+(e) ∆ log variance. 0 50 100 150 200 250  
+
+> MAE
+> 0.000
+> 0.025
+> 0.050
+> 0.075
+> 0.100
+> 0.125
+> 0.150
+> Probability (count / total)  Without system prompt
+> With system prompt
+
+(f) Median-MAE distribution. 0 100 200 300 400 500 
+
+Task rank 
+
+−6 
+
+−4 
+
+−2 
+
+0
+
+2
+
+4
+
+6
+
+> Delta log variance
+
+(g) Waterfall of ∆ log variance per prompt (sorted). 
+
+Figure 3. System prompt reduces output-length randomness and MAE noise radius. Qwen2.5-7B-Instruct on 500 MBPP prompts with 16 trials per prompt (8 with system prompt, 8 without). We compare per-prompt mean length, length variance, and two MAE-style dispersion measures (Mean-MAE / Median-MAE). Paired plots (Figure 3a and Figure 3b) and shift summaries (Figure 3d, Figure 3e, and Figure 3g) show that adding the system prompt typically shortens outputs and often reduces variance. MAE distributions (Figure 3c and Figure 3f) shift left and become more concentrated, indicating a lower and tighter per-prompt MAE baseline. 
+
+(7, 0.65), (15, 0.70), and (10, 0.95) on Llama, again in the order Math/Coding/LongSequence/Chat. 
+
+A.3. Dataset Length Distribution and Noise Analysis The impact of system prompt. In this part, we verify that adding a fixed system prompt makes output length more predictable under repeated sampling. We use the system prompt from Xie et al. (2026), the MBPP dataset, and Qwen2.5-7B-Instruct. We randomly sample 500 prompts and run 16 independent generations per prompt, split into 8 trials with the system prompt and 8 trials without , keeping the decoding configuration the same. For each prompt, we compute (i) mean output length, (ii) length variance, and (iii) two MAE-based dispersion measures over the 16 sampled lengths: Mean-MAE (absolute deviation from the sample mean) and Median-MAE (absolute deviation from the sample median). Figure 3a shows that the system prompt typically shortens the mean output length, and Figure 3b shows that it often reduces the variance of 12 Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 0 20 40 60 80 100 
+
+Prompt percentile (0-100%) 
+
+> 10 −1
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> Prompt-level Median-MAE (tokens)  Math
+> Coding
+> LongSequence
+> Chat
+
+(a) Qwen prompt-percentile waterfall. 0 20 40 60 80 100 
+
+Prompt percentile (0-100%)  
+
+> 10 −1
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> Prompt-level Median-MAE (tokens)  Math
+> Coding
+> LongSequence
+> Chat
+
+(b) Llama prompt-percentile waterfall. 
+
+Figure 4. Prompt-percentile noise-floor waterfalls. Each curve sorts prompts by prompt-level Median-MAE within the corresponding model and plots the values on a log-scale y-axis against prompt percentile. The plotting floor is used only to visualize zero-valued prompts on the log scale: 300 prompts for Qwen and 105 prompts for Llama. 200 250 300 
+
+> Output length (tokens)
+> 0.000
+> 0.025
+> 0.050
+> 0.075
+> 0.100
+> 0.125
+> Density
+> Prompt 1
+> Prompt 2
+> Prompt 3
+> Prompt 4
+> Prompt 5
+
+(a) Math light5 200 400 600 800  
+
+> Output length (tokens)
+> 0.0000
+> 0.0025
+> 0.0050
+> 0.0075
+> 0.0100
+> 0.0125
+> Density
+> Prompt 1
+> Prompt 2
+> Prompt 3
+> Prompt 4
+> Prompt 5
+
+(b) Math heavy5 125 150 175 200 225 250  
+
+> Output length (tokens)
+> 0.000
+> 0.025
+> 0.050
+> 0.075
+> 0.100
+> 0.125
+> Density
+> Prompt 1
+> Prompt 2
+> Prompt 3
+> Prompt 4
+> Prompt 5
+
+(c) Coding light5 100 200 300 400  
+
+> Output length (tokens)
+> 0.000
+> 0.005
+> 0.010
+> 0.015
+> Density
+> Prompt 1
+> Prompt 2
+> Prompt 3
+> Prompt 4
+> Prompt 5
+
+(d) Coding heavy5 200 300 400 500 
+
+> Output length (tokens)
+> 0.0000
+> 0.0025
+> 0.0050
+> 0.0075
+> 0.0100
+> 0.0125
+> Density
+> Prompt 1
+> Prompt 2
+> Prompt 3
+> Prompt 4
+> Prompt 5
+
+(e) LongSequence light5 200 400 600  
+
+> Output length (tokens)
+> 0.0000
+> 0.0025
+> 0.0050
+> 0.0075
+> 0.0100
+> 0.0125
+> Density
+> Prompt 1
+> Prompt 2
+> Prompt 3
+> Prompt 4
+> Prompt 5
+
+(f) LongSequence heavy5 60 80 100 120  
+
+> Output length (tokens)
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> Density
+> Prompt 1
+> Prompt 2
+> Prompt 3
+> Prompt 4
+> Prompt 5
+
+(g) Chat light5 0 1000 2000 3000  
+
+> Output length (tokens)
+> 0.000
+> 0.005
+> 0.010
+> 0.015
+> 0.020
+> 0.025
+> Density
+> Prompt 1
+> Prompt 2
+> Prompt 3
+> Prompt 4
+> Prompt 5
+
+(h) Chat heavy5 
+
+Figure 5. Qwen per-setting light/heavy overlays. For each setting, light5 and heavy5 denote the five prompts with the smallest and largest max(length) /median(length) among the ten repeated-sampling prompts. 
+
+sampled lengths. The corresponding shift histograms in Figure 3d and Figure 3e, together with the waterfall in Figure 3g, indicate that these reductions hold for a large fraction of prompts. More importantly for MAE-based length prediction, the Mean-MAE and Median-MAE distributions in Figure 3c and Figure 3f shift left and become more concentrated when adding the system prompt. Overall, adding a system prompt reduces sampling-induced randomness in output length and lowers the per-prompt MAE baseline, which increases the headroom for achieving lower MAE in downstream length predictors. 
+
+A.4. Detailed Key Observations Across Settings Setting. This section provides the detailed experimental results behind Figure 1. We study four scenarios: Math = GSM8K, Coding = MBPP, LongSequence = LongBench, and Chat = LMSYS-Chat-1M. For the noise-floor summaries, GSM8K and MBPP pool their official train and test splits, whereas LongBench and LMSYS use the test side of the deterministic derived splits described above. Within each setting, we fix the served model, prompt format, and decoding setup, and then run 16 repeated generations per prompt at temperature 0.8 to compute prompt-level Median-MAE. For the heavy-tail diagnostics, we freeze a pool of 10 representative train prompts per setting and run 100 repeated generations for each selected prompt. GSM8K, MBPP, and LMSYS use the standard short-context serving path, whereas LongBench is reported under model-specific long-context budgets with explicit truncation metadata and reserved generation budget. 13 Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 80 100 120 140 160 180 
+
+> Output length (tokens)
+> 0.00
+> 0.02
+> 0.04
+> 0.06
+> 0.08
+> Density
+> Prompt 1
+> Prompt 2
+> Prompt 3
+> Prompt 4
+> Prompt 5
+
+(a) Math light5 100 200 300 400 500  
+
+> Output length (tokens)
+> 0.000
+> 0.005
+> 0.010
+> 0.015
+> 0.020
+> Density
+> Prompt 1
+> Prompt 2
+> Prompt 3
+> Prompt 4
+> Prompt 5
+
+(b) Math heavy5 50 100 150 200 250  
+
+> Output length (tokens)
+> 0.000
+> 0.005
+> 0.010
+> 0.015
+> 0.020
+> 0.025
+> Density
+> Prompt 1
+> Prompt 2
+> Prompt 3
+> Prompt 4
+> Prompt 5
+
+(c) Coding light5 100 200 300 400  
+
+> Output length (tokens)
+> 0.000
+> 0.005
+> 0.010
+> 0.015
+> Density
+> Prompt 1
+> Prompt 2
+> Prompt 3
+> Prompt 4
+> Prompt 5
+
+(d) Coding heavy5 100 200 300 400 
+
+> Output length (tokens)
+> 0.000
+> 0.005
+> 0.010
+> 0.015
+> Density
+> Prompt 1
+> Prompt 2
+> Prompt 3
+> Prompt 4
+> Prompt 5
+
+(e) LongSequence light5 0 200 400 600 800 1000  
+
+> Output length (tokens)
+> 0.000
+> 0.002
+> 0.004
+> 0.006
+> Density
+> Prompt 1
+> Prompt 2
+> Prompt 3
+> Prompt 4
+> Prompt 5
+
+(f) LongSequence heavy5 100 150 200  
+
+> Output length (tokens)
+> 0.00
+> 0.05
+> 0.10
+> 0.15
+> 0.20
+> 0.25
+> Density
+> Prompt 1
+> Prompt 2
+> Prompt 3
+> Prompt 4
+> Prompt 5
+
+(g) Chat light5 0 200 400 600 800 1000  
+
+> Output length (tokens)
+> 0.00
+> 0.01
+> 0.02
+> 0.03
+> Density
+> Prompt 1
+> Prompt 2
+> Prompt 3
+> Prompt 4
+> Prompt 5
+
+(h) Chat heavy5 
+
+Figure 6. Llama per-setting light/heavy overlays. For each setting, light5 and heavy5 denote the five prompts with the smallest and largest max(length) /median(length) among the ten repeated-sampling prompts. 
+
+Detailed noise radius. Figure 1a in the main text provides the aggregated grouped boxplot, while Figure 4 shows how that variability is distributed across prompt percentiles. The setting-wise median prompt-level noise radius are 27 .84 and 16 .13 
+
+tokens for Qwen/Llama on Math, 21 .66 and 22 .97 on Coding, 42 .94 and 38 .00 on LongSequence, and 35 .25 and 33 .38 on Chat. The largest upper tails appear in the harder regimes: the setting-level 90 -th percentile reaches 71 .4 and 62 .7 tokens on Qwen/Llama LongSequence, and 135 .9 and 96 .1 on Qwen/Llama Chat. 
+
+Heavy-tailed noise. Figures 5 and 6 explain how we build the heavy-tail diagnostics behind the main-text examples. For each model–scenario pair, we first freeze 10 representative prompts, then rank them by max(length) /median(length) 
+
+under the 100 -repeat runs; light5 and heavy5 denote the bottom-5 and top-5 prompts under this ratio. Their max-to-median ratios are 2.91 ×, 2.42 ×, and 1.98 × for Qwen, and 2.99 ×, 3.27 ×, and 4.03 × for Llama. Across the appendix overlays, the heavy groups consistently show broader right tails than the light groups, which is why the main text treats these patterns as consistent with heavy-tailed behavior. 
+
+B. Theoretical Analysis 
+
+In this section, we provide the proof of Theorem 1. 
+
+Proof of Theorem 1. 
+
+ϕ(x)⊤θ∗ − ϕ(x)⊤ bθN ≤ ∥ ϕ(x)∥V −1
+
+> N
+
+θ∗ − bθN VN
+
+.
+
+Moreover, since the ridge estimator has a closed-form solution, 
+
+bθN = V −1
+
+N
+
+NX
+
+i=1 
+
+¯Liϕ(xi)
+
+!
+
+, VN ≜ λI d +
+
+NX
+
+i=1 
+
+ϕ(xi)ϕ(xi)⊤.
+
+The absolute prediction error can be bounded as follows: 
+
+bθN − θ∗ = V −1
+
+N
+
+NX
+
+i=1 
+
+¯Liϕ(xi)
+
+!
+
+− θ∗
+
+= V −1
+
+N
+
+NX
+
+i=1 
+
+¯Liϕ(xi)
+
+!
+
+− V −1
+
+N λI d +
+
+NX
+
+i=1 
+
+ϕ(xi)ϕ(xi)⊤
+
+!
+
+θ∗
+
+= V −1
+
+N
+
+NX
+
+i=1 
+
+  ¯Li − ϕ(xi)⊤θ∗
+
+ ϕ(xi) − λθ ∗
+
+!
+
+.
+
+14 Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 
+
+Therefore, by the Cauchy–Schwarz inequality, for any x ∈ X ,
+
+ϕ(x)⊤θ∗ − ϕ(x)⊤ bθN ≤ ∥ ϕ(x)∥V −1
+
+> N
+
+θ∗ − bθN VN
+
+≤ ∥ ϕ(x)∥V −1
+
+> N
+> N
+
+X
+
+> i=1
+
+  ¯Li − ϕ(xi)⊤θ∗
+
+ ϕ(xi) − λθ ∗ 
+
+> V−1
+> N
+
+.
+
+Hence, 
+
+θ∗ − bθN VN
+
+≤
+
+> N
+
+X
+
+> i=1
+
+  ¯Li − ϕ(xi)⊤θ∗
+
+ ϕ(xi) − λθ ∗ 
+
+> V−1
+> N
+
+≤
+
+> N
+
+X
+
+> i=1
+
+  ¯Li − ϕ(xi)⊤θ∗
+
+ ϕ(xi) 
+
+> V−1
+> N
+
++ √λS. 
+
+We define ¯ηi ≜ ¯Li − ϕ(xi)⊤θ∗, and 
+
+Si ≜
+
+> i
+
+X
+
+> j=1
+
+¯ηj ϕ(xj ), S0 ≜ 0.
+
+For notational simplicity, let ϕi ≜ ϕ(xi). Since Vi = Vi−1 + ϕiϕ⊤ 
+
+> i
+
+, the Sherman–Morrison formula yields 
+
+V −1 
+
+> i
+
+= V −1 
+
+> i−1
+
+− V −1
+
+> i−1
+
+ϕiϕ⊤ 
+
+> i
+
+V −1
+
+> i−1
+
+1 + ϕ⊤ 
+
+> i
+
+V −1
+
+> i−1
+
+ϕi
+
+.
+
+Define 
+
+ai ≜ 11 + ∥ϕi∥2 
+
+> V−1
+> i−1
+
+= 11 + ϕ⊤ 
+
+> i
+
+V −1
+
+> i−1
+
+ϕi
+
+.
+
+Then, using Si = Si−1 + ¯ ηiϕi, we have 
+
+∥Si∥2 
+
+> V−1
+> i
+
+= ( Si−1 + ¯ ηiϕi)⊤V −1 
+
+> i
+
+(Si−1 + ¯ ηiϕi)= ∥Si−1∥2 
+
+> V−1
+> i−1
+
+− ai
+
+ ϕ⊤ 
+
+> i
+
+V −1
+
+> i−1
+
+Si−1
+
+2 + 2 ai ¯ηiϕ⊤ 
+
+> i
+
+V −1
+
+> i−1
+
+Si−1 + ∥ϕi∥2 
+
+> V−1
+> i
+
+¯η2 
+
+> i
+
+.
+
+Summing the above recursion from i = 1 to N and using S0 = 0 , we obtain 
+
+∥SN ∥2 
+
+> V−1
+> N
+
+= −
+
+> N
+
+X
+
+> i=1
+
+ai
+
+ ϕ(xi)⊤V −1
+
+> i−1
+
+Si−1
+
+2 + 2 
+
+> N
+
+X
+
+> i=1
+
+ai ¯ηiϕ(xi)⊤V −1
+
+> i−1
+
+Si−1 +
+
+> N
+
+X
+
+> i=1
+
+∥ϕ(xi)∥2 
+
+> V−1
+> i
+
+¯η2 
+
+> i
+
+.
+
+Now define αi ≜ aiϕ(xi)⊤V −1
+
+> i−1
+
+Si−1 and βi ≜ ∥ϕ(xi)∥V −1
+
+> i−1
+
+, and let α ≜ (α1, . . . , α N ) and β ≜ (β1, . . . , β N ). Since 
+
+ai
+
+ ϕ(xi)⊤V −1
+
+> i−1
+
+Si−1
+
+2 = α2
+
+> i
+
+ai
+
+≥ α2 
+
+> i
+
+,
+
+and 
+
+∥ϕ(xi)∥2 
+
+> V−1
+> i
+
+= β2
+
+> i
+
+1 + β2
+
+> i
+
+≤ β2 
+
+> i
+
+,
+
+we further obtain 
+
+∥SN ∥2 
+
+> V−1
+> N
+
+≤ − 
+
+> N
+
+X
+
+> i=1
+
+α2 
+
+> i
+
++ 2 
+
+> N
+
+X
+
+> i=1
+
+αi ¯ηi +
+
+> N
+
+X
+
+> i=1
+
+β2 
+
+> i
+
+¯η2 
+
+> i
+
+= − ∥ α∥22 + 2 
+
+> N
+
+X
+
+> i=1
+
+αi ¯ηi +
+
+> N
+
+X
+
+> i=1
+
+β2 
+
+> i
+
+¯η2 
+
+> i
+
+.
+
+15 Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 
+
+Therefore, by Lemma 1 and Lemma 2, with probability at least 
+
+1 − δ − 4N e −r/ 8,
+
+the following two bounds hold simultaneously: 
+
+> N
+
+X
+
+> i=1
+
+αi ¯ηi ≤ ρ ∥α∥1+ ϵ ,
+
+> N
+
+X
+
+> i=1
+
+β2 
+
+> i
+
+¯η2 
+
+> i
+
+≤ Cρ ∥β∥21+ ϵ ,
+
+where 
+
+C ≜ (4 v) 11+ ϵ , ρ ≜ 2C ln 
+
+ 8Nδ
+
+
+
++ 4 C−ϵv. 
+
+Hence, 
+
+∥SN ∥2 
+
+> V−1
+> N
+
+≤ − ∥ α∥22 + 2 ρ ∥α∥1+ ϵ + Cρ ∥β∥21+ ϵ .
+
+By Hölder’s inequality, 
+
+∥α∥1+ ϵ ≤ N 1−ϵ 
+
+> 2(1+ ϵ)
+
+∥α∥2 , ∥β∥21+ ϵ ≤ N 1−ϵ 
+
+> 1+ ϵ
+
+∥β∥22 .
+
+Thus, 
+
+∥SN ∥2 
+
+> V−1
+> N
+
+≤ − ∥ α∥22 + 2 ρN 1−ϵ 
+
+> 2(1+ ϵ)
+
+∥α∥2 + CρN 1−ϵ 
+
+> 1+ ϵ
+
+∥β∥22 .
+
+Using −u2 + 2 au ≤ a2 with 
+
+u = ∥α∥2 , a = ρN 1−ϵ 
+
+> 2(1+ ϵ)
+
+,
+
+we get 
+
+∥SN ∥2 
+
+> V−1
+> N
+
+≤ ρ2N 1−ϵ 
+
+> 1+ ϵ
+
++ CρN 1−ϵ 
+
+> 1+ ϵ
+
+∥β∥22 .
+
+Applying Lemma 4, 
+
+∥β∥22 =
+
+> N
+
+X
+
+> i=1
+
+β2 
+
+> i
+
+=
+
+> N
+
+X
+
+> i=1
+
+∥ϕ(xi)∥2 
+
+> V−1
+> i−1
+
+≤ 2d log 
+
+
+
+1 + Nλd 
+
+
+
+.
+
+Therefore, with probability at least 1 − δ − 4N e −r/ 8, we have 
+
+∥SN ∥2 
+
+> V−1
+> N
+
+≤ ρ2N 1−ϵ 
+
+> 1+ ϵ
+
++ 2 CρdN 1−ϵ 
+
+> 1+ ϵ
+
+log 
+
+
+
+1 + Nλd 
+
+
+
+.
+
+Combining this bound with 
+
+θ∗ − bθN VN
+
+≤ ∥ SN ∥V −1
+
+> N
+
++ √λS, 
+
+with probability at least 1 − δ − 4N e −r/ 8, we have 
+
+θ∗ − bθN VN
+
+≤ √λS +
+
+s
+
+ρ2N 1−ϵ 
+
+> 1+ ϵ
+
++ 2 CρdN 1−ϵ 
+
+> 1+ ϵ
+
+log 
+
+
+
+1 + Nλd 
+
+
+
+.
+
+Consequently, for any x ∈ X , with probability at least 1 − δ − 4N e −r/ 8,
+
+ϕ(x)⊤θ∗ − ϕ(x)⊤ bθN ≤ ∥ ϕ(x)∥V −1
+
+> N
+
+√λS +
+
+s
+
+ρ2N 1−ϵ 
+
+> 1+ ϵ
+
++ 2 CρdN 1−ϵ 
+
+> 1+ ϵ
+
+log 
+
+
+
+1 + Nλd 
+
+!
+
+.
+
+16 Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 
+
+B.1. Useful Lemmas Lemma 1 (Adapted linear concentration with explicit repeated-sampling probability) . Suppose Assumption 1 holds. For any fixed dataset size N and any fixed coefficients α1, . . . , α N ∈ R, let 
+
+α ≜ (α1, . . . , α N ) , C ≜ (4 v) 11+ ϵ , ρ ≜ 2C ln 
+
+ 8Nδ
+
+
+
++ 4 C−ϵv. 
+
+Then, NX
+
+> i=1
+
+αi ¯ηi ≤ ρ ∥α∥1+ ϵ
+
+holds with probability at least 
+
+1 − δ
+
+2 − 2N e −r/ 8.
+
+Proof. The proof follows the same decomposition as Lemma 10 in CRMM (Xue et al., 2023), with two modifications. First, in the proof of CRMM Lemma 10, the quantity r enters through the control of the bad event 
+
+|αi ¯ηi| > C ∥α∥1+ ϵ .
+
+For each fixed i, write the r repeated noises as ηi, 1, . . . , η i,r , and recall that 
+
+¯ηi = median [ ηi, 1, . . . , η i,r ] .
+
+By Markov’s inequality and E
+
+h
+
+|ηi,j |1+ ϵ | xi
+
+i
+
+≤ v, we have 
+
+P  |αiηi,j | > C ∥α∥1+ ϵ
+
+ ≤ |αi|1+ ϵ vC1+ ϵ ∥α∥1+ ϵ
+
+> 1+ ϵ
+
+≤ 14 ,
+
+where the last step uses C = (4 v) 11+ ϵ .Now define 
+
+B+ 
+
+> i,j
+
+≜ 1{αiηi,j >C ∥α∥1+ ϵ}, B− 
+
+> i,j
+
+≜ 1{αiηi,j <−C∥α∥1+ ϵ}.
+
+If αi ¯ηi > C ∥α∥1+ ϵ, then at least half of the repeated samples satisfy 
+
+αiηi,j > C ∥α∥1+ ϵ ,
+
+that is, rX
+
+> j=1
+
+B+ 
+
+> i,j
+
+≥ r
+
+2 .
+
+Since E[B+ 
+
+> i,j
+
+] ≤ 14 , Hoeffding’s inequality gives 
+
+P  αi ¯ηi > C ∥α∥1+ ϵ
+
+ ≤ exp 
+
+
+
+− r
+
+8
+
+
+
+.
+
+By the same argument, 
+
+P  αi ¯ηi < −C ∥α∥1+ ϵ
+
+ ≤ exp 
+
+
+
+− r
+
+8
+
+
+
+.
+
+Therefore, 
+
+P  |αi ¯ηi| > C ∥α∥1+ ϵ
+
+ ≤ 2e−r/ 8.
+
+Summing over i = 1 , . . . , N , we obtain 
+
+> N
+
+X
+
+> i=1
+
+P  |αi ¯ηi| > C ∥α∥1+ ϵ
+
+ ≤ 2N e −r/ 8.
+
+17 Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 
+
+Second, in the truncated part, the original proof of CRMM Lemma 10 invokes its Lemma 8 to claim that the median term has (1 + ϵ)-th moment bounded by rv . Here we replace that step by Lemma 3, which yields the sharper bound 
+
+E
+
+h
+
+|¯ηi|1+ ϵ | xi
+
+i
+
+≤ 2v. 
+
+Moreover, by Assumption 1, the conditional distribution of ¯ηi is symmetric around zero, hence 
+
+E [¯ ηi | F i−1] = 0 .
+
+Therefore, Lemma 9 in CRMM can be applied to the truncated sum with 
+
+v1 = 2 v, δ′ = δ
+
+4N .
+
+This gives NX
+
+> i=1
+
+αi ¯ηi1{| αi ¯ηi|≤ C∥α∥1+ ϵ} ≤ ρ ∥α∥1+ ϵ
+
+with probability at least 1 − δ 
+
+> 2
+
+, where 
+
+ρ = 2 C ln 
+
+ 8Nδ
+
+
+
++ 4 C−ϵv. 
+
+Combining the truncated bound with the above control of the bad event finishes the proof. All remaining steps are identical to the proof of Lemma 10 in CRMM. 
+
+Lemma 2 (Adapted quadratic concentration with explicit repeated-sampling probability) . Suppose Assumptions 1 holds. For any fixed dataset size N and any fixed coefficients β1, . . . , β N ≥ 0, let 
+
+β ≜ (β1, . . . , β N ) , C ≜ (4 v) 11+ ϵ , ρ ≜ 2C ln 
+
+ 8Nδ
+
+
+
++ 4 C−ϵv. 
+
+Then, NX
+
+> i=1
+
+β2 
+
+> i
+
+¯η2 
+
+> i
+
+≤ Cρ ∥β∥21+ ϵ
+
+holds with probability at least 
+
+1 − δ
+
+2 − 2N e −r/ 8.
+
+Proof. The proof follows Lemma 11 in CRMM, again with the same two modifications as above. We first control the bad event 
+
+|βi ¯ηi| > C ∥β∥1+ ϵ .
+
+For each repeated sample ηi,j , Markov’s inequality yields 
+
+P  |βiηi,j | > C ∥β∥1+ ϵ
+
+ ≤ β1+ ϵi vC1+ ϵ ∥β∥1+ ϵ
+
+> 1+ ϵ
+
+≤ 14 ,
+
+where C = (4 v) 11+ ϵ . As in the proof of Lemma 1, if 
+
+βi ¯ηi > C ∥β∥1+ ϵ ,
+
+then more than half of the repeated samples must satisfy 
+
+βiηi,j > C ∥β∥1+ ϵ ,
+
+and Hoeffding’s inequality gives 
+
+P  βi ¯ηi > C ∥β∥1+ ϵ
+
+ ≤ e−r/ 8.
+
+18 Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 
+
+The same bound holds for the lower tail, so 
+
+P  |βi ¯ηi| > C ∥β∥1+ ϵ
+
+ ≤ 2e−r/ 8.
+
+Summing over i = 1 , . . . , N yields NX
+
+> i=1
+
+P  |βi ¯ηi| > C ∥β∥1+ ϵ
+
+ ≤ 2N e −r/ 8.
+
+For the truncated part, the proof of CRMM Lemma 11 invokes its auxiliary quadratic truncation lemma (their Lemma 12), and the only place where the median moment enters is through the bound on 
+
+E
+
+h
+
+|¯ηi|1+ ϵ | xi
+
+i
+
+.
+
+Using Lemma 3, we replace the original bound rv by the sharper estimate 
+
+E
+
+h
+
+|¯ηi|1+ ϵ | xi
+
+i
+
+≤ 2v. 
+
+Therefore, Lemma 12 of CRMM (Xue et al., 2023) applies with 
+
+v1 = 2 v, δ′ = δ
+
+4N .
+
+This yields NX
+
+> i=1
+
+β2 
+
+> i
+
+¯η2 
+
+> i
+
+1{β2   
+
+> i¯η2
+> i≤C2∥β∥21+ ϵ}
+
+≤ Cρ ∥β∥21+ ϵ
+
+with probability at least 1 − δ 
+
+> 2
+
+, where 
+
+ρ = 2 C ln 
+
+ 8Nδ
+
+
+
++ 4 C−ϵv. 
+
+Combining the truncated part with the above control of the bad event proves the claim. Apart from replacing the original median moment bound rv by the sharper estimate 2v, and keeping the repeated-sampling probability explicitly as e−r/ 8
+
+instead of substituting a concrete value of r, all other steps follow exactly the proof of Lemma 11 in CRMM. 
+
+Lemma 3 (Moment bound for the repeated-sampling median) . Let X1, . . . , X r be independent copies of a real-valued random variable X such that E
+
+h
+
+|X|1+ ϵi
+
+≤ v. Define ¯X ≜ median [ X1, . . . , X r ]. Then we have E
+
+h ¯X 1+ ϵi
+
+≤ 2v.Proof. Let k ≜ ⌈ r 
+
+> 2
+
+⌉. For any u ≥ 0, define 
+
+N + 
+
+> u
+
+≜
+
+> r
+
+X
+
+> j=1
+
+1{Xj >u }, N − 
+
+> u
+
+≜
+
+> r
+
+X
+
+> j=1
+
+1{Xj <−u}.
+
+If ¯X > u , then at least k samples are strictly larger than u, and hence 
+
+ ¯X > u ⊆ N + 
+
+> u
+
+≥ k .
+
+Similarly, if ¯X < −u, then at least k samples are strictly smaller than −u, and hence 
+
+ ¯X < −u ⊆ N − 
+
+> u
+
+≥ k .
+
+Therefore, by Markov’s inequality, 
+
+P   ¯X > u  ≤ P  N + 
+
+> u
+
+≥ k ≤ E (N + 
+
+> u
+
+)
+
+k = 1
+
+k
+
+> r
+
+X
+
+> j=1
+
+P (Xj > u ) = rk P (X1 > u ) .
+
+19 Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions 
+
+where the last step uses the i.i.d. assumption. By the same argument, 
+
+P   ¯X < −u ≤ rk P (X1 < −u) .
+
+Summing the two bounds, we obtain 
+
+P   ¯X > u  ≤ P   ¯X > u  + P   ¯X < −u ≤ rk P (|X1| > u ) .
+
+Now apply the tail-integral identity: 
+
+E
+
+h ¯X 1+ ϵi
+
+= (1 + ϵ)
+
+Z ∞
+
+> 0
+
+uϵP   ¯X > u  du ≤ rk (1 + ϵ)
+
+Z ∞
+
+> 0
+
+uϵP (|X1| > u ) d u
+
+= rk E
+
+h
+
+|X1|1+ ϵi
+
+≤ rk v ≤ 2v. 
+
+This completes the proof. 
+
+Lemma 4 (Potential lemma) . For 
+
+VN = λI d +
+
+> N
+
+X
+
+> i=1
+
+ϕ(xi)ϕ(xi)⊤,
+
+we have NX
+
+> i=1
+
+∥ϕ(xi)∥2 
+
+> V−1
+> i−1
+
+≤ 2 log det( VN )det( λI d) ≤ 2d log 
+
+
+
+1 + Nλd 
+
+
+
+.
+
+20

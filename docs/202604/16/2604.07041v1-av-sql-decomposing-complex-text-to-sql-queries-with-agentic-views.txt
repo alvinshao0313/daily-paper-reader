@@ -1,0 +1,1372 @@
+Title: AV-SQL: Decomposing Complex Text-to-SQL Queries with Agentic Views
+
+URL Source: https://arxiv.org/pdf/2604.07041v1
+
+Published Time: Thu, 09 Apr 2026 01:18:07 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# AV-SQL: Decomposing Complex Text-to-SQL Queries with Agentic Views 
+
+# Minh Tam Pham 1, Trinh Pham 1, Tong Chen 2, Hongzhi Yin 2,Quoc Viet Hung Nguyen 1, Thanh Tam Nguyen 1
+
+1Griffith University (Australia), 2The University of Queensland (Australia) 
+
+## ABSTRACT 
+
+Text-to-SQL is the task of translating natural language queries into executable SQL for a given database, enabling non-expert users to access structured data without writing SQL manually. Despite rapid advances driven by large language models (LLMs), existing ap-proaches still struggle with complex queries in real-world settings, where database schemas are large and questions require multi-step reasoning over many interrelated tables. In such cases, providing the full schema often exceeds the context window, while one-shot generation frequently produces non-executable SQL due to syntax errors and incorrect schema linking. To address these challenges, we introduce AV-SQL , a framework that decomposes complex Text-to-SQL into a pipeline of specialized LLM agents. Central to AV-SQL 
+
+is the concept of agentic views : agent-generated Common Table Expressions (CTEs) that encapsulate intermediate query logic and filter relevant schema elements from large schemas. AV-SQL oper-ates in three stages: (1) a rewriter agent compresses and clarifies the input query; (2) a view generator agent processes schema chunks to produce agentic views; and (3) a planner, generator, and revi-sor agent collaboratively compose these views into the final SQL query. Extensive experiments show that AV-SQL achieves 70 .38% 
+
+execution accuracy on the challenging Spider 2.0 benchmark, out-performing state-of-the-art baselines, while remaining competitive on standard datasets with 85 .59% on Spider, 72 .16% on BIRD and 
+
+63 .78% on KaggleDBQA. 
+
+Artifact Availability: 
+
+The source code is available at https://github.com/pminhtam/AV-SQL. 
+
+## 1 INTRODUCTION 
+
+Text-to-SQL translates a natural language question into an exe-cutable SQL query, enabling natural language interfaces to rela-tional databases. Recent advances in large language models (LLMs) have improved semantic parsing and compositional SQL generation, especially on benchmarks such as Spider-1.0 [ 46 ] and BIRD [ 25 ]. However, most Text-to-SQL systems [ 8, 12 , 24 , 28 , 31 ] implicitly assume that the full database schema can be provided in the prompt. While feasible for small schemas, this becomes impractical for real-world databases with thousands of tables and columns due to context-window limits, degraded attention in long prompts, and increased risk of schema-linking mistakes. Robustness is another barrier: even strong methods [ 24 , 29 , 31 , 37 , 39 ] frequently generate SQL that fails to execute because of syntax or invalid references, and repairing a single complex query is difficult when errors are entangled. As illustrated in Fig. 1, these issues arise when complex questions lead to diverse SQL errors that are difficult to fix. WITH nyx_card_set_cte AS (   
+
+> SELECT sets.code, sets.name
+> FROM sets WHERE sets.name =
+> 'Journey into Nyx Hero''s Path' )
+> SELECT T1.name FROM cards AS T1
+> INNER JOIN nyx_card_set_cte AS
+> T2 ON T2.code = T1.setCode
+> ORDER BY T1.convertedManaCost
+> DESC LIMIT 1
+> Database Schema
+> Table: legalities :
+> [id, format, uuid,
+> status ]
+> Table: sets :
+> [id, name, code,
+> mcmId, … ]
+
+……        
+
+> Table m:
+> [c1m,c2m,…, c nm
+> m]
+> SELECT T1.name FROM cards AS T1
+> INNER JOIN sets AS T2 ON
+> T2.code = T1.setID
+> WHERE T2. set_name =
+> 'Journey into Nyx Hero''s Path’
+> ORDER T1.convertedManaCost
+> DESC LIMIT 1
+> Traditional
+> method
+> Our method Small parts of
+> schema
+> Complex Question:
+> Which card name
+> in the set 'Journey
+> into Nyx Hero's
+> Path' has the
+> highest converted
+> mana cost. Out of context length
+> JOIN wrong
+> column
+> No such column
+> name …
+> … syntax error
+> sets : [id, name,
+> code, … ]
+> legalities : [id,
+> format, uuid, … ]
+
+# … …  
+
+> (𝒱 CTE
+> 1)
+> (𝒱 CTE
+> k)Table m-1:
+> Table m:
+
+Figure 1: A motivating example from BIRD-dev (sample 501) illustrates the limitations of traditional Text-to-SQL on com-plex questions over large schemas. Providing the full schema in a single prompt can exceed the context window and in-crease the risk of syntax and logical errors. Our approach instead splits the schema into smaller chunks, generates and validates agent views (CTE queries: V (1)
+
+> CTE
+
+,. . . V (𝑘 )
+
+> CTE
+
+), and then composes them into the final SQL, improving robustness un-der long-context constraints. 
+
+Example 1.1. The complex question in Fig. 1, when handled by traditional Text-to-SQL, may produce a SQL query with multiple in-tertwined errors, including incorrect joins (e.g., T2.code=T1.setID ,where T1.setID is not a foreign key)„ schema-linking mistakes (e.g., referencing the non-existent column T2.set_name ) , and syntax errors (e.g., omitting BY after ORDER ). Because execution feedback is often limited to syntax errors and non-existent columns, it is dif-ficult to identify and repair all of these errors holistically. Moreover, fixing one error may expose or even introduce others, making it challenging to produce an executable query. Spider-2.0 [ 18 ] makes these limitations explicit by introducing complex questions over large, intricate schemas that often cannot fit into an LLM’s context window. Moreover, many gold queries rely on Common Table Expressions (CTEs) to organize multi-step logic, which improves readability for humans but increases the surface area for syntactic and logical errors in automatic generation. Consequently, one-shot generation with global schema prompting becomes unreliable at real-world scale. To address these challenges, we propose AV-SQL , a multi-stage framework for robust Text-to-SQL. Inspired by Chain-of-Agents long-context decomposition [ 47 ], AV-SQL partitions the full schema into table-centric chunks and processes them sequentially. However, 
+
+> arXiv:2604.07041v1 [cs.DB] 8 Apr 2026 Minh Tam Pham et al.
+
+unlike standard long-context summarization, Text-to-SQL requires exact schema grounding, so intermediate representations must pre-serve table and column names rather than compress them away. To achieve this, AV-SQL treats chunk-level reasoning as schema filtering and represents intermediate decisions as executable CTEs. Specifically, AV-SQL consists of three stages: (1) Question Rewriting ,where a rewriter agent reformulates the question and external evi-dence into a concise, explicit form; (2) Agent View Generation , where view generator agents examine schema chunks, produce CTE-based agent views, and validates them through execution with iterative repair; and (3) SQL Generation , where planner, SQL generator, and revisor agents compose the validated agent views into the final ex-ecutable SQL. As shown in Fig. 1, this design reduces long-context pressure, makes schema filtering explicit, and improves executabil-ity by validating intermediate CTEs before final synthesis. 
+
+Example 1.2. In Fig. 1, AV-SQL partitions the schema into smaller chunks and lets each view generator focus on one chunk at a time. For a chunk containing the sets and legalities tables, the agent produces nyx_card_set_cte , an executable CTE that captures the information needed for the question. Because this CTE only uses the sets table, the legalities table can be identified as irrelevant and excluded from later stages, which reduces context overload. After iterative validation and repair to ensure executability and correctness, this CTE can be directly incorporated into the final SQL query, lowering the risk of syntax and schema-linking errors. Motivated by these design advantages, our main contributions are as follows: 
+
+• A novel multi-stage agentic Text-to-SQL framework. 
+
+AV-SQL introduces a three-stage framework using special-ized agents for question reformulation, CTE-based interme-diate view construction, and final SQL synthesis. 
+
+• CTE-based agent views with execution-guided repair. 
+
+Agent views are introduced as executable CTEs that make intermediate schema-filtering decisions explicit and ver-ifiable, using CTE-level execution feedback to iteratively repair errors before final SQL synthesis. 
+
+• Strong empirical performance. Extensive experiments show that AV-SQL outperforms state-of-the-art methods on large and complex real-world benchmarks, particularly Spider 2.0, while remaining competitive on standard bench-marks such as Spider, BIRD, and KaggleDBQA. 
+
+• Zero-shot setting. AV-SQL performs strongly in a fully zero-shot setting, requiring neither post-training nor in-context exemplars, and achieves strong results on Spider 2.0-Snow, Spider, BIRD, and KaggleDBQA. 
+
+• Open-source release. All code and artifacts will be re-leased to support reproducibility and future research. The rest of the paper is organized as follows: §2 reviews related work; §3 formally defines the problem and describes the overview of the AV-SQL framework; §4 details the design of each agent and the overall pipeline; §5 presents experimental results and analysis; and §6 concludes with a summary. 
+
+## 2 RELATED WORK 
+
+Text-to-SQL benchmarks. Early single-domain benchmarks in-clude Academic [ 22 ], MAS, IMDB, and YELP [ 45 ], and Advising [ 10 ]. Later work broadened the scope: WikiSQL [ 48 ] enabled large-scale table-based evaluation; Spider [ 46 ] introduced cross-domain multi-table SQL; BIRD [ 25 ] covered 37 professional domains; and Kag-gleDBQA [ 16 ] targeted real-world web databases. Spider 2.0 [ 18 ]further raises the bar with complex queries over schemas with thousands of columns, making full-schema prompting impractical. 
+
+Text-to-SQL methods. Text-to-SQL modeling has progressed through several stages. Pre-LLM neural semantic parsers relied on struc-tured decoding and explicit schema modeling. RAT-SQL [ 40 ] used relation-aware attention for schema linking; and RESDSQL [ 23 ] im-proved robustness via schema pruning. RASAT [ 33 ], and LGESQL [ 4]further refined graph-based schema-question modeling, while Cat-SQL [ 11 ] combined rule-based and neural approaches via a sketch-based framework. With LLMs, early work [ 27 , 34 ] showed that zero- and few-shot prompting yields competitive performance without task-specific training. Methods such as DIN-SQL [ 31 ], MAC-SQL [ 39 ], C3SQL [ 8], DAIL-SQL [ 12 ], DTS-SQL [ 32 ], and ZeroNL2SQL [ 9] improved performance via task decomposition, demonstrations, and multi-model pipelines. Supervised fine-tuning approaches including CodeS [ 24 ] and XiYan-SQL [ 13 ] strengthened open-source models, while hybrid and multi-candidate methods such as CHESS [ 37 ], MCS-SQL [ 17 ], and Super-SQL [ 20 ] further im-proved robustness. More recent systems – CHASE-SQL [ 30 ], Alpha-SQL [ 21 ], and Long Context NL2SQL [ 5] – incorporate planning, candidate selection, and execution feedback for complex schemas. Although existing methods perform strongly on Spider and BIRD, they struggle on Spider 2.0’s larger schemas and more complex queries. Recent agentic approaches – ReForCE [ 7] (self-refinement with majority-vote consensus), DSR-SQL [ 14 ] (dual-state reasoning), and AutoLink [ 43 ] (iterative schema linking) – still achieve only 35.83%, 35.28%, and 34.92% execution accuracy, respectively. In contrast, AV-SQL introduces a novel approach that uses ver-ifiable CTE-based agent views, generated from smaller schema chunks, as intermediate steps to guide the final SQL synthesis. This enables AV-SQL to achieves a new state-of-the-art result of 70.38% on Spider 2.0, while remaining competitive on Spider (85.59%), BIRD (72.16%) and KaggleDBQA (63.78%). 
+
+Long Context Modeling for LLMs. LLMs have finite context win-dows, making long inputs such as large documents and database schemas difficult to handle. Common strategies include extending context length (e.g.,from 2048 in GPT-3 [ 3 ] to 128k in GPT-4 [ 1]and 400k tokens in GPT-5 [ 36 ]), though performance can still de-grade due to context rot [ 15 ]; RAG, which retrieves relevant ev-idence [ 19 , 26 , 41 , 44 ] but may omit necessary context [ 2]; and agentic frameworks such as CoA, where multiple agents process context segments and a manager aggregates their outputs [47]. Inspired by CoA [ 47 ], AV-SQL adapts long-context decomposition to Text-to-SQL by splitting large schemas into manageable chunks ,allowing agents to process table/column subsets sequentially rather than loading the full schema into a single prompt. This makes schema filtering explicit, alleviates full-schema prompting, and improves robustness by validating intermediate agent views before composing the final SQL query. AV-SQL: Decomposing Complex Text-to-SQL Queries with Agentic Views 
+
+## 3 PROBLEM FORMULATION 3.1 Model and Problem Statement 
+
+Given a natural language question Q, a database schema S, and optional external knowledge K, the goal of Text-to-SQL is to gen-erate an executable SQL query Y to answer the question Q. We define the database as D = (T , C, R) , where T = {T 1, T2, . . . , T𝑚 }
+
+is the set of 𝑚 tables, and each table T𝑖 is associated with a column set C𝑖 = {𝑐 𝑖 
+
+> 1
+
+, 𝑐 𝑖 
+
+> 2
+
+, . . . , 𝑐 𝑖 𝑛 𝑖 }, with 𝑛 𝑖 denoting the number of columns in T𝑖 . Let C = {C 1, C2, . . . , C𝑚 } be the collection of column sets for all tables, and let R denote the foreign-key relations among tables. Then, the Text-to-SQL task can be formulated as 
+
+Y = 𝑓 (Q , S, K | 𝜽 ), (1) where the function 𝑓 (· | 𝜽 ) can represent a model or pipeline system with the parameter 𝜽 , Y is SQL query can execute against the database instance D to get the data which use requires in Q.All important notations are summarized in Table 1. 
+
+Table 1: Summary of Important Notations Notation Description                                   
+
+> QNatural language question
+> Kexternal knowledge evidence
+> DA relational database
+> SSchema of the database DT={T 1,T2, . . . , T𝑚 }Set of tables in the database DC𝑖 ={𝑐 𝑖
+> 1, 𝑐 𝑖
+> 2, . . . , 𝑐 𝑖 𝑛 𝑖 },Set of columns of table 𝑖 in the database D
+> Π(S) ={S 1
+> sub , . . . , S𝑗
+> sub , . . . , S𝑘
+> sub }Set of 𝑘 schema chunks
+> V𝑗
+> CTE CTE-based agent views for chunk 𝑗
+> J𝑗 JSON-based schema selection for chunk 𝑗
+
+## 3.2 Challenges 
+
+Text-to-SQL systems in practical environments face several interre-lated challenges: (C1) Long-context overload. Real-world databases may be ac-companied by long external documents and large schemas with hundreds of tables and thousands of columns, making the input extremely long. To answer a single question, the system may need to process both the external knowledge and the full database schema, which can easily exceed the context window of LLMs. Even when all inputs fit, the long context can dilute attention, making it harder to identify relevant evidence and correctly ground schema elements. As a result, schema grounding weakens, increasing the risk of incomplete or incorrect SQL generation. (C2) Limitations of schema reduction. A common mitiga-tion is to filter the schema by selecting tables and columns relevant to the question. However, in long-context set-tings, such filtering can reduce accuracy by removing useful schema elements, breaking valid join paths, or providing insufficient structure for correct SQL synthesis. (C3) SQL complexity and error propagation. Real-world questions often require complex SQL with multiple joins, nested conditions, aggregations, and multi-step reasoning. This complexity increases the likelihood of both schema-linking errors and semantic mistakes, and small errors in one part of the query can propagate to the final result. (C4) Difficulty of debugging monolithic SQL. When an LLM generates a single large SQL query, debugging is difficult: 
+
+Table 2: Comparison of AV-SQL with representative Text-to-SQL methods in terms of (i) single-candidate generation, (ii) zero-shot applicability, and (iii) ability to handle large databases (e.g., Spider 2.0 schemas).                   
+
+> Method Single candidate Zero-shot Handle large DB
+> DIN-SQL [31], DAIL-SQL [12] , MAC-SQL [39] ✓✗✗
+> MCS-SQL [17], CHESS [37] ✗✗✗
+> Alpha-SQL [21] ✗✓✗
+> ReForCE [7], AutoLink [43] ✗✓✓
+> AV-SQL ✓✓✓
+
+if execution fails or results are incorrect, it is often unclear which clause (e.g., join, filter, grouping) caused the issue. This makes iterative correction inefficient and unreliable. 
+
+## 3.3 Framework Overview 
+
+To address the challenges above, we propose AV-SQL , a multi-stage Text-to-SQL framework that uses executable CTE-based agent views as intermediate representations. Rather than generating a single monolithic SQL query over the full schema, AV-SQL constructs in-termediate agent views that make schema filtering explicit, can be executed and validated against the database, and enable early error detection before final SQL synthesis. This design reduces full-schema prompting, improves error localization, and makes complex reasoning more tractable. Table 2 compares AV-SQL with representative Text-to-SQL meth-ods along three practical dimensions: single-candidate generation, zero-shot applicability, and support for large databases. Prompting-based methods such as DIN-SQL, DAIL-SQL, and MAC-SQL typ-ically generate a single candidate, but are not designed for large-schema settings. Methods such as CHESS and MCS-SQL rely on selecting from multiple candidates, while recent Spider 2.0-oriented systems such as ReForCE and AutoLink handle large schemas but also depend on multi-candidate exploration. In contrast, AV-SQL 
+
+supports single-candidate generation in a fully zero-shot setting while explicitly targeting large-database scenarios. This combi-nation is particularly appealing for practical deployments, where minimizing sampling/selection overhead is important, yet robust handling of long schemas and complex joins remains essential. In more detail, AV-SQL decomposes Text-to-SQL into three stages that progressively clarify the user intent, construct validated inter-mediate agent views from schema chunks, and synthesize the final executable SQL. As shown in Fig. 2, the framework consists of the following stages: 
+
+• Question Rewriting : This stage rewrites the original ques-tion and external knowledge into a clearer and more ex-plicit form. By extracting useful external knowledge, re-solving underspecified references, and clarifying implicit constraints such as missing filters or aggregation criteria, it reduces linguistic ambiguity and improves downstream schema linking. The output is a clarified question that pre-serves the user’s intent while making downstream reason-ing more reliable, helping to mitigate challenges (C1) and (C3) by attention on relevant information to reduce the likelihood of semantic errors in SQL generation. Minh Tam Pham et al. Database Vector 
+
+Database 
+
+> sets : [id, name,
+> code, … ]
+> legalities : [id,
+> format, uuid, … ]
+> Table m-1:
+> Table m:
+
+External 
+
+knowledge  AI Agent 
+
+Preprocessing & Env 
+
+Question Rewriting 
+
+Agent 
+
+View Generation 
+
+> Agent View+
+> JSON Selction
+
+Filtered 
+
+Schema 
+
+> sets : [id, name,
+> code, … ]
+> legalities : [id,
+> format, uuid, … ]
+> sets :
+> [name,
+> code]
+
+SQL 
+
+Generation 
+
+> Global Schema
+> Selection
+> Aggregated
+> Agent Views
+> Which card name in
+> the set 'Journey into Nyx
+> Hero's Path' has the
+> highest converted mana
+> cost.
+
+Database Schema    
+
+> Table: legalities :
+> [id, format, uuid, status ]
+> Table: sets :
+> [id, name, code, mcmId, … ]
+> Table: cards :
+> [id, name, setCode, colors,… ]
+
+……  
+
+> Table m:
+> [c 1m, c 2m, …, c nm
+> m]
+> cards :
+> [id, name,
+> setCode, … ]
+
+Small parts of 
+
+schema 
+
+# … WITH nyx_card_set_cte AS (      
+
+> SELECT sets.code, sets.name
+> FROM sets WHERE sets.set_name =
+> 'Journey into Nyx Hero''s Path’ ) …..
+> WITH nyx_card_set_cte …
+> SELECT T1.name FROM cards AS T1
+> INNER JOIN nyx_card_set_cte AS T2
+> ON T2.code = T1.setCode
+> ORDER T1.convertedManaCost DESC LIMIT 1
+> Conditions: set name
+> corresponds to the condition
+> name = 'Journey into Nyx
+> Hero''s Path’
+> find the card with the highest
+> converted mana cost
+> Output needs to contain: card
+> name with the highest
+> converted mana cost.
+> WITH nyx_card_set_cte AS (
+> SELECT sets.code, sets.name
+> FROM sets WHERE sets.name
+> = 'Journey into Nyx Hero''s Path’)
+> The cte could filter the condition:
+> The card is part of the set named
+> -------------------------------------------
+> {
+> “sets”: ["code", "name"],
+> }set 'Journey into Nyx Hero's Path' refers
+> to name = 'Journey into Nyx Hero''s Path'
+> Error: No such column name “set_name”
+
+Planning 
+
+> Step 1: Filter the `sets` table to include only those
+> cards in the set 'Journey …
+> Step 2: Order these filtered cards by their
+> `convertedManaCost` …
+> Step 3: Select the top card …
+> …
+
+Final SQL      
+
+> WITH nyx_card_set_cte AS ( SELECT sets.code, sets.name
+> FROM sets WHERE sets.name =
+> 'Journey into Nyx Hero''s Path')
+> SELECT T1.name FROM cards AS T1 INNER JOIN
+> nyx_card_set_cte AS T2 ON T2.code = T1.setCode
+> ORDER BY T1.convertedManaCost DESC LIMIT 1;
+> Near “order” syntax error
+> Feedback:
+> •Execution
+> •Retrieval values
+> •Consistency
+> Feedback:
+> •Execution
+> •Revision
+
+Part of 
+
+schema       
+
+> (𝒮 sub
+> 1:)
+> (𝒮 sub
+> 2:)
+> (𝒮 sub
+> 1:)
+
+(𝒬 : )
+
+(𝒦 : )
+
+(𝒮 )
+
+(𝒬 rewrite : )
+
+(𝒬 rewrite ) (𝒬 rewrite )
+
+(𝒦 )
+
+(𝒴 ⋆: )
+
+(𝒫 )    
+
+> (𝑉 ℂ𝕋 𝔼 )
+> (𝒱 CTE
+> 1,t,𝒥 1,t:)
+
+(𝒥 1:)  
+
+> (𝒴 SQL
+> 𝑡 :)
+> (𝒮 filtered )
+
+(𝒮 filtered  
+
+> 1
+
+)
+
+> Rewriter
+
+(𝒱 CTE  
+
+> 1
+
+:)  
+
+> View generator
+> SQL generator Revisor
+> Planner
+
+(𝒟 )  
+
+> (𝒮 sub
+> k:)
+
+(Π 𝒮 )
+
+(err 1,𝑡 : )
+
+(err t: )    
+
+> (err 1,𝑡 )
+> (ℒ𝒟
+> 1,𝓉 )
+> (msg consistency
+> 1,𝑡 )
+> (err t)
+
+Figure 2: Overview of AV-SQL . The framework begins with preprocessing—schema splitting and vector database initialization for value preprocessing—followed by three main stages: (1) Question Rewriting which reformulates the input question, optionally using external knowledge, into a clearer and more explicit form; (2) Agent View Generation, which decomposes the long-context schema into smaller chunks and produces execution-validated intermediate CTE-based agent views that capture key reasoning steps while identifying relevant schema elements; and (3) SQL Generation, which uses three agents: a planner, a SQL generator, and a revision agent to produce the final executable SQL query from the filtered schema and validated agent views. 
+
+• Agent View Generation : This stage uses multiple view-generation agents to process partial schema contexts, gen-erating executable CTE-based intermediate views that in-crementally capture the information needed to answer the clarified question. Each agent view is an executable Com-mon Table Expressions (CTE) representing a specific reason-ing step, such as identifying candidate entities, construct-ing join paths, applying filters, or computing aggregates. The agent views are validated through execution, or other database-level checks to ensure that the they are syntac-tically correct, structurally consistent, and semantically aligned with the intended query. They also provide useful insight into the database contents and the expected form of the final result. This stage addresses challenges (C1), (C2), (C3), and (C4) by decomposing long-context schemas into verifiable steps, making schema filtering explicit, and enabling early error detection before final SQL synthesis. 
+
+• SQL Generation : This stage generates the final SQL query using three agents: a planner that determines the query structure, including selection target, filtering conditions, required FROM and JOIN clauses, and any nested structures; a SQL generator that produces the query; and a revision that checks the generated SQL for correctness and consistency with the question. Rather than using the full raw schema, these agents use only on the filtered schema elements and validated CTE-based agent views from the previous stage, narrowing the search space and preventing hallucinated columns or incorrect joins. Building upon modular interme-diate views makes the reasoning process transparent and verifiable, directly addressing challenges (C3) and (C4). 
+
+## 4 METHODOLOGY 
+
+This section presents AV-SQL in detail, as illustrated in Fig. 2. To address large-scale Text-to-SQL over real-world databases with hundreds of tables, our framework organizes the task into three stages: Question Rewriting, Agent View Generation, and SQL Gen-eration. This decomposition reduces schema complexity and im-proves generation accuracy by dividing the long schema context into smaller and more manageable schema chunks. In particular, Question Rewriting clarifies the input question and extracts use-ful context, Agent View Generation builds validated intermediate agent views from partial schema contexts, and SQL Generation con-structs the final SQL query using the filtered schema and validated CTE-based agent views. 
+
+## 4.1 Preprocessing 
+
+Before introducing the main stages of AV-SQL , we first apply a set of preprocessing steps to prepare the database. In particular, the preprocessing procedure consists of three components: database AV-SQL: Decomposing Complex Text-to-SQL Queries with Agentic Views 
+
+schema compression, schema splitting into smaller chunks, and database value preprocessing. 
+
+4.1.1 Database schema compression. This step reduces the token length of Spider 2.0 schemas by grouping near-duplicate tables and columns into pattern-based clusters. Spider 2.0 often contains very large schemas with many similar tables and columns whose names differ only by numeric suffixes, such as year, month, or in-dex. Directly serializing these schemas into prompts introduces substantial redundancy and may cause the model to miss impor-tant schema details. To reduce this redundancy, we compress the schema by clustering redundant tables and columns based on shared naming patterns. Extending [ 7], we further verify structural consis-tency before merging: tables are merged only when they share the same column sets and key information, and columns are grouped only when their types and metadata are consistent. This process compresses large schemas by about 10 × (see Fig. 3), substantially reducing prompt length and improving efficiency. 3 4 5 6 7
+
+> token_len (log scale)
+> 0.0
+> 2.5
+> 5.0
+> 7.5
+> 10.0
+> 12.5
+> Count
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> Density
+> Compact
+> Full
+
+Figure 3: Token-length distribution of large database schemas before and after schema compression. 
+
+Example 4.1. In the G360 database in Spider2-snow, the schema contains multiple tables such as 
+
+GOOGLE_ANALYTICS_SAMPLE.GA_SESSIONS_20170201 ,
+
+GOOGLE_ANALYTICS_SAMPLE.GA_SESSIONS_20170202 , ..., 
+
+GOOGLE_ANALYTICS_SAMPLE.GA_SESSIONS_20170228 , ... . Since these tables have similar column sets and metadata, we group them into a single table cluster with the pattern 
+
+GOOGLE_ANALYTICS_SAMPLE.GA_SESSIONS_{NUM} .In the WORLD_BANK database in Spider2-snow, the table 
+
+WORLD_BANK_GLOBAL_POPULATION.POPULATION_BY_COUNTRY con-tains columns such as year_2003 , year_2004 , year_2005 , ..., 
+
+year_2022 . Because these columns share the same data type ( Num-ber ) and similar metadata, we group them into a single column cluster with the pattern year_{NUM} .’ 
+
+4.1.2 Database schema splitting. In large-scale benchmarks such as Spider 2.0, database schemas can be extremely long, reaching up to 
+
+∼ 1.5 million tokens, which exceeds the context window of current LLMs. To make schema grounding feasible for view generation stage of our framework, we partition the full schema into multiple smaller chunks, where each chunk contains one or more complete 
+
+table definitions. Let the full database schema be S. We partition it into 𝑘 chunks: 
+
+Π(S) = {S 1
+
+> sub
+
+, S2
+
+> sub
+
+, . . . , S𝑘  
+
+> sub
+
+}. (2) Each chunk S 𝑗  
+
+> sub
+
+contains a set of tables together with their com-plete column information and any foreign-key relations visible within that chunk : S 𝑗  
+
+> sub
+
+=  T 𝑗 , C 𝑗 , R 𝑗 , where T 𝑗 denotes the set of tables, C 𝑗 the set of columns, and R 𝑗 the set of foreign-key relations visible in chunk 𝑗 .There are several possible strategies for splitting S: (i) assigning one table to each chunk, (ii) grouping tables by foreign-key con-nected components, or (iii) length-based partitioning. In practice, however, large schemas in Spider 2.0 do not provide foreign-key in-formation, so partitioning by connected components is not applica-ble. We therefore use length-based partitioning, in which complete table definitions are packed into chunks such that the estimated token length of each chunk does not exceed a predefined limit 𝐵 :
+
+∀S 𝑗  
+
+> sub
+
+∈ Π(S) , S 𝑗  
+
+> sub
+
+< 𝐵 (3) where | · | denotes the estimated token length of the corresponding schema chunk. 
+
+4.1.3 Database Value Preprocessing. Accurately retrieving data-base values that match a user’s natural-language intent is important for reliable Text-to-SQL generation [ 28 ]. In practice, SQL queries typically reference only a small subset of values from potentially large databases, most often in filtering predicates such as WHERE 
+
+clauses. A common challenge is the mismatch between how users mention an entity and how the corresponding value is stored in the database (e.g., a user writes “USA” while the database stores “US”). Following [ 21 , 37 ], we adopt a two-stage pipeline with offline pre-processing and online retrieval to mitigate this discrepancy. 
+
+Offline Pre-processing. In the offline stage, we index text-based entity values that are likely to vary in surface form, such as country names, organization names, abbreviations, and short categorical strings. We exclude primarily numeric values, such as phone num-bers, dates, IDs, and postcodes. Each retained value is converted into a MinHash-based LSH signature [ 6] and stored in a vector database for efficient retrieval. 
+
+Online Retrieval. At query time, we extract candidate literals from the generated agent views. For each value, we compute its MinHash LSH signature [ 6 ] and retrieve similar entries from the offline index. We then filter the candidates using edit-distance and semantic-similarity thresholds (𝜏 𝑒𝑑𝑖𝑡 , 𝜏 𝑠𝑒𝑚𝑎𝑛𝑡𝑖𝑐 ), where semantic similarity is computed with all-MiniLM-L6-v2 [35 , 42 ]. The selected database values are then incorporated into the agent prompt, pro-viding additional context for view generation and SQL synthesis. 
+
+## 4.2 Question Rewriting 
+
+This stage employs a single agent, 𝐿𝐿𝑀 𝑅𝑒𝑤𝑟𝑖𝑡𝑒𝑟 , to reformulate the user request into a clearer and more explicit form for downstream agents (e.g., the view generator, planner, and SQL generator). It takes as input the original natural-language question Q and optional external knowledge K, and produces a rewritten question Qrewrite 
+
+that explicitly states the user intent, key constraints, and necessary domain assumptions. External knowledge K provides schema-external information such as concept-to-column mappings, metric definitions (e.g., 
+
+Average_score ), business rules, and explanations of coded values. In benchmarks like BIRD, this knowledge is typically brief (often just 1–2 sentences). However, in large-scale datasets like Spider 2.0, Minh Tam Pham et al. 
+
+K frequently consists of lengthy documents filled with noisy or question-irrelevant details. Providing the full K directly to down-stream LLM agents increases prompt length and can distract the model, degrading Text-to-SQL reliability. Therefore, 𝐿𝐿𝑀 𝑅𝑒𝑤𝑟𝑖𝑡𝑒𝑟 
+
+filters out irrelevant information from K, integrates only the per-tinent details, and rewrites the original question. The rewritten question structures the key requirements explicitly, for example: 
+
+Qrewrite = ⟨task , required outputs , filters/constraints , sorting/limit ⟩.
+
+Formally, the overall rewriting objective is: 
+
+Qrewrite = 𝐿𝐿𝑀 𝑅𝑒𝑤𝑟𝑖𝑡𝑒𝑟 
+
+ Q, K | Q ,
+
+s.t. Intent (Q rewrite ) = Intent (Q , K) , (4) Where Intent (·) is denoted as the expressed user intent in the question. As a result, downstream agents receive only the clarified 
+
+Qrewrite rather than the raw question paired with the full K, which reduces irrelevant context and improves robustness in subsequent reasoning and SQL generation. 
+
+## 4.3 Agent View Generation 
+
+This stage is the core component for schema exploration and inter-mediate reasoning. It consists of multiple view-generator agents, denoted 𝐿𝐿𝑀 𝑉 𝑖𝑒𝑤 , each receiving a partial schema chunk. Specifi-cally, each agent takes as input (i) the rewritten question Qrewrite 
+
+from §4.2 and (ii) a schema chunk S 𝑗  
+
+> sub
+
+from the schema-splitting procedure in §4.1.2. Restricting each agent to a partial schema reduces prompt length and encourages the model to focus on a manageable subset of tables and columns, mitigating information overload in long-context settings. Each view-generator agent, de-noted 𝐿𝐿𝑀 𝑗 𝑉 𝑖𝑒𝑤 , produces two outputs: (a) a CTE-based agent view 
+
+V 𝑗  
+
+> CTE
+
+, consisting of one or more intermediate CTE queries with their natural-language rationale, and (b) a JSON schema selection 
+
+J 𝑗 identifying the candidate tables and columns needed to answer the question (see Fig. 2 for an example). The generation process for each schema chunk 𝑗 is defined as: 
+
+V 𝑗 
+
+> CTE
+
+, J 𝑗 = 𝐿𝐿𝑀 𝑗 𝑉 𝑖𝑒𝑤 
+
+
+
+Qrewrite , S 𝑗 
+
+> sub
+
+
+
+, (5) Each CTE query within V 𝑗  
+
+> CTE
+
+acts both as a data exploration step over the database and as a compressed logical representation of the reasoning behind table and column selection, encoding operations such as joins, filters, and aggregations in a modular form that can be directly reused during final SQL generation. The JSON selection is defined as J 𝑗 = (T 𝑗  
+
+> J
+
+, C 𝑗  
+
+> J
+
+), where T 𝑗  
+
+> J
+
+and C 𝑗  
+
+> J
+
+denote the selected tables and columns, respectively. These dual outputs serve two purposes: (i) it enables schema filtering for downstream SQL gener-ation, and (ii) supporting automatic grounding quality checks by comparing the JSON selection against the schema elements actually used in the generated CTE. To improve output quality, an iterative validation and repair procedure is applied to each agent view, covering keyword value extraction and retrieval, execution-based validation to fix syntax and schema-linking errors, and consistency checking between V 𝑗 
+
+> CTE
+
+and J 𝑗 . Outputs are refined until valid or a maximum number of repair iterations is reached. Once all schema chunks are processed, the validated agent views and JSON selections are aggregated into a set of executable agent views and a global schema selection, passed to the downstream SQL Generation stage as compact, reusable intermediate reasoning context. The full procedure is described in algorithm 1, with each step detailed below. 
+
+Keyword Value Extraction and Retrieval. In addition to produc-ing intermediate queries, the CTE program exposes useful literals (e.g., string constants in WHERE clauses). Unlike prior work [ 21 , 37 ]that extracts keywords directly via prompting, we use sqlglot to extract literals L 𝑗  
+
+> CTE
+
+from the generated CTE: 
+
+L 𝑗  
+
+> CTE
+
+= Literal 
+
+
+
+V 𝑗 
+
+> CTE
+
+
+
+. (6) For each literal ℓ ∈ L 𝑗 
+
+> CTE
+
+, we retrieve and normalize candidate database values denoted L ( 𝑗,𝑡 )D using the online value-matching procedure described in §4.1.3. The retrieved candidate set L ( 𝑗,𝑡 )D
+
+is then feedback to the CTE Agent to regenerate or refine V 𝑗 
+
+> cte
+
+,improving value grounding and increasing the likelihood that the CTE-based agent view executes correctly. 
+
+Execution-based validation. This step is to fix any syntax error in CTE query. Each agent view contain one or more CTE queries, which is executable and can be validated by running it against the database. We use sqlglot to parse the agent view and extract the underlying SQL for execution, which detects both syntax errors and schema-linking errors. If execution fails, the error message is fed back to the model , which is prompted to revise the agent view. We denote Valid (Exec (V 𝑗 
+
+> CTE
+
+, D)) as the execution-based valida-tion function, which returns True if V 𝑗  
+
+> CTE
+
+executes successfully on database instance D without error, and False otherwise. If there are any errors (denoted err 𝑗 ), this error message will be feedback to the model to repair the CTE query. Valid (Exec (V 𝑗 
+
+> CTE
+
+, D)) = True 
+
+means that there is no error while executing the CTE query err 𝑗 = ∅
+
+Consistency checking. We also enforce consistency between the CTE-based agent view and the JSON selection, denoted 
+
+Consistent (V 𝑗 
+
+> CTE
+
+, J 𝑗 ). Let T 𝑗  
+
+> V
+
+and C 𝑗  
+
+> V
+
+be the sets of tables and columns used by agent view CTE query V 𝑗 
+
+> CTE
+
+, and JSON selection 
+
+J 𝑗 = (T 𝑗  
+
+> J
+
+, C 𝑗  
+
+> J
+
+). The consistency checking require: 
+
+• If the JSON output selects no columns and table, the agent must not generate any CTE-based view. It refer that this schema chunk is not relevant to answer the question, so there are not any table or column related to the question. 
+
+T 𝑗  
+
+> J
+
+= ∅ ∧ C 𝑗  
+
+> J
+
+= ∅ =⇒ V 𝑗  
+
+> CTE
+
+= ∅.
+
+• If a CTE-based view exists, the JSON output must include at least one selected column. It indicates that this provided schema chunk is related to the question, so JSON selection must choose at least one column or table which relevant to the question. V 𝑗  
+
+> CTE
+
+≠ ∅ =⇒ C 𝑗  
+
+> J
+
+≠ ∅ ∨ C 𝑗  
+
+> J
+
+= ∅• All tables and columns referenced in the CTE-based view must appear in the JSON selection. This enforces that the CTE-based agent view uses only the tables and columns which are selected in JSON selection. 
+
+(T 𝑗  
+
+> V
+
+⊆ T 𝑗  
+
+> J
+
+) ∧ (C 𝑗  
+
+> V
+
+⊆ C 𝑗  
+
+> J
+
+)
+
+After checking the consistency, the step will also feedback a consistency message denoted by msg ( 𝑗,𝑡 ) 
+
+> consistency
+
+which could contain information about which table or column in CTE query is not selected in JSON selection, or any other inconsistency between CTE query and JSON selection. This message will be used to repair AV-SQL: Decomposing Complex Text-to-SQL Queries with Agentic Views 
+
+both CTE query and JSON selection in the next iteration. This consistency checking step ensure that the response of model is correct in logic. Since the model is required to express schema grounding in two forms–the CTE-based agent view and the JSON selection–any inconsistency between them may indicate a semantic error. Note that we allow redundancy: J 𝑗 may include additional tables/columns not used in the current CTE, since they can be useful when integrating evidence from other schema segments. 
+
+Iterative validation and repair. The initial outputs (V ( 𝑗, 0) 
+
+> CTE
+
+, J ( 𝑗, 0) )
+
+may contain errors, including SQL syntax errors, schema-linking errors such as invalid table or column names, and inconsistencies between the CTE and the JSON selection. We therefore apply an iterative validation-and-repair loop, regenerating both outputs until the CTE is executable and the selection is consistent: 
+
+V ( 𝑗,𝑡 +1) 
+
+> CTE
+
+, J ( 𝑗,𝑡 +1) = 𝐿𝐿𝑀 𝑗 𝑉 𝑖𝑒𝑤 (Q rewrite , S 𝑗 
+
+> sub
+
+, V ( 𝑗,𝑡 ) 
+
+> CTE
+
+, J ( 𝑗,𝑡 ) ,
+
+L 𝑗 
+
+> D
+
+, err ( 𝑗,𝑡 ) , msg ( 𝑗,𝑡 )
+
+> consistency
+
+) (7) This loop continues until the validation conditions are satisfied or the maximum number of repair iterations denoted 𝑇 max is reached. 
+
+Aggregation. After all schema chunks have been processed, we aggregate the validated agent views and JSON selections: 
+
+VCTE =
+
+n
+
+V 𝑗  
+
+> CTE
+
+Valid 
+
+
+
+Exec (V 𝑗 
+
+> CTE
+
+, D) 
+
+
+
+∧ Consistent (V 𝑗 
+
+> CTE
+
+, J 𝑗 )
+
+o𝑘 𝑗 =1,
+
+J =
+
+n
+
+J 𝑗 Consistent (V 𝑗 
+
+> CTE
+
+, J 𝑗 )
+
+o𝑘 𝑗 =1.
+
+(8) We then compute the globally selected tables and columns by taking the union over all chunks: 
+
+T ★ =
+
+> 𝑘
+
+Ø
+
+> 𝑗 =1
+
+T 𝑗  
+
+> J
+
+, C★ =
+
+> 𝑘
+
+Ø
+
+> 𝑗 =1
+
+C 𝑗  
+
+> J
+
+. (9) Since the consistency check enforces (T 𝑗  
+
+> V
+
+⊆ T 𝑗  
+
+> J
+
+) and (C 𝑗  
+
+> V
+
+⊆ C 𝑗  
+
+> J
+
+),the union of JSON selections forms a safe superset of all schema ele-ments grounded by the validated CTEs. The global schema selection passed to the SQL Generation stage is: Sfiltered = {T ★, C★}.
+
+The following outputs are passed to the downstream SQL Gen-eration stage: 
+
+• Aggregated Validated Agent Views VCTE : validated, ex-ecutable CTE-based agent view programs with their exe-cution results and natural-language rationales explaining how each agent view contributes to the final answer. 
+
+• Global Schema Selection Sfiltered : a reduced schema de-rived from the aggregated JSON selections, containing only the relevant tables and columns. Together, these outputs provide the SQL Generation stage with a compact and well-validated context, enabling it to reuse inter-mediate reasoning steps, avoid distraction from irrelevant schema elements, and leverage rationales to guide final query construction. 
+
+## 4.4 SQL Generation 
+
+The SQL Generation stage synthesizes the final SQL query that answers the user question. It consists of three agents: a planner agent 𝐿𝐿𝑀 𝑃𝑙𝑎𝑛𝑛𝑒𝑟 , a SQL generator agent 𝐿𝐿𝑀 SQL , and a revision agent 𝐿𝐿𝑀 𝑅𝑒𝑣𝑖𝑠𝑜𝑟 . This stage receives a compact, structured context from earlier stages: (i) the rewritten question Qrewrite from §4.2, 
+
+Algorithm 1: Agent view Generation Pipeline 
+
+Input: Rewritten question Qrewrite ;Full schema S; and database instance D;Token budget 𝐵 for schema segments; Max repair iterations 𝑇 max ; thresholds 𝜏 𝑒𝑑𝑖𝑡 and 𝜏 𝑠𝑒𝑚𝑎𝑛𝑡𝑖𝑐 
+
+Output: Aggregated Validated Agent Views VCTE ; Global Schema Selection Sfiltered 
+
+{S 1
+
+> sub
+
+, . . . , S𝑘  
+
+> sub
+
+} ← SplitSchemaByTokenBudget (S , 𝐵 )
+
+VCTE ← ∅ ; J ← ∅ 
+
+for 𝑗 ← 1 to 𝑘 do 
+
+// Initial generation 
+
+(V ( 𝑗, 0) 
+
+> CTE
+
+, J ( 𝑗, 0) ) ← 𝐿𝐿𝑀 𝑗 𝑉 𝑖𝑒𝑤 (Q rewrite , S 𝑗 
+
+> sub
+
+)
+
+response_valid ← False 
+
+L 𝑗  
+
+> D
+
+← ∅ // retrievel candidate values 
+
+𝑡 ← 0
+
+// Execution-based validation 
+
+while 𝑡 < 𝑇 max and response_valid = False do 
+
+// Keyword Value Extraction and Retrieval. 
+
+L ( 𝑗,𝑡 ) ← Literal (V ( 𝑗,𝑡 ) 
+
+> CTE
+
+) foreach ℓ ∈ L ( 𝑗,𝑡 ) do 
+
+L 𝑗  
+
+> D
+
+← L 𝑗  
+
+> D
+
+∪ Retrieve (ℓ, 𝜏 𝑒𝑑𝑖𝑡 , 𝜏 𝑠𝑒𝑚𝑎𝑛𝑡𝑖𝑐 )(Z( 𝑗,𝑡 ) , err ( 𝑗,𝑡 ) ) ← Exec (V ( 𝑗,𝑡 ) 
+
+> CTE
+
+, D) 
+
+exec_valid ← ( err ( 𝑗,𝑡 ) = ∅) 
+
+// Consistency checking is_consistent , msg ( 𝑗,𝑡 ) 
+
+> consistency
+
+← Consistent (V ( 𝑗,𝑡 ) 
+
+> CTE
+
+, J ( 𝑗,𝑡 ) )
+
+if exec_valid ∧ is_consistent then 
+
+response_valid ← True 
+
+else 
+
+(V ( 𝑗,𝑡 +1) 
+
+> CTE
+
+, J ( 𝑗,𝑡 +1) ) ← 
+
+𝐿𝐿𝑀 𝑉 𝑖𝑒𝑤 (Q rewrite , S 𝑗 
+
+> sub
+
+, V ( 𝑗,𝑡 ) 
+
+> CTE
+
+, J ( 𝑗,𝑡 ) ,
+
+L 𝑗 
+
+> D
+
+, err ( 𝑗,𝑡 ) , msg ( 𝑗,𝑡 )
+
+> consistency
+
+)
+
+𝑡 ← 𝑡 + 1
+
+if response_valid = True then 
+
+VCTE ← VCTE ∪ {V 𝑗  
+
+> CTE
+
+} ; J ← J ∪ {J 𝑗 }
+
+// Aggregation 
+
+T ★ ← Ð   
+
+> T𝑗
+> J∈J
+
+TJ ; C★ ← Ð   
+
+> C𝑗
+> J∈J
+
+CJ
+
+Sfiltered ← {T ★, C★}
+
+return (VCTE , Sfiltered )
+
+(ii) the aggregated validated agent views VCTE with their execu-tion results and natural-language rationales from §4.3, and (iii) the global schema selection Sfiltered containing only relevant tables and columns from §4.3. This reduced context keeps the agents focused on the necessary schema elements and lowers the risk of distraction from irrelevant database structures. The stage follows a three-step procedure: 𝐿𝐿𝑀 𝑃𝑙𝑎𝑛𝑛𝑒𝑟 constructs a high-level query plan to reduce structural errors; 𝐿𝐿𝑀 SQL generates the SQL query with execution feedback; and 𝐿𝐿𝑀 𝑅𝑒𝑣𝑖𝑠𝑜𝑟 verifies and revises the generated SQL for Minh Tam Pham et al. 
+
+semantic correctness. The full procedure is described in algorithm 2, and each step is detailed below. 
+
+Planning. Before writing SQL, 𝐿𝐿𝑀 𝑃𝑙𝑎𝑛𝑛𝑒𝑟 constructs a high-level query plan to guide generation and reduce structural errors. The plan P specifies which CTEs and tables to use, required join paths, hidden formulas, necessary projections, and operations such as filtering, grouping, aggregation, and ordering: 
+
+P = 𝐿𝐿𝑀 𝑃𝑙𝑎𝑛𝑛𝑒𝑟 (Q rewrite , VCTE , Sfiltered ) . (10) 
+
+Execution-based validation. Given the plan and the structured context from earlier stages, 𝐿𝐿𝑀 SQL generates the final SQL query. Similar to the execution-based validation loop in §4.3, execution feedback is incorporated to iteratively repair syntax and schema-linking errors: 
+
+Y𝑡 +1 
+
+> SQL
+
+= 𝐿𝐿𝑀 SQL 
+
+
+
+P, Qrewrite , VCTE , Sfiltered , Y𝑡 
+
+> SQL
+
+, err (𝑡 ) 
+
+(11) where err (𝑡 ) is the execution error message at iteration 𝑡 . This loop terminates when the query YSQL executes successfully on the database instance D without error or when the maximum number of iterations 𝑇 max is reached. 
+
+Semantic verification and revision. Successful execution does not guarantee semantic correctness. After obtaining an executable query from 𝐿𝐿𝑀 SQL , 𝐿𝐿𝑀 𝑅𝑒𝑣𝑖𝑠𝑜𝑟 is applied to verify whether the result matches the intent of Qrewrite :
+
+Y★ 
+
+> SQL
+
+= 𝐿𝐿𝑀 𝑅𝑒𝑣𝑖𝑠𝑜𝑟 
+
+
+
+Qrewrite , Y𝑡 
+
+> SQL
+
+
+
+. (12) If the revision agent confirms that YSQL is semantically correct, it acts as an identity mapping and returns the same query unchanged. Otherwise, 𝐿𝐿𝑀 𝑅𝑒𝑣𝑖𝑠𝑜𝑟 edits the query according to the corrective feedback and produces a revised query Y★
+
+> SQL
+
+. This step reduces semantic errors that may survive execution-based validation. The SQL Generation stage outputs the final verified query Y★
+
+> SQL
+
+and its execution result as the system answer. 
+
+## 5 EXPERIMENTS 
+
+This section presents experiments evaluating the effectiveness, scal-ability, and reliability of AV-SQL . To systematically assess the contri-bution of each design choice, we organize our experiments around the following research questions. (RQ1) Normal-scale performance: How well does the frame-work perform on standard Text-to-SQL benchmarks: Spider, BIRD and KaggleDBQA? (RQ2) Large-scale scalability: How well does the framework perform on large scale, enterprise oriented benchmarks Spider 2.0-Snow? (RQ3) Multi-Candidate SQL Generation: What is the perfor-mance of AV-SQL under a multiple SQL candidates setting? (RQ4) Ablation study (Component contribution): How do the key components–the rewriter, planner, revisor, and exe-cution feedback for the view generator and SQL generator– contribute to overall performance? (View Generation Output Contribution): How do the two outputs of the Agent View Generation stage §4.3, Aggregated Validated Agent Views 
+
+(VCTE ) and Global Schema Selection (Sfiltered ) contribute to the correctness of the final SQL query? 
+
+Algorithm 2: SQL Generation Pipeline 
+
+Input: Rewritten question Qrewrite ;Aggregated Validated Agent Views VCTE ;Global Schema Selection Sfiltered and database D;Max execution-repair iterations 𝑇 max 
+
+Output: Final SQL query Y★ 
+
+> SQL
+
+and execution result Z
+
+// Planning 
+
+P ← 𝐿𝐿𝑀 Planner (Q rewrite , VCTE , Sfiltered )
+
+// Initial SQL generation from the plan 
+
+Y (0) 
+
+> SQL
+
+← 𝐿𝐿𝑀 SQL (P , Qrewrite , VCTE , Sfiltered )
+
+𝑡 ← 0
+
+// Execution-based validation 
+
+while 𝑡 < 𝑇 max do 
+
+(Z(𝑡 ) , err (𝑡 ) ) ← Exec 
+
+
+
+Y (𝑡 )
+
+> SQL
+
+, D
+
+
+
+if err (𝑡 ) = ∅ then 
+
+Y★ 
+
+> SQL
+
+← Y (𝑡 )
+
+> SQL
+
+break 
+
+Y (𝑡 +1) 
+
+> SQL
+
+← 𝐿𝐿𝑀 SQL 
+
+
+
+P, Qrewrite , VCTE , Sfiltered , Y (𝑡 )
+
+> SQL
+
+, err (𝑡 )
+
+
+
+𝑡 ← 𝑡 + 1
+
+// Semantic verification and revision 
+
+Y★ 
+
+> SQL
+
+← 𝐿𝐿𝑀 Revisor 
+
+
+
+Qrewrite , Y𝑡 
+
+> SQL
+
+
+
+(Z, _) ← Exec 
+
+
+
+Y★
+
+> SQL
+
+, D
+
+
+
+return (Y ★
+
+> SQL
+
+, Z)
+
+(RQ5) Schema Filtering: What is the accuracy of the Agent View Generation stage in identifying and filtering relevant tables and columns? (RQ6) Component cost analysis :What are the runtime and com-putational cost contributions of each agent in the proposed framework? (RQ7) Error analysis : What are the common error types and failure modes of the proposed framework? (RQ8) Hybrid LLM Configuration : What is the impact of using heterogeneous LLM backbones across agents, compared to a single shared backbone? 
+
+## 5.1 Experimental settings 
+
+Databases and benchmarks. We evaluate our approach on both standard Text-to-SQL benchmarks and a large-scale, enterprise-oriented benchmark. 
+
+• Normal-scale databases. We evaluate on three widely used Text-to-SQL benchmarks: Spider [ 46 ], which contains 200 multi-table databases across 138 diverse domains; BIRD [ 25 ], which includes 95 databases totaling 33.4 GB from 37 pro-fessional domains; and KaggleDBQA [ 16 ], a cross-domain benchmark of real-world web databases with domain-specific data types, original formatting, and unrestricted questions. For BIRD, we use the development version bird_dev_20251106 .AV-SQL: Decomposing Complex Text-to-SQL Queries with Agentic Views 
+
+• Large-scale databases. To assess scalability on real-world schema, we evaluate on Spider2-Snow a Spider 2.0 [ 18 ] sub-task with 547 complex questions designed for enterprise-scale Text-to-SQL. Compared with standard academic bench-marks, it features much larger and more heterogeneous schemas, averaging about 800 columns per database, which makes schema understanding and SQL generation signifi-cantly more challenging. The Spider2-Snow requires gen-erating SQL in the Snowflake dialect. 
+
+Evaluation metrics. We evaluate model performance using Execu-tion Accuracy (EX). EX measures whether the SQL query predicted by the model produces the same execution result as the ground-truth SQL when run on the target database, and we use it as the primary indicator of correctness. It is important to note that the definition of EX differs across benchmarks. Spider, BIRD and Kag-gleDBQA use strict execution evaluation, requiring an exact match to the gold result in both content and column order. In contrast, Spider 2.0-Snow is more lenient, requiring only that the returned result contain the core information of the gold answer, without enforcing column order or penalizing extra columns. 
+
+LLM configurations. Experiments are conducted using several LLMs from closed-source flagship models (Gemini-3-Pro-Preview and GPT-5-Mini) and open-source models (Llama-3.3-70B and Qwen2.5-32B, short for Qwen2.5-Coder-32B). Unless otherwise specified, the decoding temperature is set to 1.0, with similarity thresholds 
+
+𝜏 edit = 0.5 and 𝜏 semantic = 0.5, and a maximum of 𝑇 max = 5 execution feedback iterations. The token budget 𝐵 is set per model: 10 ,000 for Qwen2.5-32B, 20 ,000 for Llama-3.3-70B, 80 ,000 for GPT-5-Mini, and 
+
+100 ,000 for Gemini-3-Pro. 
+
+Baselines. We compare our approach against representative Text-to-SQL systems, including both existing frameworks and pretrained models such as CodeS [ 24 ], DIN-SQL [ 31 ], DAIL-SQL [ 12 ], and CHESS [ 37 ]. For Spider 2.0-Snow, we additionally include base-lines specifically designed for Spider 2.0 [ 18 ], including Spider-Agent [18], AutoLink [43], DSR-SQL [14] and ReFoRCE [7]. 
+
+## 5.2 Normal databases performance (RQ1) 
+
+To answer RQ1, AV-SQL is evaluated on three standard Text-to-SQL benchmarks: BIRD, Spider, and KaggleDBQA. Table 3 reports Execution Accuracy (EX) on BIRD and Spider, comparing AV-SQL 
+
+against both multi-candidate and single-candidate baselines, along with latency where available. AV-SQL with Gemini-3-Pro achieves the best BIRD result among single-candidate methods ( 72 .16% ) and competitive Spider accuracy ( 85 .59% ). With the same Qwen2.5-32B model, AV-SQL reaches 67 .99% on BIRD, closely approaching Alpha-SQL-32B ( 69 .70% )—a multi-candidate method with latency exceeding 1000 s—while avoiding expensive candidate search. Table 4 and Table 5 break down performance by difficulty level on Spider and BIRD, respectively. On Spider, AV-SQL performs com-petitively on Easy and Medium questions while achieving strong results on Hard and Extra queries. On BIRD, AV-SQL with Gemini-3-Pro attains the highest accuracy across all difficulty tiers. Notably, 
+
+AV-SQL with open-source LLM (Qwen and Llama) outperforms both the fine-tuned CodeS model and the methods DAIL-SQL and MAC-SQL using closed-source GPT-4. 
+
+Table 3: Execution Accuracy (EX) of our approach compared to baselines on the Spider and BIRD benchmarks.                                                                                 
+
+> Method Infer model BIRD ↑Spider ↑Latency(s) ↓
+> Multi-candidate
+> MCS-SQL [17] GPT-4 63.36 86.80 -Alpha-SQL-7B [21] Qwen2.5-7B 66.80 84.00 >1000 Alpha-SQL-14B [21] Qwen2.5-14B 68.70 87.00 >1000 Alpha-SQL-32B [21] Qwen2.5-32B 69.70 ->1000 XiyanSQL-32B [13] XiyanSQL-32B 73.34 --CHESS [37] GPT-4 68.31 87.2 118.61 ZeroNL2SQL [9] GPT-4 -84.00 -
+> Single-candidate
+> DIN-SQL [31] GPT-4 50.72 82.80 24.09 DAIL-SQL [12] GPT-4 55.90 83.10 -MAC-SQL [39] GPT-4 59.59 86.75 24.64 SFT Llama2-13B [38] Llama2-13B 53.91 81.60 -CodeS-7B [24] CodeS-7B 57.17 85.40 1.87 CodeS-15B [24] CodeS-15B 58.47 84.90 3.52 XiyanSQL-32B [13] XiyanSQL-32B 66.88 --XiyanSQL-7B [13] XiyanSQL-7B 60.10 --LC-NL2SQL [5] Gemini-1.5-pro 67.41 87.10 12.3
+> AV-SQL 83.38 +Qwen2.5-32B 67.99 84.33 –+Llama 3.3-70B 68.19 83.66 –+Gemini-3-Pro 72.16 85.59 –
+
+Table 4: Execution Accuracy (EX) across different query hard-ness levels on the Spider benchmark. Method Easy Medium Hard Extra 
+
+CodeS-7B [24] 94.80 91.00 75.30 66.90 CodeS-15B [24] 95.60 90.40 78.20 61.40 DIN-SQL(GPT-4) [31] 92.30 87.40 76.40 62.70 DAIL-SQL(GPT-4) [12] 91.50 90.10 75.30 62.70 Alpha-SQl-7B [21] 94.00 89.20 76.40 63.30 Alpha-SQl-14B [21] 94.00 91.00 79.90 72.30 
+
+AV-SQL 
+
++Qwen2.5-32B 90.73 90.13 79.31 64.46 +Llama 3.3-70B 91.13 85.43 82.76 68.67 +Gemini-3-Pro 90.32 86.55 89.08 72.29 Table 6 evaluates AV-SQL on KaggleDBQA, a more challeng-ing out-of-domain benchmark. AV-SQL with Gemini-3-Pro attains 
+
+63 .78% overall EX, outperforming all listed baselines. Notably, AV-SQL 
+
+with the open-source LLaMA model also surpasses most baselines that rely on closed-source LLMs, including ZeroNL2SQL with GPT-3.5, ZeroNL2SQL with GPT-4 and DIN-SQL with GPT-4. 
+
+## 5.3 Large scale database performance (RQ2) 
+
+To address RQ2 under more challenging conditions, we evaluate on Spider 2.0-Snow, which stress-tests text-to-SQL systems with sub-stantially larger schemas and higher domain heterogeneity. Table 7 reports EX and average token usage on Spider 2.0-Snow. Standard methods such as CodeS-15B, DIN-SQL and LC-NL2SQL score 0.00% ,as they are not designed to handle large-scale Snowflake databases. The recent method ReFoRCE [ 7] reach only ∼ 35% . AV-SQL substan-tially outperforms all baselines, achieving up to 70 .38% EX with Minh Tam Pham et al. 
+
+Table 5: Execution Accuracy (EX) on BIRD dev set by diffi-culty level. For brevity, the abbreviation ”Mod” stands for ”Moderate” while ”Chall” denotes ”Challenging” Method Simple Mod Chall 
+
+DAIL-SQL(GPT-4) [12] 63.00 45.60 43.10 MAC-SQL(GPT-4) [39] 65.73 52.69 40.28 CodeS-7B [24] 64.60 46.90 40.30 CodeS-15B [24] 65.80 48.80 42.40 Alpha-SQL-7B [21] 72.60 59.30 53.10 Alpha-SQL-14B [21] 74.60 61.00 55.90 Alpha-SQL-32B [21] 74.50 64.00 57.20 
+
+AV-SQL 
+
++Qwen2.5-32B 72.37 64.44 52.41 +Llama 3.3-70B 72.91 62.28 57.93 +Gemini-3-Pro 76.60 67.46 60.69 Table 6: Execution Accuracy (EX) of our approach compared to baselines on the KaggleDBQA dataset. Method EX (%) Easy Medium Hard Extra All                                              
+
+> DIN-SQL(gpt-4) [31] ----27.00 Incremental ICL [9](gpt-3.5) ----34.60 RESDSQL [23] ----31.90 RAT-SQL [40] ----13.56 ZeroNL2SQL(gpt-4) [9] ----42.40 ZeroNL2SQL(gpt-3.5) [9] ----44.90 LC-NL2SQL [5](Gemini-1.5-Pro) 65.94 57.83 64.86 50.81 61.10
+> AV-SQL
+> +Llama 3.3-70B 65.96 56.00 57.14 30.77 53.51 +Gemini-3-Pro 72.34 58.00 67.35 56.41 63.78
+
+Gemini-3-Pro, while consuming fewer tokens ( 92 k ) than DAIL-SQL ( 124 k ) and ReFoRCE ( 230 k). This advantage holds consistently across different backbone models: using the same Qwen2.5-32B model, AV-SQL reaches 25 .05% EX compared to 5.48% for Spider-Agent, demonstrating that AV-SQL consistently improves across different backbone LLMs. Table 8 further breaks down performance by difficulty level. Spider-Agent (o1-preview) degrades sharply across easy, medium, and hard splits ( 39 .84% , 21 .14% , 15 .61% ), whereas AV-SQL with Gemini-3-Pro maintains consistently high accuracy ( 74 .22% , 72 .36% , 64 .74% ). The performance gap widens significantly on harder queries, demon-strating AV-SQL ’s stronger handling of compositional reasoning challenges in large-schema settings. 
+
+## 5.4 Multi-Candidate SQL Generation (RQ3) 
+
+To answer RQ3, AV-SQL is evaluated in a multi-candidate setting on Spider2-Snow, where the SQL generation agent is prompted to output 𝑘 candidate queries. Performance is measured using recall 
+
+Execution Accuracy, which considers a question correctly answered if at least one of the 𝑘 generated candidates is executable correct. As shown in Fig. 4, increasing 𝑘 yields consistent gains for both backbones: Gemini-3-Pro improves from 70 .38% at 𝑘 =1 to 74 .77% 
+
+at 𝑘 =16 , while GPT-5-mini rises from 65 .08% to 74 .00% over the same range. These results indicate that generating more candidates increases the chance of producing at least one correct SQL query, improving robustness on challenging large-schema queries. This 
+
+Table 7: Execution Accuracy (EX) on Spider 2.0-Snow. Val-ues in parentheses mark cases where the score reported in the published paper differs substantially from the official leaderboard; the parenthesized number corresponds to the leaderboard score. 
+
+Method Infer model EX ↑ Avg Tokens ↓
+
+SFT CodeS-15B [24] CodeS-15B 0.00 –DIN-SQL [31] GPT-4o 0.00 32k CHESS [37] GPT-4o 1.28 –DAIL-SQL [12] GPT-4o 2.20 124k LC-NL2SQL [5] gpt-5-mini 0.00 –Spider-Agent [18] Qwen2.5-32B 5.48 –Spider-Agent [18] GPT-4o 12.98 –Spider-Agent [18] o3-mini 19.20 –Spider-Agent [18] o1-preview 23.58 –ReFoRCE [7] o1-preview 31.26 ≈230k ReFoRCE [7] o3 35.83 (62.89) ≈230k AutoLink [43] DeepSeek-R1 34.92 (54.84) –DSR-SQL [14] DeepSeek-R1 35.28 (63.80) –
+
+AV-SQL 92k + Qwen2.5-32B 25.05 –+ Llama3.3-70B 27.42 –+ gpt-5-mini 65.08 –+ Gemini-3-Pro 70.38 –
+
+Table 8: Execution Accuracy (EX) by difficulty level (easy/medium/hard) on Spider2-snow dataset                                            
+
+> Method Infer model Easy Medium Hard
+> Spider-Agent [18] +o1-preview 39.84 21.14 15.61 +o3-mini 31.25 18.29 11.56 +GPT-4o 24.22 11.38 6.94 +Qwen2.5-32B 4.47 2.31 5.48
+> AV-SQL
+> +Qwen2.5-32B 39.84 24.39 15.03 +Llama3.3-70B 38.28 32.11 12.71 +Gpt-5-mini 75.78 68.29 52.60 +Gemini-3-Pro 74.22 72.36 64.74 024816
+> No. Candidate
+> 65
+> 70
+> 75
+> Recall EX(%)
+> 70.38 70.77 71.12
+> 72.58
+> 74.77
+> 65.08 65.99
+> 68.01
+> 71.85
+> 74.00
+> gpt-5-mini
+> gemini-3-pro
+
+Figure 4: Recall Execution Accuracy on the Spider2.0-Snow benchmark under the multi-candidate setting. 
+
+suggests that incorporating a candidate selector into the multi-candidate setting–one that reliably identifies the correct query among candidates–could further improve overall performance. AV-SQL: Decomposing Complex Text-to-SQL Queries with Agentic Views 
+
+Table 9: Ablation study of major pipeline component–rewriter, planner, revisor, and execution feedback (exe feedback)– measured by Execution Accuracy (EX) across Spider2-Snow, Spider, BIRD, and KaggleDBQA. Llama-3.3 denotes Llama-3.3-70B. Setting Spider-2-snow Spider BIRD KaggleDBQA 
+
+GPT-5-mini Gemini-3-Pro Llama-3.3 Gemini-3-Pro Llama-3.3 Gemini-3-Pro Llama-3.3 Gemini-3-Pro w/o rewriter 57.22 64.90 78.34 84.53 65.45 71.64 48.65 62.16 w/o exe feedback (SQL) 50.82 63.99 80.33 84.91 64.54 71.77 51.35 61.62 w/o exe feedback (CTE+SQL) 41.68 57.77 79.01 84.77 64.47 70.90 50.81 61.08 w/o planner 55.76 63.99 79.40 84.62 65.97 72.23 54.05 61.62 w/o reviseSQL 60.15 65.08 82.50 87.14 67.47 72.82 54.59 65.41 
+
+All components 65.08 70.38 83.66 85.59 68.19 72.16 53.51 63.78 
+
+Table 10: Ablation study on the contribution of each output from the Agent View Generation stage – ( VCTE ) and ( Sfiltered ) – to SQL generation performance (EX) across Spider2-Snow, Spider, BIRD, and KaggleDBQA. Llama-3.3 denotes Llama-3.3-70B.                                      
+
+> Information provided Spider2-snow Spider BIRD KaggleDBQA
+> GPT-5-mini Gemini-3-Pro Llama-3.3 Gemini-3-Pro Llama-3.3 Gemini3-Pro Llama3.3 Gemini3-Pro Aggregated Validated Agent Views ( VCTE )58.68 64.72 79.83 85.42 67.41 71.64 51.89 62.70 Global Schema Selection ( Sfiltered )57.59 63.25 79.57 84.72 65.71 71.77 50.27 61.62 All outputs ( VCTE +Sfiltered )65.08 70.38 83.66 85.59 68.19 72.16 53.51 63.78
+
+## 5.5 Ablation study (RQ4) 
+
+Component contribution. To answer the first aspect of RQ4, a controlled ablation is conducted by disabling one component at a time—the rewriter, planner, revisor, and execution feedback for the view generator and SQL generator—while keeping all others intact. Table 9 shows that the full pipeline consistently outperforms all ablated variants across Spider2.0-Snow, Spider, BIRD, and KaggleD-BQA. Removing execution feedback from both CTE and SQL genera-tion causes the largest drops, with Gemini-3-Pro falling from 70 .38% 
+
+to 57 .77% and GPT-5-mini from 65 .08% to 41 .68% on Spider2.0-Snow, confirming that multi-stage correction is critical for preventing er-ror propagation. Notably, removing the revisor yields marginal improvements on Spider, BIRD, and KaggleDBQA (e.g., Gemini-3-Pro: 85 .59% → 87 .14% , 72 .16% → 72 .82% , 63 .78% → 65 .41% ). the strict EX metric in these benchmarks requires an exact match of execution results in both content and column order (see §5.1), meaning the revisor’s edits—such as adding or removing columns— can cause a semantically correct query to be marked incorrect due to minor output differences. Overall, these results confirm that each component contributes to final performance, with execution feedback playing the most critical role in large-schema settings. 
+
+View Generation Output Contribution. To answer the second aspect of RQ4, this experiment isolates the contribution of each output from the View Generation stage to final SQL generation: (i) Aggregated Validated Agent Views (VCTE ) and (ii) Global Schema Selection (Sfiltered ) As shown in Table 10, combining both outputs consistently achieves the highest accuracy across all datasets and backbones. Consistent gains appear on Spider, BIRD, KaggleDBQA, and Spider2.0-Snow, confirming that schema selection and exe-cutable intermediate agent views are complementary and jointly necessary for accurate SQL generation. 
+
+## 5.6 Schema Filtering (RQ5) 
+
+To answer RQ5, this experiment evaluates schema filtering qual-ity by measuring precision and recall of schema elements selected by each method. Precision measures whether selected elements are correct (few false positives), while recall measures whether all relevant elements are captured (few false negatives). Three base-line strategies are compared: (i) MACSQL [ 39 ], which prompts the model with the full schema to return relevant tables and columns; (ii) CHESS [ 37 ], which evaluates table relevance one at a time before selecting columns from relevant tables; and (iii) an encoder– decoder schema selector [ 24 ], which predicts relevant schema items from the question and schema as input. As shown in Ta-
+
+Table 11: Precision and recall of schema filtering across meth-ods and inference models in Spider2-snow dataset.                                           
+
+> Method Infer model Precision Recall
+> MACSQL [39] +Qwen2.5 62.00 63.88 +Llama 3.3 68.30 68.91 +GPT-5-Mini 59.41 79.22 +Gemini-3-Pro 70.62 86.45 CHESS [37] +Qwen2.5 49.03 77.78 +Llama 3.3 27.99 76.70 +GPT-5-Mini 27.50 91.12
+> +Gemini-3-Pro 36.87 90.58 Encoder-Decoder [24] 41.50 79.60 CTE generation in AV-SQL
+> +Qwen2.5 69.74 69.27 +Llama 3.3 77.76 74.67 +GPT-5-Mini 81.41 82.70 +Gemini-3-Pro 86.34 81.59
+
+ble 11, CHESS achieves high recall ( 90 .58 –91 .12% ) but low preci-sion ( 27 .50 –36 .87% ), indicating excessive false positives. MACSQL achieves a better balance ( 59 .41 –70 .62% precision, 63 .88 –86 .45% 
+
+recall), while the encoder–decoder baseline yields 41 .50% precision and 79 .60% recall. AV-SQL ’s CTE generation achieves the highest precision across all backbones ( 81 .41 –86 .34% with proprietary mod-els; 69 .74 –77 .76% with open-weight models) while maintaining competitive recall ( 81 .59 –82 .70% ), confirming that CTE-based in-termediate reasoning produces cleaner and more reliable schema filtering than prompting or learned approaches. Minh Tam Pham et al. 
+
+## 5.7 Component cost analysis (RQ6) 
+
+To answer RQ6, Fig. 5 presents the token usage and runtime break-down per pipeline agent for AV-SQL with Gemini-3-Pro on Spider2.0-Snow. The view generator agent dominates both dimensions, con-77.2%  
+
+> 5.9%
+> 8.0%
+> 7.0%
+> 71.3%
+> 5.9% 3.4%
+> 2.5%
+> 5.7%
+> 2.4%
+> 5.2%
+> 1.04%
+> 0.79%
+> 1.85%
+> Token
+> Usage
+> 3.9%
+> 55.5%
+> 7.8%
+> 17.1%
+> 15.8%
+> Running Time Step
+> Rewriter
+> View Generator
+> Planner
+> SQL Generator
+> Revisor
+> Token type
+> Input
+> Output
+
+Figure 5: Token usage and runtime breakdown by pipeline agent for AV-SQL with Gemini-3-Pro on Spider2.0-snow. The left nested donut chart shows the proportion of token usage, while the right pie chart shows the proportion of total run-time spent on each agent. 
+
+suming 77 .2% of total tokens ( 71 .3% input, 5.9% output) and 55 .5% 
+
+of total runtime, reflecting the cost of processing multiple schema chunks with iterative validation. The SQL generator and revisor agents account for 8.4% and 7.0% of token usage, and 17 .1% and 
+
+15 .8% of runtime, respectively. The planner contributes 5.9% of tokens and 7.8% of runtime, while the rewriter is the lightest stage at 1.83% of tokens and 3.9% of runtime. Overall, the cost profile is heavily concentrated in the view generation agent, which is ex-pected given its role as the core intermediate reasoning, schema exploration and schema filtering component, while the remaining agents impose relatively modest overhead. 
+
+## 5.8 Error Analysis (RQ7) 
+
+To answer RQ7, a human evaluation is conducted on the failure cases of AV-SQL with Gemini-3-Pro on Spider2-Snow. Ground truth 
+
+> 6.5%
+> Syntax
+> 9.4%
+> Filtering
+> 36.2%
+> Aggregation
+> 34.1%
+> Other
+> 2.9%
+> Schema
+> 10.9%
+
+Figure 6: Error taxonomy of AV-SQL with Gemini-3-Pro on Spider2-snow. 
+
+Fig. 6 shows the resulting error taxonomy. Filtering ( 36 .2% )and aggregation ( 34 .1% ) errors dominate, together accounting for over 70% of failures, indicating that complex filter conditions and aggregation logic over large schemas remain the primary chal-lenges. Schema errors contribute 10 .9% , while syntax errors account for only 9.4% , confirming that execution feedback effectively sup-presses most malformed queries. The remaining errors correspond to lacking ground truth ( 6.5% ) and miscellaneous cases ( 2.9% ). These results suggest that future work should prioritize more precise filter and aggregation reasoning. 
+
+## 5.9 Hybrid LLM configuration (RQ8) 
+
+To answer RQ8, Table 12 evaluates the effect of assigning dif-ferent LLM backbones to different agents, compared to a single unified backbone. Homogeneous configurations with strong LLM 
+
+Table 12: Execution Accuracy (EX) on Spider2-Snow under hybrid LLM configurations, where different backbone models are assigned to different agents.                                         
+
+> Rewriter View Gen. SQL Generation EX ↑
+> Planner SQL Gen. Revisor
+> Homogeneous
+> Llama-3.3 Llama-3.3 Llama-3.3 Llama-3.3 Llama-3.3 27.42 GPT-5-mini GPT-5-mini GPT-5-mini GPT-5-mini GPT-5-mini 65.08 Gemini-3-Pro Gemini-3-Pro Gemini-3-Pro Gemini-3-Pro Gemini-3-Pro 70.38
+> Hybrid
+> Llama-3.3 Llama-3.3 Llama-3.3 GPT-5-mini GPT-5-mini 40.40 GPT-5-mini Llama-3.3 GPT-5-mini GPT-5-mini GPT-5-mini 42.96 Gemini-3-Pro Llama-3.3 Gemini-3-Pro Gemini-3-Pro Gemini-3-Pro 55.21 Gemini-3-Pro GPT-5-mini Gemini-3-Pro Gemini-3-Pro Gemini-3-Pro 61.60
+
+backbones achieve the best results, all-GPT-5-mini 65 .08% , and all-Gemini-3-Pro 70 .38% on Spider2-Snow. Replacing only the SQL generation stage with a stronger model while retaining Llama-3.3 for the rewriter and CTE generator improves performance from 
+
+27 .42% to 40 .40% , demonstrating that a stronger SQL generator can better exploit the filtered context produced by the CTE stage. This is also cost-efficient, since the CTE generation stage domi-nates token usage §5.7, meaning the expensive backbone is only applied where it matters most. However, mixing backbones does not consistently improve performance: using Gemini-3-Pro for the rewriter and CTE generator but GPT-5-mini for view generation yields only 61 .60% , falling below the homogeneous GPT-5-mini baseline ( 65 .08% ), suggesting that misalignment between the CTE generator and SQL generator can degrade performance even when individual components are strong. 
+
+## 6 CONCLUSIONS 
+
+This paper presents AV-SQL , a multi-agent Text-to-SQL framework designed for robust SQL generation across both standard and large-scale database settings. AV-SQL decomposes the generation process into three stages: (1) Question Rewriting rewrites the input question (and optional external knowledge) into a clearer and more concise form; (2) Agent View Generation processes schema chunks, produc-ing validated CTE-based agent views and a global schema selection; and (3) SQL Generation composes the validated agent views and filtered schema to generate the final executable SQL query. Exten-sive experiments demonstrate that AV-SQL achieves competitive or state-of-the-art execution accuracy across Spider, BIRD, Kag-gleDBQA, and Spider2.0-Snow. Notably, on Spider2.0-Snow, where large schemas pose significant challenges to conventional pipelines, 
+
+AV-SQL achieves 70 .38% EX with Gemini-3-Pro, surpassing the pre-vious methods and proving that processing schema chunks into verifiable intermediate views provides a highly scalable solution. Fu-ture work will focus on enhancing reasoning mechanisms for com-plex filtering and aggregation, which remain our primary sources of error. Additionally, we aim to integrate robust candidate selection and optimize heterogeneous LLM alignments to further improve performance and cost-efficiency. AV-SQL: Decomposing Complex Text-to-SQL Queries with Agentic Views 
+
+## REFERENCES 
+
+[1] Josh Achiam, Steven Adler, Sandhini Agarwal, Lama Ahmad, Ilge Akkaya, Floren-cia Leoni Aleman, Diogo Almeida, Janko Altenschmidt, Sam Altman, Shyamal Anadkat, et al . 2023. Gpt-4 technical report. arXiv preprint arXiv:2303.08774 
+
+(2023). [2] Scott Barnett, Stefanus Kurniawan, Srikanth Thudumu, Zach Brannelly, and Mohamed Abdelrazek. 2024. Seven failure points when engineering a retrieval augmented generation system. In CAIN . 194–199. [3] Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, et al . 2020. Language models are few-shot learners. NeurIPS 33 (2020), 1877–1901. [4] Ruisheng Cao, Lu Chen, Zhi Chen, Yanbin Zhao, Su Zhu, and Kai Yu. 2021. LGESQL: Line Graph Enhanced Text-to-SQL Model with Mixed Local and Non-Local Relations. In IJCNLP . 2541–2555. [5] Yeounoh Chung, Gaurav T Kakkar, Yu Gan, Brenton Milne, and Fatma Ozcan. 2025. Is long context all you need? leveraging LLM’s extended context for NL2SQL. PVLDB 18, 8 (2025), 2735–2747. [6] Mayur Datar, Nicole Immorlica, Piotr Indyk, and Vahab S Mirrokni. 2004. Locality-sensitive hashing scheme based on p-stable distributions. In SoCG . 253–262. [7] Minghang Deng, Ashwin Ramachandran, Canwen Xu, Lanxiang Hu, Zhewei Yao, Anupam Datta, and Hao Zhang. 2025. Reforce: A Text-to-SQL agent with self-refinement, format restriction, and column exploration. In ICLR 2025 Workshop: VerifAI: AI Verification in the Wild .[8] Xuemei Dong, Chao Zhang, Yuhang Ge, Yuren Mao, Yunjun Gao, Jinshu Lin, Dongfang Lou, et al . 2023. C3: Zero-shot text-to-sql with chatgpt. arXiv preprint arXiv:2307.07306 (2023). [9] Ju Fan, Zihui Gu, Songyue Zhang, Yuxin Zhang, Zui Chen, Lei Cao, Guoliang Li, Samuel Madden, Xiaoyong Du, and Nan Tang. 2024. Combining small language models and large language models for zero-shot NL2SQL. PVLDB 17, 11 (2024), 2750–2763. [10] Catherine Finegan-Dollak, Jonathan K Kummerfeld, Li Zhang, Karthik Ra-manathan, Sesh Sadasivam, Rui Zhang, and Dragomir Radev. 2018. Improving text-to-sql evaluation methodology. arXiv preprint arXiv:1806.09029 (2018). [11] Han Fu, Chang Liu, Bin Wu, Feifei Li, Jian Tan, and Jianling Sun. 2023. Catsql: Towards real world natural language to sql applications. PVLDB 16, 6 (2023), 1534–1547. [12] Dawei Gao, Haibin Wang, Yaliang Li, Xiuyu Sun, Yichen Qian, Bolin Ding, and Jingren Zhou. 2024. Text-to-sql empowered by large language models: A benchmark evaluation. PVLDB 17, 5 (2024), 1132–1145. [13] Yingqi Gao, Yifu Liu, Xiaoxia Li, Xiaorong Shi, Yin Zhu, Yiming Wang, Shiqi Li, Wei Li, Yuntao Hong, Zhiling Luo, et al . 2024. XiYan-SQL: A Multi-Generator Ensemble Framework for Text-to-SQL. arXiv preprint arXiv:2411.08599 (2024). [14] Zhifeng Hao, Qibin Song, Ruichu Cai, and Boyan Xu. 2025. Text-to-SQL as Dual-State Reasoning: Integrating Adaptive Context and Progressive Generation. 
+
+arXiv preprint arXiv:2511.21402 (2025). [15] Kelly Hong, Anton Troynikov, and Jeff Huber. 2025. Context rot: How increasing input tokens impacts llm performance . Technical Report. Chroma. https:// trychroma.com/research/context-rot [16] Chia-Hsuan Lee, Oleksandr Polozov, and Matthew Richardson. 2021. KaggleD-BQA: Realistic evaluation of text-to-SQL parsers. In IJCNLP . 2261–2273. [17] Dongjun Lee, Choongwon Park, Jaehyuk Kim, and Heesoo Park. 2025. Mcs-sql: Leveraging multiple prompts and multiple-choice selection for text-to-sql generation. In COLING . 337–353. [18] Fangyu Lei, Jixuan Chen, Yuxiao Ye, Ruisheng Cao, Dongchan Shin, Hongjin Su, Zhaoqing Suo, Hongcheng Gao, Wenjing Hu, Pengcheng Yin, et al . 2024. Spider 2.0: Evaluating language models on real-world enterprise text-to-sql workflows. 
+
+arXiv preprint arXiv:2411.07763 (2024). [19] Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich Küttler, Mike Lewis, Wen-tau Yih, Tim Rock-täschel, et al . 2020. Retrieval-augmented generation for knowledge-intensive nlp tasks. NeurIPS 33 (2020), 9459–9474. [20] Boyan Li, Yuyu Luo, Chengliang Chai, Guoliang Li, and Nan Tang. 2024. The dawn of natural language to sql: Are we fully ready? PVLDB 17, 11 (July 2024), 3318–3331. [21] Boyan Li, Jiayi Zhang, Ju Fan, Yanwei Xu, Chong Chen, Nan Tang, and Yuyu Luo. 2025. Alpha-sql: Zero-shot text-to-sql using monte carlo tree search. arXiv preprint arXiv:2502.17248 (2025). [22] Fei Li and Hosagrahar V Jagadish. 2014. Constructing an interactive natural language interface for relational databases. PVLDB 8, 1 (2014), 73–84. [23] Haoyang Li, Jing Zhang, Cuiping Li, and Hong Chen. 2023. Resdsql: Decoupling schema linking and skeleton parsing for text-to-sql. In AAAI , Vol. 37. 13067– 13075. [24] Haoyang Li, Jing Zhang, Hanbing Liu, Ju Fan, Xiaokang Zhang, Jun Zhu, Renjie Wei, Hongyan Pan, Cuiping Li, and Hong Chen. 2024. Codes: Towards building open-source language models for text-to-sql. PACMMOD 2, 3 (2024), 1–28. [25] Jinyang Li, Binyuan Hui, Ge Qu, Jiaxi Yang, Binhua Li, Bowen Li, Bailin Wang, Bowen Qin, Ruiying Geng, Nan Huo, et al . 2024. Can llm already serve as a database interface? a Modeling Ambiguityse grounded text-to-sqls. NeurIPS 36 (2024), 42330–42357. [26] Sheng-Chieh Lin, Akari Asai, Minghan Li, Barlas Oguz, Jimmy Lin, Yashar Mehdad, Wen-tau Yih, and Xilun Chen. 2023. How to train your dragon: Diverse augmentation towards generalizable dense retrieval. arXiv preprint arXiv:2302.07452 (2023). [27] Aiwei Liu, Xuming Hu, Lijie Wen, and Philip S Yu. 2023. A comprehen-sive evaluation of ChatGPT’s zero-shot Text-to-SQL capability. arXiv preprint arXiv:2303.13547 (2023). [28] Xinyu Liu, Shuyu Shen, Boyan Li, Peixian Ma, Runzhi Jiang, Yuxin Zhang, Ju Fan, Guoliang Li, Nan Tang, and Yuyu Luo. 2025. A survey of text-to-sql in the era of llms: Where are we, and where are we going? TKDE (2025). [29] Yuyu Luo, Guoliang Li, Ju Fan, Chengliang Chai, and Nan Tang. 2025. Natural language to sql: State of the art and open problems. PVLDB 18, 12 (2025), 5466– 5471. [30] Mohammadreza Pourreza, Hailong Li, Ruoxi Sun, Yeounoh Chung, Shayan Talaei, Gaurav Tarlok Kakkar, Yu Gan, Amin Saberi, Fatma Ozcan, and Sercan O Arik. 2024. Chase-sql: Multi-path reasoning and preference optimized candidate selection in text-to-sql. arXiv preprint arXiv:2410.01943 (2024). [31] Mohammadreza Pourreza and Davood Rafiei. 2023. DIN-SQL: Decomposed In-Context Learning of Text-to-SQL with Self-Correction. In NeurIPS . 36339–36348. [32] Mohammadreza Pourreza and Davood Rafiei. 2024. Dts-sql: Decomposed text-to-sql with small large language models. arXiv preprint arXiv:2402.01117 (2024). [33] Jiexing Qi, Jingyao Tang, Ziwei He, Xiangpeng Wan, Yu Cheng, Chenghu Zhou, Xinbing Wang, Quanshi Zhang, and Zhouhan Lin. 2022. RASAT: Integrating Relational Structures into Pretrained Seq2Seq Model for Text-to-SQL. In EMNLP .3215–3229. [34] Nitarshan Rajkumar, Raymond Li, and Dzmitry Bahdanau. 2022. Evaluating the text-to-sql capabilities of large language models. arXiv preprint arXiv:2204.00498 
+
+(2022). [35] Nils Reimers and Iryna Gurevych. 2019. Sentence-bert: Sentence embeddings using siamese bert-networks. In EMNLP-IJCNLP . 3982–3992. [36] Aaditya Singh, Adam Fry, Adam Perelman, Adam Tart, Adi Ganesh, Ahmed El-Kishky, Aidan McLaughlin, Aiden Low, AJ Ostrow, Akhila Ananthram, et al .2025. OpenAI GPT-5 System Card. arXiv preprint arXiv:2601.03267 (2025). [37] Shayan Talaei, Mohammadreza Pourreza, Yu-Chen Chang, Azalia Mirhoseini, and Amin Saberi. 2024. CHESS: Contextual Harnessing for Efficient SQL Synthesis. 
+
+arXiv preprint arXiv:2405.16755 (2024). [38] Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Almahairi, Yas-mine Babaei, Nikolay Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhos-ale, et al . 2023. Llama 2: Open foundation and fine-tuned chat models. arXiv preprint arXiv:2307.09288 (2023). [39] Bing Wang, Changyu Ren, Jian Yang, Xinnian Liang, Jiaqi Bai, Linzheng Chai, Zhao Yan, Qian-Wen Zhang, Di Yin, Xing Sun, et al . 2024. Mac-sql: A multi-agent collaborative framework for text-to-sql. arXiv preprint arXiv:2312.11242 (2024). [40] Bailin Wang, Richard Shin, Xiaodong Liu, Oleksandr Polozov, and Matthew Richardson. 2020. RAT-SQL: Relation-Aware Schema Encoding and Linking for Text-to-SQL Parsers. In ACL . 7567–7578. [41] Liang Wang, Nan Yang, Xiaolong Huang, Binxing Jiao, Linjun Yang, Daxin Jiang, Rangan Majumder, and Furu Wei. 2022. Text embeddings by weakly-supervised contrastive pre-training. arXiv preprint arXiv:2212.03533 (2022). [42] Wenhui Wang, Furu Wei, Li Dong, Hangbo Bao, Nan Yang, and Ming Zhou. 2020. Minilm: Deep self-attention distillation for task-agnostic compression of pre-trained transformers. NeurIPS 33 (2020), 5776–5788. [43] Ziyang Wang, Yuanlei Zheng, Zhenbiao Cao, Xiaojin Zhang, Zhongyu Wei, Pei Fu, Zhenbo Luo, Wei Chen, and Xiang Bai. 2025. AutoLink: Autonomous Schema Exploration and Expansion for Scalable Schema Linking in Text-to-SQL at Scale. 
+
+arXiv preprint arXiv:2511.17190 (2025). [44] Peng Xu, Wei Ping, Xianchao Wu, Lawrence McAfee, Chen Zhu, Zihan Liu, Sandeep Subramanian, Evelina Bakhturina, Mohammad Shoeybi, and Bryan Catanzaro. 2023. Retrieval meets long context large language models. arXiv preprint arXiv:2310.03025 (2023). [45] Navid Yaghmazadeh, Yuepeng Wang, Isil Dillig, and Thomas Dillig. 2017. Sqlizer: query synthesis from natural language. PACMPL 1 (2017), 1–26. [46] Tao Yu, Rui Zhang, Kai Yang, Michihiro Yasunaga, Dongxu Wang, Zifan Li, James Ma, Irene Li, Qingning Yao, Shanelle Roman, Zilin Zhang, and Dragomir Radev. 2018. Spider: A Large-Scale Human-Labeled Dataset for Complex and Cross-Domain Semantic Parsing and Text-to-SQL Task. In EMNLP . 3911–3921. [47] Yusen Zhang, Ruoxi Sun, Yanfei Chen, Tomas Pfister, Rui Zhang, and Sercan Arik. 2024. Chain of agents: Large language models collaborating on long-context tasks. NeurIPS 37 (2024), 132208–132237. [48] Victor Zhong, Caiming Xiong, and Richard Socher. 2017. Seq2sql: Generating structured queries from natural language using reinforcement learning. arXiv preprint arXiv:1709.00103 (2017).
