@@ -1,0 +1,1331 @@
+Title: InfiniLoRA: Disaggregated Multi-LoRA Serving for Large Language Models
+
+URL Source: https://arxiv.org/pdf/2604.07173v1
+
+Published Time: Thu, 09 Apr 2026 01:23:27 GMT
+
+Number of Pages: 18
+
+Markdown Content:
+# InfiniLoRA: Disaggregated Multi-LoRA Serving for Large Language Models 
+
+## Hongyu Chen 
+
+chenhongyu2048@sjtu.edu.cn 
+
+Shanghai Jiao Tong University Shanghai, China 
+
+## Letian Ruan 
+
+1291903308rlt@sjtu.edu.cn 
+
+Shanghai Jiao Tong University Shanghai, China 
+
+## Zilin Xu 
+
+xuzilin.200415@bytedance.com 
+
+Bytedance China 
+
+## Yuchen Li 
+
+yuchenli@smu.edu.sg 
+
+Singapore Management University Singapore 
+
+## Xinyu Chen 
+
+xinyuchen@hkust-gz.edu.cn 
+
+The Hong Kong University of Science and Technology (Guangzhou) Guangzhou, China 
+
+## Jingwen Leng 
+
+leng-jw@sjtu.edu.cn> 
+
+Shanghai Jiao Tong University Shanghai, China 
+
+## Bingsheng He 
+
+dcsheb@nus.edu.sg 
+
+National University of Singapore Singapore 
+
+## Minyi Guo 
+
+guo-my@cs.sjtu.edu.cn 
+
+Shanghai Jiao Tong University Shanghai, China 
+
+## Shixuan Sun 
+
+sunshixuan@sjtu.edu.cn 
+
+Shanghai Jiao Tong University Shanghai, China 
+
+## Abstract 
+
+LoRA enables efficient customization of LLMs and is widely used in multi-tenant and multi-task serving. However, emerg-ing model architectures such as MoE significantly increase LoRA memory cost, making existing coupled LoRA serv-ing designs poorly scalable and prone to tail-latency infla-tion. We present InfiniLoRA, a disaggregated LoRA serving system that decouples LoRA execution from base-model in-ference. InfiniLoRA introduces a shared LoRA Server with parallelism-aware execution, SLO-driven provisioning, and critical-path optimizations, including GPU-initiated commu-nication and hardware-specialized LoRA kernels. Experi-ments show that InfiniLoRA can achieve an average 3.05 ×
+
+increase in serviceable request rate under strict latency SLOs, and improve the percentage of LoRA adapters satisfying the SLO requirement by 54.0%. 
+
+## 1 Introduction 
+
+Low-Rank Adaptation (LoRA) [ 6, 13 , 29 , 39 ] has become an important building block for deploying large language mod-els (LLMs) in real-world systems. By enabling parameter-efficient fine-tuning, LoRA allows LLMs to incrementally incorporate task-specific, domain-specific, or user-specific knowledge without retraining or replicating the full model. This capability is particularly important for stateful appli-cations, such as long-term memory [ 1, 4 , 38 ], personaliza-tion [ 20 , 22 , 49 ], and preference modeling [ 2, 18 , 45 ], where models are expected to retain, update, and apply behavioral or contextual information across interactions. In cloud-based LLM serving platforms, these properties make LoRA well suited for multi-tenant scenarios. A single base model can be shared across many tenants or applica-tions, while different LoRA adapters are dynamically acti-vated to encode memories, skills, roles, or domain expertise on demand [ 3]. The serving frameworks further batch re-quests targeting different adapters to amortize computation and improve throughput [31, 40]. As LLM architectures continue to evolve, however, the assumptions underlying existing LoRA serving designs are increasingly strained. Emerging architectures, most notably Mixture-of-Experts (MoE) models [ 5 , 8, 12 , 16 , 30 , 32 ], sig-nificantly amplify the parameter footprint of LoRA adapters by introducing expert-specific adaptations as shown in Fig-ure 1a. At the same time, the latest workloads often require longer context windows and richer interaction histories, sub-stantially increasing the footprint of KV caches [ 9 , 33 , 44 ]. Together, these trends sharply reduce the effective capacity available for hosting LoRA adapters on GPUs, exposing fun-damental scalability limits in current LoRA serving systems. 
+
+Limitations of Existing LoRA Serving Designs. Existing LoRA serving frameworks [ 3, 14 , 21 , 31 , 40 , 43 , 46 ] adopt a coupled design , in which a working set of LoRA adapters is kept resident in GPU memory alongside the base model weights and KV cache to avoid adapter loading and queu-ing delays. This assumption largely holds for dense models, where each LoRA adapter is small. However, under MoE models, the design quickly breaks down. As shown in Figure 1a, due to the enlarged adapter footprint, only a small frac-tion of LoRA adapters can remain cached on GPUs. Requests targeting uncached adapters must therefore wait for in-flight executions to complete and free GPU memory before their adapters can be loaded, introducing significant queueing de-lays. As a result, tail Time-to-First-Token (TTFT), which is highly sensitive to queueing, is severely inflated.                                      
+
+> 1
+> arXiv:2604.07173v1 [cs.DC] 8 Apr 2026 Hongyu Chen et al. Models Lama3
+> 8B
+> Qwen3
+> 32B
+> Llama3
+> 70B
+> GPT -OSS
+> 20B
+> Mixtral
+> 8x7B
+> Qwen3
+> 30B A3B
+> #Layers 32 64 80 24 32 48
+> #Experts N/A N/A N/A 32 8128
+> Model (GB) 16 65 140 40 94 60
+> KV Cache (GB) 0.16 0.25 0.31 0.05 0.16 0.09
+> Single LoRA (GB) 0.21 0.70 1.05 1.58 1.69 6.18
+> #LoRAs per 100GB 474 142 95 63 59 16
+
+(a) Memory consumption of model weights, KV cache (1024 tokens), and LoRA for representative dense and MoE models, with LoRA rank=64. 10 20 30 40 50 60 70 80                 
+
+> Request Rate (req/s)
+> 10 1
+> 10 0
+> 10 1
+> 10 2
+> P95 TTFT (s)  SLO (0.25s)
+> 10 20 30 40 50 60 70 80
+> Request Rate (req/s)
+> 20
+> 40
+> 60
+> 80
+> Throughput (req/s)
+> 10 20 30 40 50 60 70 80
+> Request Rate (req/s)
+> 0.05
+> 0.10
+> 0.15
+> 0.20
+> Avg TPOT (s)  SLO (0.1s)
+> Scale Out Scale Up
+
+(b) Scale-out (Eight 2-GPU Instances) vs. Scale-up (Four 4-GPU Instances) performance comparison under varying Load on Nvidia Hopper GPUs using Mixtral 8x7B models and 512 LoRAs. 
+
+Figure 1. (Top ) LoRA cache capacity across model architec-tures. ( Bottom ) Scale-out vs. scale-up performance. A natural response is to increase LoRA cache capacity by either scaling out , i.e., deploying more LLM instances, or 
+
+scaling up , i.e., allocating more GPUs to a single instance. However, both approaches have fundamental limitations. Scaling out increases total cache capacity across instances but requires duplicating base model weights and KV caches for each instance, incurring substantial GPU memory over-head. Given the size of modern LLMs, this duplication leaves little additional memory for LoRA, resulting in only mar-ginal cache gains. As shown in Figure 1b, P95 TTFT quickly degrades and violates the TTFT SLO even when using eight 2-GPU instances, due to limited effective cache capacity. Scaling up aggregates more GPUs within a single instance, expanding the LoRA cache without duplicating base weights. However, it enlarges the communication scope: as the in-stance spans more GPUs, especially across nodes, communi-cation overheads grow rapidly and inflate inference latency. Moreover, efficiently utilizing the increased resources re-quires larger batch sizes, which are often incompatible with latency-sensitive workloads. Consequently, as shown in Fig-ure 1b, scaling up achieves lower throughput than scaling out and suffers significantly higher average Time-Per-Output-Token (TPOT). In summary, the core limitation of existing approaches stems from a coupled design that tightly binds LoRA adapters to the base model within the individual LLM instances. As a result, accommodating dynamic LoRA work-loads requires modifying base-model execution, which limits flexibility and leads to inefficient resource utilization. 
+
+Our Approach. To overcome these limitations, we propose a disaggregated LoRA serving architecture that allows LoRA adapters to be shared across multiple LLM instances. LoRA adapters are managed and executed by a dedicated LoRA Server, while LLM instances remain LoRA-free and focus on base-model inference. This decoupling enables LoRA re-sources to scale independently of base-model execution, but also introduces new challenges in placing, executing, and coordinating LoRA computation across the system. 
+
+Challenge 1: Parallelism Design after Disaggregation. In coupled designs, LoRA execution implicitly follows the base model’s parallelism strategy. Disaggregation breaks this as-sumption: once LoRA adapters are decoupled, their place-ment directly determines how LoRA computation is paral-lelized. The system must therefore explicitly design how LoRA computation is partitioned, synchronized, and scaled across GPUs. 
+
+Challenge 2: Preserving the Inference Critical Path. LoRA computation lies on the decode-time inference path and di-rectly affects TPOT. Disaggregating LoRA introduces addi-tional communication, synchronization, and adapter loading into inference. Without careful optimization, these overheads can extend the critical path. The key challenge is to offload LoRA execution without increasing inference latency. 
+
+Challenge 3: SLO-Driven Resource Provisioning. LoRA ac-cess patterns are highly dynamic. Insufficient LoRA Server capacity leads to queueing and tail-latency violations, while over-provisioning wastes resources. Accurately provisioning LoRA Server resources to meet both TTFT and TPOT SLOs thus becomes a fundamental system challenge. To address these challenges, we present InfiniLoRA , a parallelism-aware, SLO-driven, and critical-path–optimized LoRA serving system. First, InfiniLoRA pipelines each adapter request across receive–compute–send stages to absorb con-currency from multiple LLM instances, and adopts a hybrid execution strategy that combines expert parallelism with pipeline parallelism to balance synchronization overhead, GPU utilization, and communication granularity. Second, InfiniLoRA employs a SLO-driven resource provi-sioning to handle the dynamic LoRA workloads. Based on the transformation of the service’s TTFT SLO attainment rate into the probability of requests being immediately admitted, along with historical LoRA invocation information, it em-ploys binary search and dynamic programming algorithms to determine the minimal LoRA cache capacity, ultimately deducing the minimum GPU requirement for LoRA Server. Third, to minimize LoRA processing overhead, InfiniLoRA leverages host-bypass, GPU-initiated communication with a push-based protocol to reduce network latency on the crit-ical path. It further integrates hardware-specialized LoRA kernels that exploit modern GPU features, improving LoRA computation effciency. To mitigate cold-start overhead, In-finiLoRA pipelines adapter loading with execution and per-forms scheduler-driven prefetching before the first LoRA invocation. 
+
+> 2InfiniLoRA: Disaggregated Multi-LoRA Serving for Large Language Models
+
+Using request streams derived from both production traces and synthetic workloads, our evaluation shows that InfiniLoRA significantly outperforms state-of-the-art multi-LoRA serv-ing systems. InfiniLoRA can sustain an average 3.05 × higher request rates under strict TTFT and TPOT SLOs. From a multi-tenant perspective, it boosts the ratio of LoRA adapters meeting stringent service-quality targets (i.e., over 90% of requests satisfying SLOs) by 53.1%. 
+
+## 2 Background 
+
+2.1 LLM Inference 
+
+LLM inference consists of two phases: prefill and decode . In the prefill phase, the entire input prompt is processed in parallel to initialize the KV cache. This phase is dominated by dense matrix multiplications and is therefore compute-bound. In contrast, the decode phase generates tokens autore-gressively, one token per step, repeatedly reading and writ-ing the KV cache. As a result, decode execution is memory-bandwidth-bound and exposes limited parallelism per re-quest. When prefill and decode are co-located on the same GPUs, prefill requests can monopolize GPU execution and delay decode steps, directly inflating both TTFT and TPOT. To avoid this interference, recent serving systems [ 10 , 11 ,25 , 26 , 50 ] adopt a prefill–decode disaggregated architecture (Figure 2), assigning the two phases to separate resources. In practice, a prefill GPU can reach high utilization with a very small batch size, often a single request, due to its high arithmetic intensity, whereas decode GPUs require batching tens to hundreds of concurrent requests to saturate memory bandwidth and achieve high throughput. During decoding, large models are executed using hybrid parallelism [ 27 , 48 ]. For MoE models, expert parallelism par-titions experts across multiple GPUs, while attention layers are executed with data parallelism , where the input batch is sharded across GPUs and routed to the corresponding experts. If needed, tensor parallelism further splits attention computation across devices. These parallelization strategies are carefully optimized to balance inference latency, through-put, and cost efficiency. 
+
+2.2 LoRA Computation and Multi-LoRA Serving 
+
+As shown in Figure 3, for a weight matrix 𝑊 ∈ Rℎ×𝑑 , LoRA applies a low-rank update such that 𝑊 ′ = 𝑊 +𝐴𝐵 , where 𝐴 ∈Prefill 
+
+Prefill 
+
+Prefill 
+
+Prefill    
+
+> Prefill
+> Decode
+> KV Cache
+> Gating
+> Shard1
+> Shard2
+> LLM Instance
+> Attn.
+> Attn. Gating
+> Dispatch  Experts
+> Combine
+> Experts
+> GPU1
+> GPU2
+> Replicated
+
+Figure 2. Prefill–decode disaggregated architecture. LLM instances are deployed with 2 GPUs using expert parallelism. Pretrained        
+
+> Weights
+> W∈R!×#A∈R!×$
+> B∈R$×#
+> Input
+> Output
+
+(a) Dense model. Input                
+
+> Output
+> …
+> Dispatch
+> Expert 1
+> Pretrained
+> Weights
+> W∈R!×#A∈R!×$
+> B∈R$×#
+> Combine
+> Expert N
+> Pretrained
+> Weights
+> W∈R!×#A∈R!×$
+> B∈R$×#
+
+(b) MoE model. 
+
+Figure 3. LoRA computation on Dense and MoE models. Scheduler         
+
+> Req
+> Resp
+> LoRA Table
+> ID Count
+> 112
+> ……
+> 512 0
+> Req Admission
+> ①Batch
+> ②LoRA
+> Waiting
+> Queue
+> LLM Instance
+> Host
+> Memory
+> Loading Adapters
+> Req
+> KV
+> GPU 1
+> Model
+> Adapter1
+> Adapter2
+> Running
+> Queue
+> Resp
+> Adapter1
+> Adapter2
+> ... Adapter511
+> Adapter512 ...
+> KV
+> GPU 2
+> Model
+> Adapter1
+> Adapter2
+> N
+> NY
+> Y
+
+Figure 4. Coupled-design multi-LoRA serving architecture. 
+
+Rℎ×𝑟 and 𝐵 ∈ R𝑟 ×𝑑 are trainable matrices, called adapters .Given an input 𝑥 , the output becomes 𝑦 ′ = 𝑥𝑊 ′ = 𝑥𝑊 +𝑥𝐴𝐵 .The rank 𝑟 is typically small (e.g., 32–128), which signifi-cantly reduces both training cost and inference overhead compared to fully fine-tuning [6, 13, 28]. In multi-task and multi-tenant serving environments, many LoRA adapters will be served concurrently, and different re-quests within the same batch may require different adapters. To support this, recent systems [ 3, 14 , 19 , 21 , 31 , 40 , 46 ] ex-ploit the fact that multiple LoRA adapters are derived from a shared base LLM and enable multi-LoRA serving by consol-idating such requests into a single inference batch. Specif-ically, the base model computation ( 𝑥𝑊 ) is performed in a batched manner, while each request independently computes its corresponding LoRA update ( 𝑥𝐴𝐵 ), which is then added to the base output. Existing systems adopt a coupled archi-tecture in which LoRA adapters are stored in GPU memory alongside the base model weights and KV cache within each LLM engine. As shown in Figure 4, these systems employ a LoRA-aware execution flow to schedule incoming requests. Upon receiving a request, the scheduler first verifies if the engine has reached its maximum batch size, constrained by KV cache capacity and TPOT SLOs. If within limits, it con-sults the LoRA table. The request is admitted if the required adapter is already resident or can be loaded into available cache space; otherwise, it is queued. Scheduling occurs at the token level, allowing requests to be admitted or retired at each decoding step, while dynamically updating the LoRA table. Under the coupled architecture, prior work primarily im-proves LoRA serving performance through optimizations in the following aspects. These include optimizing cache replacement policies to increase LoRA cache hit rates [ 14 , 41 ,
+
+> 3Hongyu Chen et al.
+
+53 ], redesigning data layouts to reduce adapter loading over-head [ 21 , 34 ], rebalancing GPU memory allocation between KV cache and LoRA cache [ 46 ], and developing specialized GPU kernels to accelerate LoRA computation when requests within a batch require different adapters that scattered across memory [17, 42, 51]. LoRA serving during the prefill stage is relatively straight-forward. The batch size is typically small (e.g., 1–4 requests) [ 7, 50 ], limiting the GPU memory overhead of LoRA caching. In addition, the prefill cost is easy to estimate because input sequence lengths are known in advance, allowing required LoRA adapters to be prefetched by overlapping adapter load-ing with the computation of previous batches. In contrast, LoRA serving during the decode stage is substantially more challenging. Decode batches are larger, and the number of de-coding steps per request is difficult to predict. Consequently, both prior work and our design focus mainly on optimizing LoRA serving in the decode phase. 
+
+2.3 MoE-Induced Issues in Multi-LoRA Serving 
+
+As LLMs evolve, the MoE architecture has become increas-ingly prevalent and is adopted by recent models such as Mixtral [ 16 ], Qwen3 [ 35 ], and DeepSeek [ 5 ]. In MoE models, LoRA adapters maintain expert-specific parameters, caus-ing adapter size to scale with the number of experts (Figure 3b). As the expert count grows, the memory footprint of each adapter increases substantially. Consequently, under a fixed LoRA memory budget, the number of adapters that can reside on GPUs drops sharply (Figure 1a), significantly undermining the effectiveness of multi-LoRA serving. To quantify this effect, we evaluate S-LoRA [ 31 ], using its state-of-the-art implementation integrated into vLLM [ 19 ], as opposed to the original vanilla codebase, on the Mixtral 8x7B model. We deploy four LLM instances, each running on two NVIDIA Hopper GPUs (96 GB), and vary the LoRA cache ratio from 10% to 50%, where the cache ratio denotes the fraction of adapters that can be simultaneously resident in GPU memory across all instances. The system serves 256 LoRA adapters, each consuming 1.69 GB of GPU memory, with access frequencies following a Zipf distribution ( 𝑠 = 1.2 )as in prior work [ 3, 31 ]. The P95 TTFT SLO is set to 0.25 s. This setup isolates the impact of limited LoRA cache capacity in coupled architectures. Our results reveal two key issues that arise when cache capacity is constrained. 
+
+Issue 1: a low cache capacity leads to excessive TTFT 1,directly degrading service quality. When the required LoRA adapter is not resident in GPU memory, incoming          
+
+> 1In multi-LoRA serving with PD disaggregation, we focus on the latency of generating the first token in the decode phase, as discussed in Section 2.1. Accordingly, we redefine TTFT for a request as the sum of its queueing delay and the time required by the decoding engine to produce the first output token, explicitly excluding the prefill phase. This definition isolates the performance impact of decode-time LoRA serving and directly reflects user-perceived service quality. 10% 20% 30% 40% 50%
+> Cache Ratio
+> 10 1
+> 10 0
+> 10 1
+> 10 2
+> P95 TTFT (seconds)
+> SLO (0.25s)
+> 10% 20% 30% 40% 50%
+> Cache Ratio
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> Percentage (%)  >90%
+> >80%
+> >50%
+
+Figure 5. Impact of LoRA cache ratio on TTFT performance and SLO attainment. ( Left ) P95 TTFT under varying cache ratios, with SLO of 0.25 seconds. ( Right ) Percentage of LoRA adapters for which the fraction of requests meeting the TTFT SLO exceeds specific thresholds (50%, 80%, and 90%). requests must wait until in-flight executions complete and GPU memory becomes available to load its adapter. This introduces additional queuing and loading delays before decoding can begin. Since TTFT is highly sensitive to such delays, even moderate cache misses can significantly inflate tail latency, resulting in poor SLO compliance. As shown in Figure 5, the P95 TTFT reaches hundreds of seconds when the LoRA cache ratio (defined as the cache capacity divided by the total number of LoRAs) is low. As cache ratio increases, the P95 TTFT drops sharply. Further analysis of adapter-level compliance reveals a consistent trend: a larger cache ratio allows significantly more LoRA adapters to exceed high SLO satisfaction thresholds (e.g., >80% or >90% of their requests). 
+
+Issue 2: an insufficient cache capacity reduces the effec-tive batch size, lowering hardware utilization. Requests targeting uncached LoRA adapters cannot be admitted into the execution engine and must remain in the waiting queue. As a result, the engine operates with fewer requests than its configured batch size limit, even when sufficient compute resources are available. This underutilization is particularly detrimental during the decode phase, which requires large batch sizes to saturate memory bandwidth. Figure 6 illus-trates the batch size observed over time. Request arrivals follow a Poisson process, causing the batch size to fluctuate dynamically. When cache ratio is low, the batch size remains consistently small because only a limited number of adapters can reside on GPUs at any time. Moreover, the batch size exhibits high variance because request admission is strictly constrained by the currently resident adapters. As discussed in Section 1, neither scaling out nor scal-ing up can fundamentally resolve the limitations of LoRA serving under the coupled architecture. Scaling out suffers from excessive duplication of base model parameters and isolated LoRA caches, leading to poor memory efficiency. Scaling up avoids parameter duplication but expands the communication scope and requires larger batch sizes, which increases inference overhead and inflates TPOT. Despite their differences, both approaches are constrained by the same root cause: the coupled architecture tightly binds LoRA         
+
+> 4InfiniLoRA: Disaggregated Multi-LoRA Serving for Large Language Models 50 100 150 200 250
+> Elapsed Time (seconds)
+> 150
+> 200
+> 250
+> 300
+> 350
+> Batch Size
+> 10% 20% 30% 40% 50%
+
+Figure 6. Impact of LoRA cache ratio on batch size. Measure-ments are collected during the steady-state interval (30–270s) of the 300s experiment. adapters to the base model execution. This tight coupling forces dynamic LoRA adapters to scale in lockstep with the heavyweight base model, limiting scalability and efficiency. 
+
+## 3 An Overview of InfiniLoRA 
+
+To overcome the fundamental limitations of the coupled ar-chitecture, we decouple LoRA adapters from LLM instances, enabling adapters to be shared across multiple instances and allowing LoRA cache capacity to scale independently of base-model execution. To this end, we propose InfiniLoRA , a LoRA serving system built on a disaggregated architecture. Figure 7 illustrates the architecture and execution work-flow of InfiniLoRA. Unlike coupled designs, InfiniLoRA man-ages LoRA adapters in a dedicated LoRA Server, which may span multiple nodes, while LLM instances remain LoRA-free and execute the base model using their existing optimiza-tion strategies. During request processing, an LLM instance performs base-model computation and forwards the corre-sponding activations to the LoRA Server. The LoRA Server applies the requested LoRA computation and returns the updated activations, which are then integrated back into the LLM inference pipeline. This procedure is performed twice within each MoE layer, corresponding to the fine-tuned up-gate and down-projection matrices. It is worth noting that, while the LoRA Server executes LLM instance requests one by one instead of fusing them into a single batch, it still achieves concurrency across different instances by pipelin-ing communication and computation. This disaggregated design allows LoRA caching and computation to scale inde-pendently of base-model execution and avoids interference with the highly optimized LLM inference pipeline. Realizing this disaggregated design requires addressing three key system design aspects. First, the system must define an explicit LoRA parallel execution strategy after disaggre-gation, which determines how LoRA computation is placed, synchronized, and scaled across GPUs. Second, remote LoRA execution must be carefully integrated into the decode-time inference path to minimize the impact on the critical path and avoid degrading TTFT and TPOT. Third, LoRA Server resources must be provisioned in an SLO-aware manner to Scheduler  Req    
+
+> Resp
+> Host Memory Adapter1 ... Adapter512
+> LoRA Server Node
+> GPU
+> LLM Instance
+> KV
+> GPU
+> Model
+> Inst.
+> Adapters
+> Send/
+> Recv
+
+(a) Disaggregated architecture. #1   
+
+> #1 #1
+> LLM
+> Ins1 .
+> #1
+> #1
+> #1
+> #2
+> #2
+> #2
+> LoRA
+> Server  Recv
+> LoR A
+> Send
+> GEMM/Add
+> Send/Recv
+> #1
+> #2
+> #2 #2
+> LLM
+> Ins2.
+> GEMM/Add
+> Send/Recv
+> #2
+
+(b) Execution workflow: LLM instances send activations to the LoRA Server and receive the computed results. This communi-cation is overlapped with local GEMM computations, followed by a final addition of the two outputs. 
+
+Figure 7. An overview of InfiniLoRA. balance latency guarantees and resource efficiency under dynamic and skewed workloads. InfiniLoRA addresses these aspects through parallelism-aware LoRA execution and SLO-driven resource provisioning in Section 4, and critical-path optimization in Section 5. 
+
+## 4 LoRA Server Design: Parallelism-Aware Execution and SLO-Driven Provisioning 
+
+This section presents the core LoRA Server design of In-finiLoRA, addressing two key aspects: parallelism-aware LoRA execution (Section 4.1) and SLO-driven resource pro-visioning (Section 4.2). 
+
+4.1 Parallelism-Aware LoRA Execution 
+
+Given an MoE model with 𝑙 layers and 𝑒 experts per layer, suppose there are 𝑛 LoRA adapters and the LoRA Server contains 𝑚 GPUs. We abstract the LoRA adapters as a three-dimensional tensor of size 𝑛 × 𝑙 × 𝑒 , where each unit corre-sponds to the LoRA matrix associated with a specific expert at a specific layer of a given adapter (Figure 8). For brevity, we denote the GPUs of the LLM instance and the LoRA Server as client and server GPUs, respectively. Consider an LLM instance with 𝑝 GPUs and batch size 𝑏 ,using expert parallelism with degree 𝑝 . Each request acti-vates the top-𝑘 experts at each layer, so the batch activates 
+
+𝑏 ×𝑘 LoRA computation units per layer. For each activated ex-pert, the corresponding activation is sent to the LoRA Server, processed, and returned. Therefore, the total activation vol-ume transferred from the LLM instance to the LoRA Server for a layer is 𝑏 × 𝑘 . We analyze four parallelization strategies 
+
+> 5Hongyu Chen et al.
+
+LoRA Server    
+
+> GPU 1 GPU 2 GPU 3 GPU 4
+> LLM
+> Instance
+> GPU  1
+> GPU  2
+> LoRAs
+> Experts
+> Layers
+
+(a) Data parallel. LoRA Server     
+
+> GPU 1 GPU 2 GPU 3 GPU 4
+> LLM
+> Instance
+> GPU  1
+> GPU  2
+> LoRAs
+> Experts
+> Layers
+
+(b) Pipeline parallel. LoRA Server    
+
+> GPU 1 GPU 2 GPU 3 GPU 4
+> LLM
+> Instance
+> GPU  1
+> GPU  2
+> LoRAs
+> Experts
+> Layers
+
+(c) Expert parallel. LoRA Server     
+
+> GPU 1 GPU 2 GPU 3 GPU 4
+> LLM
+> Instance
+> GPU  1
+> GPU  2
+> LoRAs
+> Experts
+> Layers
+
+(d) Hybrid parallel. 
+
+Figure 8. LoRA adapter placement strategies across server GPUs. The three-dimensional block represents the adapter space, with axes corresponding to LoRA adapters, layers, and experts. Each color indicates the server GPU (GPU 1–4) to which a partition of adapters is assigned. Arrows depict the activation data flow between client GPUs and server GPUs. using four metrics summarized in Table 1: Peer Comm Volume 
+
+(average activation transferred per client–server GPU pair), 
+
+Comm Peer Count (number of client GPUs communicating with a server GPU), Compute Volume (LoRA computation per server GPU), and Sync Scope (number of server GPUs that must synchronize per step). 
+
+LoRA Data Parallel. A straightforward approach is to evenly distribute LoRA adapters across the server GPUs, as illustrated in Figure 8a. Because requests within a batch may access different adapters residing on any server GPU, activa-tions from client GPUs must be routed accordingly. When multiple LLM instances share a LoRA Server, the server GPUs perform a collective coordination step to determine which activations should be processed by which GPUs. As a result, the communication peer count for a server GPU is at most 
+
+𝑝 , and the sync scope spans all 𝑚 server GPUs. On average, one client GPU can produce 𝑏 ×𝑘 𝑝 expert activa-tions, each of which must be sent to the server GPU hosting the corresponding adapter. With adapters evenly distributed across 𝑚 server GPUs, these activations are further spread, yielding an average pairwise peer comm volume of 𝑏 ×𝑘 𝑝 ×𝑚 
+
+and an average compute volume of 𝑏 ×𝑘 𝑚 per server GPU. In practice, expert load imbalance can skew the number of acti-vations per client GPU, while skewed adapter access patterns can concentrate activations on a subset of server GPUs, in-creasing communication and computation imbalance despite uniform adapter placement. 
+
+LoRA Pipeline Parallel. As shown in Figure 8b, an alter-native approach is to apply layer parallelism by organizing LoRA adapters by layer and assign each layer’s complete 𝑛 
+
+adapters to a single server GPU, evenly distributing the 𝑙 
+
+layers across the 𝑚 server GPUs. 2 Under this design, when 
+
+> 2A single GPU can typically hold all adapters for a given layer, since each LoRA adapter occupies only several MBs. If the total adapter size for a layer
+
+Table 1. Comparison of LoRA execution parallelization strategies. 𝑏 , 𝑘 , 𝑝 , 𝑚 : per-instance batch size, expert rout-ing top-𝑘 , GPU counts for an LLM instance and the LoRA Server. 𝑥 , 𝑦 : hybrid parallelism configuration. 
+
+Parallel Strategy Comm Peer Volume Comm Peer Count Compute Volume Sync Scope 
+
+𝐷𝑃 𝑏 ×𝑘 𝑝 ×𝑚 𝑚 𝑏 ×𝑘 𝑚 𝑚 𝑃𝑃 𝑏 ×𝑘 𝑝 1 𝑏 × 𝑘 1
+
+𝐸𝑃 𝑏 ×𝑘  
+
+> max (𝑝,𝑚 )
+
+max ( 𝑚 𝑝 , 1) 𝑏 ×𝑘 𝑚 𝑚 𝐸𝑃 𝑥 -𝑃𝑃 𝑦 𝑏 ×𝑘   
+
+> max (𝑝,𝑥 )
+
+max ( 𝑥 𝑝 , 1) 𝑏 ×𝑘 𝑥 𝑥 
+
+processing a given layer, all client GPUs within a LLM in-stance send their activations to the same server GPU that hosts the corresponding layer, so the comm peer count is 𝑝 
+
+and the sync scope is 1 and yielding a pairwise peer commu-nication volume of 𝑏 ×𝑘 𝑝 and a compute volume of 𝑏 × 𝑘 on the server GPU. Because all experts and adapters for a layer reside on the single server GPU, this approach avoids load imbalance across server GPUs for that layer. Compared to data-parallel LoRA execution, the synchronization overhead is minimal, and different LLM instances can process LoRA computation for different layers concurrently on different server GPUs. However, concentrating all LoRA computation for a layer on a single server GPU places heavy communication and com-putation load on the decode-time critical path, potentially degrading inference latency. 
+
+LoRA Expert Parallel. As shown in Figure 8c, we organize LoRA adapters by expert and evenly distribute the 𝑒 experts’ adapters across the 𝑚 server GPUs, so that each server GPU hosts adapters for 𝑒 𝑚 experts. For a given layer, any expert 
+
+> exceeds a single GPU’s capacity, multiple GPUs can be grouped to host that layer. For simplicity, we assume one GPU suffices per layer. 6InfiniLoRA: Disaggregated Multi-LoRA Serving for Large Language Models
+
+may be activated by the batch, so the sync scope spans all 𝑚 
+
+server GPUs. Using aligned expert partitioning, each client GPU owns 𝑒 𝑝 experts, and each server GPU receives activa-tions only from the client GPUs with same experts, limiting the communication peer count to max   𝑝 𝑚 , 1. On average, the 𝑏 ×𝑘 expert activations per layer are evenly spread across the 𝑚 server GPUs, yielding a compute volume of 𝑏 ×𝑘 𝑚 per server GPU and a pairwise peer communication volume of  
+
+> 𝑏 ×𝑘
+> max (𝑝, 𝑚 )
+
+. Compared with pipeline execution, expert paral-lelism avoids concentrating a layer’s LoRA computation on a single GPU, but incurs a larger sync scope, fragmented communication and may suffer from load imbalance due to skewed expert activation patterns. 
+
+LoRA Hybrid Parallel. Naturally, we should balance three competing objectives: keeping the sync scope small to re-duce synchronization overhead, avoiding overly fragmented communication and computation across server GPUs, and minimizing the impact on the inference critical path. Motivated by this trade-off, we propose a hybrid paral-lelism scheme that combines pipeline and expert parallelism. We denote a hybrid configuration as 𝐸𝑃 𝑥 -𝑃𝑃 𝑦 , where 𝑥 is the degree of expert parallelism, 𝑦 is the number of pipeline stages, and 𝑥 ×𝑦 = 𝑚 . As illustrated in Figure 8d, we set 𝑥 = 2
+
+and 𝑦 = 2, partitioning the server GPUs into two pipeline stages, each with expert parallelism degree two. Rather than grouping contiguous layers within a stage, we interleave layers across GPU groups (e.g., assigning Layers 1 and 3 to GPUs 1–2, and Layers 2 and 4 to GPUs 3–4) to reduce LoRA loading overhead, discussed in Section 5.3. Under hybrid parallelism, LoRA computation for a layer involves only the 𝑥 GPUs within its expert group; therefore, the sync scope is 𝑥 . Each server GPU receives activations from at most max   𝑝 𝑥 , 1 client GPUs, yielding a comm peer count of max   𝑝 𝑥 , 1. The compute volume per server GPU is   
+
+> 𝑏 ×𝑘 𝑥
+
+, and the average pairwise comm peer volume is 𝑏 ×𝑘   
+
+> max (𝑝,𝑥 )
+
+.By tuning 𝑥 and 𝑦 , hybrid parallelism enables flexible trade-offs among these metrics. Increasing 𝑥 reduces per-GPU compute volume by involving more server GPUs, but also increases synchronization overhead, fragments communi-cation, and amplifies the impact of expert load imbalance. Conversely, smaller 𝑥 reduces synchronization cost but con-centrates computation. We empirically tune 𝑥 and 𝑦 offline; in practice, setting 𝑥 equal to the number of intra-node GPUs is generally a good default, as prioritizing a larger 𝑥 is more beneficial for efficiency (Section 6.3.2). 
+
+4.2 SLO-Driven LoRA Server Resource Provisioning 
+
+We formulate provisioning based on two inputs: (1) LoRA workload characteristics, assuming historical access patterns are recurrent [ 53 ]; and (2) LLM instance load, parameterized by batch size. The system must jointly satisfy tail (P95) TTFT and average TPOT SLOs. Table 2 summarizes the notation. 
+
+Table 2. Key notation for Section 4.2. 
+
+Symbol Description 
+
+𝑁 Total number of LoRA adapters 
+
+𝐿 Number of LLM instances 
+
+𝐵 Batch size per LLM instance 
+
+𝐿𝐵 Global batch size, i.e., 𝐿 · 𝐵 𝑀 LoRA cache capacity 
+
+𝑝 𝑖 Request-level invocation probability of adapter 𝑖 𝜆 𝑖 Expected access count of adapter 𝑖 in a global batch, i.e., 𝐿𝐵 · 𝑝 𝑖 
+
+𝜏 ∗ Admission threshold for the Poissonized model 
+
+𝑞 𝑖 Residency (cache) probability of adapter 𝑖 𝑃 free (𝑖 ) Probability that a free cache slot exists for adapter 𝑖 
+
+IAR (𝑀 ) Immediate Admissibility Rate under cache ca-pacity 𝑀 𝛼 Target Immediate Admissibility Rate (e.g., 0.95) Mem LoRA GPU memory footprint per adapter 
+
+4.2.1 Satisfying the Tail TTFT SLO. 
+
+From TTFT to Immediate Admissibility. In low-latency inference systems, request queuing is the dominant cause of TTFT SLO violations. Consequently, meeting a tail TTFT SLO reduces to ensuring that a vast majority of requests bypass queuing. We formalize this requirement through the 
+
+Immediate Admissibility Rate (IAR). Specifically, a request is deemed immediately admissible —meaning it incurs zero queuing delay—if its target LoRA adapter is either already resident in GPU memory or can be instantly loaded into an available slot. Under this formulation, satisfying P95 TTFT SLO is equivalent to maintaining an IAR of at least 95%. 
+
+Problem Formulation. Given the invocation probability distribution {𝑝 𝑖 }𝑁 𝑖 =1, the global batch size 𝐿𝐵 , and a target Immediate Admissibility Rate 𝛼 ∈ ( 0, 1], our goal is to find the minimum cache capacity: 
+
+𝑀 ∗ = min  𝑀 ∈ [ 𝑁 ] IAR (𝑀 ) ≥ 𝛼 (1) We next develop a probabilistic model and corresponding search algorithm to find this 𝑀 ∗.
+
+Probabilistic Modeling. We model the system in a steady state where the LoRA Server maintains a working set of 𝑀 
+
+resident adapters. For each adapter 𝑖 , its expected access count within a global batch is 𝜆 𝑖 = 𝐿𝐵 · 𝑝 𝑖 . We adopt a Pois-sonized model: the actual access count of adapter 𝑖 in a gloabl batch is treated as Poisson (𝜆 𝑖 ). And an adapter is considered 
+
+resident if its access count exceeds an admission threshold 𝜏 ∗.
+
+> 7Hongyu Chen et al.
+
+The residency probability of adapter 𝑖 is therefore: 
+
+𝑞 𝑖 = Pr Poisson (𝜆 𝑖 ) > 𝜏 ∗ = 1 −
+
+> 𝜏 ∗
+
+∑︁ 
+
+> 𝑘 =0
+
+𝜆 𝑘 𝑖 exp (− 𝜆 𝑖 )
+
+𝑘 ! (2) Then the threshold 𝜏 ∗ can be uniquely determined by the capacity constraint: 
+
+> 𝑁
+
+∑︁ 
+
+> 𝑖 =1
+
+𝑞 𝑖 = 𝑀 (3) which states that the expected number of resident adapters— each independently present with probability 𝑞 𝑖 —exactly fills the cache capacity. For any incoming request, the probability that it targets adapter 𝑖 and does not require queuing decomposes into two mutually exclusive cases: (i) a direct cache hit (probability 
+
+𝑞 𝑖 ), or (ii) a cache miss but a free slot exists among the 𝑀 po-sitions. Let 𝑃 free (𝑖 ) denote the probability that the remaining 
+
+𝑁 − 1 adapters collectively occupy at most 𝑀 − 1 slots. Since each adapter 𝑗 ≠ 𝑖 independently resides in the cache with probability 𝑞 𝑗 , the total number of occupied slots is a sum of 𝑁 − 1 independent Bernoulli random variables. 𝑃 free (𝑖 )
+
+is then the probability that this sum does not exceed 𝑀 − 1.Aggregating over all adapters, the overall IAR is: IAR (𝑀 ) =
+
+> 𝑁
+
+∑︁ 
+
+> 𝑖 =1
+
+𝑝 𝑖 
+
+h
+
+𝑞 𝑖 + ( 1 − 𝑞 𝑖 ) · 𝑃 free (𝑖 )
+
+i
+
+(4) 
+
+Solution Procedure. Algorithm 1 solves Problem (1) by incrementally testing 𝑀 = 1, 2, . . . and returning the first value that satisfies the IAR target. For each candidate 𝑀 , the algorithm proceeds in three stages. First, it solves Eq. (3) for 𝜏 ∗ via binary search (line 3) and obtains all residency probabilities {𝑞 𝑖 } (line 4). Second, for each adapter 𝑖 , it uses dynamic programming to compute 𝑃 free (𝑖 ) and accumulates the per-adapter contribution to the IAR via Eq. (4) (line 15). Finally, it checks whether IAR (𝑀 ) ≥ 𝛼 (line 17) and, if so, returns 𝑀 ∗ = 𝑀 .
+
+Deriving the Minimum Cache Size. Given the IAR for-mulation established above, we search for the smallest cache capacity 𝑀 such that IAR (𝑀 ) ≥ 𝛼 , where 𝛼 corresponds directly to the tail TTFT SLO target (e.g., 𝛼 = 0.95 for a P95 requirement). The minimum GPU memory budget for the LoRA Server is then 𝑀 ∗ × Mem LoRA .
+
+4.2.2 Satisfying the Average TPOT SLO. We next ad-dress the average TPOT SLO by deriving the computation and communication resources required by the LoRA Server. We formulate the hardware resource constraints from two perspectives. From the perspective of the LLM instance , the global average TPOT SLO imposes a latency constraint: 
+
+𝑇 recv + 𝑇 comp + 𝑇 send ≤ SLO FFN (5) 
+
+Algorithm 1 Minimum Cache Size for Tail TTFT SLO 
+
+Require: LoRA invocation probabilities {𝑝 𝑖 }𝑁 𝑖 =1, global batch size 𝐿𝐵 , target IAR 𝛼 
+
+Ensure: Minimum cache size 𝑀 ∗ 
+
+> 1:
+
+Compute 𝜆 𝑖 ← 𝐿𝐵 · 𝑝 𝑖 for all 𝑖 ∈ [ 𝑁 ] 
+
+> 2:
+
+for 𝑀 = 1 to 𝑁 do  
+
+> 3:
+
+𝜏 ∗ ← BinarySearch (𝜏 s.t. Í𝑁 𝑖 =1 𝑄 (𝜆 𝑖 , 𝜏 ) = 𝑀 ) ⊲
+
+𝑄 (𝜆, 𝜏 ) = Pr [Poisson (𝜆 ) > 𝜏 ] 
+
+> 4:
+
+𝑞 𝑖 ← 𝑄 (𝜆 𝑖 , 𝜏 ∗) for all 𝑖  
+
+> 5:
+
+IAR ← 0 
+
+> 6:
+
+for 𝑖 = 1 to 𝑁 do  
+
+> 7:
+
+dp [0] ← 1; dp [1..𝑁 ] ← 0 ⊲ DP over Poisson-Binomial  
+
+> 8:
+
+for each 𝑗 ∈ [ 𝑁 ] \ { 𝑖 } do  
+
+> 9:
+
+for 𝑘 = 𝑁 − 1 down to 1 do  
+
+> 10:
+
+dp [𝑘 ] ← dp [𝑘 ] · ( 1 − 𝑞 𝑗 ) + dp [𝑘 −1] · 𝑞 𝑗  
+
+> 11:
+
+end for  
+
+> 12:
+
+dp [0] ← dp [0] · ( 1 − 𝑞 𝑗 ) 
+
+> 13:
+
+end for  
+
+> 14:
+
+𝑃 free (𝑖 ) ← Í𝑀 −1 
+
+> 𝑘 =0
+
+dp [𝑘 ] 
+
+> 15:
+
+IAR ← IAR + 𝑝 𝑖 · 𝑞 𝑖 + ( 1 − 𝑞 𝑖 ) · 𝑃 free (𝑖 ) 
+
+> 16:
+
+end for  
+
+> 17:
+
+if IAR ≥ 𝛼 then  
+
+> 18:
+
+return 𝑀 ∗ ← 𝑀  
+
+> 19:
+
+end if  
+
+> 20:
+
+end for 
+
+where 𝑇 recv , 𝑇 comp , and 𝑇 send denote the latencies incurred by the LoRA Server to receive activations, execute LoRA com-putation, and return the results for a single LLM instance, respectively. All three terms can be profiled and modeled as functions of the per-instance batch size 𝐵 . Additionally, SLO FFN represents the latency budget allocated to the ex-perts’ Grouped GEMM modules, which is derived from the global average TPOT SLO. From the LoRA Server perspec-tive, the LoRA Server must serve all 𝐿 LLM instances within the time window of a single layer, yielding the throughput constraint: 
+
+max (𝑇 recv , 𝑇 comp , 𝑇 send ) · 𝐿 ≤ SLO Layer (6) where SLO Layer denotes the total latency budget for one base model layer, encompassing both the attention and expert modules. By jointly solving Eq. (5) and Eq. (6) , we derive the minimum number of LoRA Server GPUs required to satisfy the average TPOT SLO. Combined with the cache capacity 
+
+𝑀 ∗ obtained from Algorithm 1 for the tail TTFT SLO, the overall minimum GPU count of the LoRA Server is fully determined by the two SLO targets.              
+
+> 8InfiniLoRA: Disaggregated Multi-LoRA Serving for Large Language Models LoRA
+> Server
+> GPU1
+> GPU2
+> client →server client ←server
+> LLM
+> Instance
+> ②①
+> GPU1
+> GPU2
+> LoRA
+> Server
+> GPU1
+> GPU2
+> LLM
+> Instance
+> ①
+> GPU1
+> GPU2
+> (a) Push-based communication. LoRA
+> Server
+> GPU1
+> GPU2
+> client →server client ←server
+> LLM
+> Instance  ①GPU1
+> GPU2
+> LoRA
+> Server
+> GPU1
+> GPU2
+> LLM
+> Instance  ①
+> GPU1
+> GPU2
+> ②
+> ②
+> ③④
+> (b) Pull-based communication.
+
+Figure 9. Design for client–server communication. Control signals are labeled red and data transfers are labeled black. 
+
+## 5 Critical-Path Optimization for Disaggregated LoRA Execution 
+
+This section presents the communication and LoRA com-putation kernel designs required to make disaggregation practical, along with optimizations for LoRA loading. 
+
+5.1 Host-Bypass Client-Server GPU Communication 
+
+Although LoRA computation is lightweight, disaggregated execution is often bottlenecked by communication due to the large bandwidth gap between GPU HBM (4.0 TB/s on Hopper 96 GB) and inter-GPU links (50 GB/s over InfiniBand versus 900 GB/s over NVLink). Effectively overlapping LoRA execution with base-model computation therefore requires novel communication design. Unlike collective communication in multi-GPU LLM in-ference, communication between LLM instances (clients) and the LoRA Server follows a dynamic client–server pat-tern, where request to process LoRA arrive asynchronously from different instances. This precludes synchronous NCCL P2P primitives, which require sender–receiver rendezvous; the LoRA Server cannot determine the next sender in ad-vance to issue a matching ncclRecv . We therefore imple-ment client–server communication using IBGDA (InfiniBand GPUDirect Async) [ 23 ], which supports one-sided RDMA operations directly from GPU kernels. We support both push-based and pull-based modes; below we describe the client-to-server path as a representative example. 
+
+Push-based Mode. Client GPUs directly write activations into preallocated buffers on target server GPUs via one-sided RDMA writes ( ①). A leader server GPU runs a persistent kernel that polls these buffers and, upon detecting a com-pleted write, broadcasts the client ID to other server GPUs to coordinate processing ( ②). This avoids sender–receiver synchronization and enables low-latency batch admission. 
+
+Pull-based Mode. In contrast, pull-based communication requires clients to first coordinate locally ( ①) and notify the server ( ②), after which server GPUs explicitly synchronize locally ( ③) and issue remote reads ( ④), introducing extra synchronization overhead and network round trips. Our measurements show that for typical payloads (e.g., 4 MB), Layer 1            
+
+> LoRA Server
+> GP U1
+> LoRA Server
+> GP U2
+> Layer 1Layer 3
+> Layer 2Layer 4
+> Layer 2
+> Layer 3
+> Layer 4
+> Load
+> Comp
+> Load
+> Comp
+
+Figure 10. Layer-wise LoRA loading. Shaded blue blocks represent LoRA execution from any other LLM instance. pull-based communication incurs 2.63 × higher latency than push-based. A similar asymmetry applies to the server-to-client path: pull-based designs require clients to repeatedly poll remote completion states, incurring additional round-trip latency. Consequently, InfiniLoRA adopts push-based communica-tion in both directions to minimize decode-time latency. 
+
+5.2 Hardware-Specialized LoRA Kernels 
+
+LoRA computation differs fundamentally from GEMM: it must gather scattered activations from non-contiguous mem-ory and perform fine-grained GEMM/GEMV operations, yielding performance characteristics that diverge signifi-cantly from dense matrix multiplication. Since communi-cation already occupies part of the critical path, LoRA com-putation can easily become a decode-time bottleneck with-out careful kernel optimization. Building on SGMV [ 3 ] and BGMV [ 31 ], we design hardware-specialized LoRA kernels for modern GPUs. We leverage GPU-specific features including wgmma , TMA (Tensor Memory Accelerator), warp specialization, and dy-namic register reassignment. For BGMV, where computa-tional intensity is low, we adopt thread collaborative execu-tion instead of the heavier wgmma pipeline. For SGMV, we apply the swapping-AB transformation (computing 𝐴 T𝑥 T)to align tensor shapes with hardware constraints, enabling efficient use of wgmma.m64n8k16 . Additional optimizations include scheduling and persistent kernels. We omit further details due to space constraints and will release the imple-mentation. 
+
+5.3 Layer-wise LoRA Loading 
+
+Due to finite GPU memory on the LoRA Server, cache misses are unavoidable and necessitate on-demand loading of LoRA weights. To prevent this from impacting the TTFT SLO, we design a layer-wise loading strategy that operates in concert with our hybrid parallel execution (Figure 10). Rather than blocking until an entire adapter is loaded, we pipeline transfer and computation at layer granularity (load-ing including all experts, ranging from tens to hundreds of MB): LoRA computation for Layer 1 begins as soon as its weights arrive, while subsequent layers are fetched in the background across multiple GPUs, overlapped with ongoing LoRA execution. This latency is further amortized through 
+
+> 9Hongyu Chen et al.
+
+Table 3. Model and LoRA configurations. Instance #GPU denotes GPUs per LLM instance.                              
+
+> Model #Layers #Experts Top-k LoRA Rank Instance #GPU
+> GPT-OSS-20B [24] 32 32 464 1Qwen3-30B-A3B [35] 48 128 832 2Mixtral-8x7B [16] 32 8264 2Scaled-MoE [52] 18 32 464 4DBRX [36] 40 16 464 4
+
+out-of-band signaling, whereby the scheduler instructs the LoRA Server to prefetch adapter weights before the LLM instance issues its first LoRA computation for Layer 1, often eliminating cold-start stalls entirely. With these optimiza-tions, adapter loading does not affect the TTFT SLO under PCIe 5.0 ( 50 GB/s in our setup). 
+
+## 6 Evaluation 
+
+6.1 Evaluation Setup 
+
+Our experiments are conducted on a four-node cluster. Each node has four NVIDIA Hopper GPUs (96 GB), 96 CPU cores, 2 TB of host memory, and four 400 Gb/s InfiniBand NICs, each attached to a GPU. Intra-node GPUs communicate via 900 GB/s NVLink. We evaluate InfiniLoRA on five MoE mod-els summarized in Table 3. For GPT-OSS-20B, we use 8 GPUs; for all other models, we use 16 GPUs. For Qwen3-30B-A3B, we use a reduced LoRA rank of 32 due to its fine-grained expert structure. 
+
+Workloads. Following prior work [ 3 , 14 , 21 , 31 ], we simu-late a multi-tenent workload where LoRA adapter popularity follows a Zipf distribution ( 𝑠 = 1.2 ), calibrated to produc-tion patterns in [ 53 ]. Unless otherwise specified, we use 512 adapters. Request arrivals follow a Poisson process with con-figurable rates, and input/output lengths are sampled from BurstGPT [37]. 
+
+Metrics. We measure TTFT at the 95th percentile (P95) to capture tail latency from LoRA cache misses, and average TPOT for steady-state decoding performance. TTFT and TPOT SLOs are set to 0.25 s and 0.1 s respectively, consistent with previous work [ 52 ]. We treat each adapter as an inde-pendent service and define the system-wide SLO Attainment Rate [53 ] as the fraction of adapters whose requests meet SLOs in more than 90% of cases. 
+
+Methods Under Study. InfiniLoRA is implemented as a distributed system comprising a scheduler, a dedicated LoRA server, and multiple LLM instances built on vLLM [ 19 ]. LLM instances communicate with the LoRA server via a light-weight connector, and all LoRA kernels are implemented in CUDA. By default, the LoRA server and LLM instances reside on separate nodes connected via InfiniBand. We com-pare against S-LoRA [ 31 ] using its integrated vLLM imple-mentation, which also serves as vLLM’s official multi-LoRA serving backend. Both systems are allocated the same hard-ware budget and share identical LLM instance configura-tions; however, InfiniLoRA dedicates a portion of GPUs to the LoRA server and consequently runs fewer LLM instances. For S-LoRA, we allocate 50% of the remaining GPU memory (after loading base model weights) to LoRA cache and the other 50% to KV cache. Both systems use the same sched-uler described in Section 2.2. To isolate scheduler-induced queueing effects, we additionally evaluate S-LoRA with a Shortest-Job-First scheduler that assumes oracle knowledge of output lengths, denoted S-LoRA w/ SJF. To further assess the impact of the LoRA cache ratio, we include a variant that allocates 40% and 60% of non-model GPU memory to the LoRA cache and KV cache respectively, denoted S-LoRA w/ Less LoRA. For both InfiniLoRA and all baselines, each LLM instance is pre-assigned a disjoint subset of adapters, deter-mined by a greedy algorithm that targets load balance across instances. We also consider Toppings [ 21 ], but its CPU-based LoRA computation incurs prohibitive decode-time latency in production settings with multiple high-performance GPUs paired with limited CPU resources, so we exclude it. We omit scheduling-focused work [ 14 , 53 ] as our approach is orthogonal to them, and under constrained cache capacity, no scheduling policy can generally outperform oracle SJF baseline. 
+
+6.2 Overall Performance Comparison 
+
+This section evaluates the performance of different frame-works across multiple models under varying load. For S-LoRA, given the LLM instance configurations in Table 3, the number of instances is determined by dividing the total num of GPUs by the GPUs required per instance. InfiniLoRA fol-lows an SLO-driven provisioning strategy to first determine num of GPUs for LoRA Server and then assigning the remain-ing GPUs to LLM instances. In most experiments, InfiniLoRA uses 8 GPUs across two nodes for the LoRA Server, which provides a good balance between communication, compu-tation, and synchronization. Due to testbed limitations, the number of LLM instances cannot be further increased even though the LoRA Server has spare capacity; we therefore evaluate scalability separately in Section 6.3.1. Overall, In-finiLoRA outperforms the baselines as shown in Figure 11. InfiniLoRA achieves an average 3.05 × increase in service-able request rate across five models over S-LoRA while meet-ing both P95 TTFT and average TPOT SLOs. Moreover, In-finiLoRA improves the SLO attainment rate by an average of 54.0% and 53.1% compared to S-LoRA and S-LoRA w/ SJF, respectively. Against S-LoRA w/ Less LoRA, which allocates a smaller LoRA cache, the gains are even more pronounced: InfiniLoRA achieves a 4.56 × higher serviceable request rate and improves SLO attainment by 60.6%. InfiniLoRA also improves throughput by 7.3% on average and up to 24.7% on DBRX compared to S-LoRA. Notably, InfiniLoRA attains higher throughput despite using fewer LLM instances, as the 
+
+> 10
+
+InfiniLoRA: Disaggregated Multi-LoRA Serving for Large Language Models 10 1
+
+> 10 0
+> 10 1
+> P95 TTFT (s)
+
+GPT-OSS-20B 
+
+(104, 128, 222)       
+
+> SLO (0.25s)
+> 60
+> 90
+> SLO
+> Attainment(%)
+> Target (90%)
+> 20
+> 40
+> 60
+> Throughput
+> (req/s)
+> 510 20 30 40 50 60 70
+> Request Rate
+> 0.05
+> 0.10
+> 0.15
+> Avg TPOT (s)
+> SLO (0.1s)
+> 10 0
+> 10 1
+
+Qwen3-30B-A3B 
+
+(128, 160, 272)         
+
+> 60
+> 90
+> 20
+> 40
+> 10 20 30 35 40 45 50 55
+> Request Rate
+> 0.05
+> 0.10
+> 0.15
+> 10 1
+> 10 0
+> 10 1
+
+Mixtral-8x7B 
+
+(160, 200, 416)         
+
+> 60
+> 90
+> 20
+> 40
+> 60
+> 80
+> 10 20 30 40 50 60 70 80
+> Request Rate
+> 0.05
+> 0.10
+> 0.15
+> 10 1
+> 10 0
+> 10 1
+
+Scaled-MoE 
+
+(78, 92, 184)        
+
+> 60
+> 90
+> 20
+> 40
+> 510 20 30 35 40 45 50
+> Request Rate
+> 0.05
+> 0.10
+> 0.15
+> 10 0
+> 10 2
+
+DBRX 
+
+(48, 60, 170)           
+
+> 0
+> 30
+> 60
+> 90
+> 20
+> 810 13 15 18 20 23 25
+> Request Rate
+> 0.05
+> 0.10
+> 0.15
+> S-LoRA w/ Less LoRA S-LoRA S-LoRA w/ SJF InfiniLoRA
+
+Figure 11. P95 TTFT, SLO attainment rate, throughput and average TPOT from top to bottom under varying loads. We compare InfiniLoRA against three baselines. The two values listed under each model name correspond to the LoRA cache capacity provided by S-LoRA w/ Less LoRA, S-LoRA (including w/ SJF) and InfiniLoRA, respectively. 1 2 3 4 5 6           
+
+> LLM Instance Count
+> 10 1
+> 10 0
+> P95 TTFT (s)  InfiniLoRA
+> SLO (0.25s)
+> 123456
+> LLM Instance Count
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> SLO Attainment (%)
+> InfiniLoRA
+> Target (90%)
+> 123456
+> LLM Instance Count
+> 0.04
+> 0.06
+> 0.08
+> 0.10
+> Avg TPOT (s)  InfiniLoRA
+> SLO (0.1s)
+> S-LoRA (0.0747s)
+
+(a) P95 TTFT, SLO attainment rate and average TPOT from left to right while scaling #LLM instances. 50 100 150 200 250      
+
+> Elapsed Time (seconds)
+> 50
+> 75
+> 100
+> 125
+> 150
+> 175
+> 200
+> Num of Active LoRAs  123456
+
+(b) The evolution of active LoRA counts over time. 
+
+Figure 12. Performance of scaling #LLM instances, config-ured with a request rate of 12 req/s per instance (keeping LoRA Server unchanged and using Mixtral-8x7B model). larger effective batch size enabled by increased LoRA cache capacity improves GPU utilization. At high request rates on Mixtral, InfiniLoRA exhibits higher TPOT than S-LoRA. This occurs because both systems cache a large number of adapters, but under our fixed testbed resources InfiniLoRA runs with only half the number of LLM instances. With comparable throughput, each InfiniLoRA instance therefore handles nearly twice the request load, resulting in higher per-token latency. 
+
+6.3 Scalability Evaluation 6.3.1 Scale with the Number of LLM Instances. As shown in Figure 12, we scale the number of LLM instances from 1 to 6, allocating two GPUs per instance to serve Mix-tral model, while fixing the LoRA Server at 4 GPUs. We proportionally increase the aggregate request rate from 12 to 72 req/s to maintain constant per-instance load. Average TPOT remains relatively stable, increasing by only 10.5% as the load on the LoRA Server gradually intensifies and still under SLO (0.1 s). Compared to S-LoRA (6 instances at 72 req/s), InfiniLoRA achieves lower TPOT because LoRA computation is largely overlapped with base-model execu-tion, whereas S-LoRA executes LoRA serially. These results demonstrate that a 4-GPU LoRA Server provides sufficient computation throughput to serve 6 LLM instances, validating both the scalability and critical-path optimization of our de-sign. However, both P95 TTFT and SLO attainment degrade sharply when the number of instances reaches six. As shown in Figure 12b, this degradation is caused by cache capacity saturation: under high request load, the number of active LoRA adapters reaches the LoRA Server’s cache capacity, forcing subsequent requests to queue. 
+
+Insight1: in our disaggregated design, cache capacity is the primary scaling bottleneck when serving a large number of LLM instances, which motivates scaling the LoRA Server itself. 
+
+6.3.2 Scale with Server Resources. With four LLM in-stances (each serving one Qwen3-30B-A3B model) and a fixed request rate of 35 req/s, we scale the LoRA Server by provisioning 4, 6, and 8 GPUs using five different parallelism configurations. As shown in Figure 13a, increasing LoRA Server resources significantly improves P95 TTFT and SLO attainment by expanding cache capacity. These observations 
+
+11 Hongyu Chen et al. EP2-PP2 
+
+> EP4-PP1
+> EP2-PP3
+> EP2-PP4
+> EP4-PP2
+> Parallelism Configuration
+> 10 0
+> 10 1
+> 10 2
+> P95 TTFT (s)
+> InfiniLoRA
+> SLO (0.25s)
+> EP2-PP2
+> EP4-PP1
+> EP2-PP3
+> EP2-PP4
+> EP4-PP2
+> Parallelism Configuration
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> SLO Attainment (%)  InfiniLoRA
+> Target (90%)
+> EP2-PP2
+> EP4-PP1
+> EP2-PP3
+> EP2-PP4
+> EP4-PP2
+> Parallelism Configuration
+> 0.08
+> 0.09
+> 0.10
+> Avg TPOT (s)
+> InfiniLoRA
+> SLO (0.1s)
+
+(a) P95 TTFT, SLO attainment rate and average TPOT from left to right using different LoRA Server parallelism configuration. 50 100 150 200 250 
+
+> Elapsed Time (seconds)
+> 125
+> 150
+> 175
+> 200
+> 225
+> Num of Active LoRAs
+> EP2-PP2 (128)
+> EP2-PP4 (256)
+> EP4-PP1 (128)
+> EP4-PP2 (256)
+> EP2-PP3 (192)
+
+(b) The evolution of active LoRA counts over times. Numbers in parentheses denote the server’s LoRA cache capacity. 
+
+Figure 13. Performance of scaling LoRA Server resources (we keep resources for LLM instances unchanged, using Qwen3-30B-A3B model and request rate=35 req/s). are also consistent with the probabilistic model developed in Section 4.2: for LoRA cache capacities of 128, 192, and 256 in this setting, the model predicts immediate admission probabilities of 83.0%, 92.2%, and 100.0%, respectively, which closely matches the severely degraded P95 TTFT observed under smaller cache capacities. Under the 8-GPU configura-tion, a hybrid layout biased toward larger expert parallelism (i.e., 𝐸𝑃 4-𝑃𝑃 2) achieves lower TPOT, as intra-node synchro-nization overhead is small while more GPUs are used to process each layer, aligning with our analysis in Section 4.1. Figure 13b shows the number of concurrently active adapters. For the 4-GPU and 6-GPU configurations, limited cache ca-pacity caps the number of active adapters, directly leading to degraded tail TTFT and lower SLO attainment observed in Figure 13a. 
+
+Insight2: provisioning additional GPUs for LoRA Server ef-fectively alleviates the cache capacity bottleneck, and that the choice of parallelism strategy further influences the efficiency of the disaggregated architecture. 
+
+6.4 Ablation study 
+
+We conduct an ablation study to quantify the impact of each optimization. Experiments use the Mixtral model with a fixed request rate of 25 req/s and 256 adapters in total. In-finiLoRA allocates 2 GPUs to the LoRA Server (cache capacity of 104) and 6 GPUs to three LLM instances, while S-LoRA uses all 8 GPUs to run four LLM instances (total cache ca-pacity of 100); all other settings match the end-to-end evalu-ation. We start from a disaggregated baseline that separates LoRA adapters from the base model ( +disagg ), then add com-munication–computation overlap ( +overlap ), followed by S-LoRA        
+
+> +disagg
+> +overlap
+> +loading
+> +kernel
+> 10 2
+> 10 1
+> 10 0
+> P95 TTFT (s)  0.78 0.99
+> 0.11 0.09 0.07
+> SLO (0.25s)
+> S-LoRA
+> +disagg
+> +overlap
+> +loading
+> +kernel
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> SLO Attainment (%)
+> 38.4
+> 25.0
+> 77.7
+> 95.7 100.0
+> Target (90%)
+> S-LoRA
+> +disagg
+> +overlap
+> +loading
+> +kernel
+> 0.02
+> 0.03
+> 0.04
+> 0.05
+> AVG TPOT (s)
+> 0.044
+> 0.047
+> 0.041 0.040
+> 0.033
+
+Figure 14. Ablation study for quantifying the effectiveness of individual optimization techniques. +kernel represents the fully optimized system with all techniques enabled. layer-wise adapter loading ( +loading ). The full InfiniLoRA system further incorporates hardware-specialized kernels (+kernel ). As shown in the results, despite having a slightly larger cache capacity (104 over 100), +disagg alone increases tail TTFT from 0.78 s to 0.99 s, indicating that a naive disaggre-gated architecture actually degrades performance due to the additional communication overhead it introduces. By incre-mentally adding the remaining optimizations, InfiniLoRA reduces P95 TTFT by 11 ×, lowers average TPOT by 30%, and achieves a 100% SLO attainment rate, highlighting the complementary benefits of each technique. 
+
+Insight3: disaggregation alone is insufficient—its benefits are realized with critical-path optimization. 
+
+## 7 Related works 
+
+Request batching. Recent works like Punica [ 3 ] and S-LoRA [ 31 ] propose to batch requests with heterogeneous LoRA, typically utilizing on-demand loading. dLoRA [ 40 ]introduces similar merge/unmerge LoRA inference modes, also targeting at efficient request batching. 
+
+Request scheduling strategy. Chameleon [ 14 ] improves this by caching adapters in GPU memory and employs a multi-level scheduling queue. Cannikin [ 53 ] proposes a re-quest scheduling strategy specifically tailored to optimize the lagger-SLO attainment. Since InfiniLoRA does not de-pend on request scheduling, these scheduling policies are orthogonal to our proposed system and can be readily inte-grated into our system with minimal modifications, serving as complementary components to enhance performance. 
+
+LoRA cache management. Toppings [ 21 ] attempts to lever-age CPU cores for LoRA computation in prefill stages to address the prolong TTFT introduced by cache miss, but the limited host memory bandwidth makes this approach unsuitable for our low-latency decoding scenario. FASTLI-BRA [ 47 ] also observes the impact of LoRA cache capacity on latency and it jointly manages LoRA adapters and KV caches within a unified HBM pool to reduce TTFT through dependency-aware eviction and swapping. LoRAServe [ 15 ]optimize LoRA placement among LLM instance clusters by 
+
+12 InfiniLoRA: Disaggregated Multi-LoRA Serving for Large Language Models 
+
+dynamically rebalancing adapters across GPUs. Despite Lo-RAServe’s nominal resemblance to our approach, it targets a fundamentally different problem. In conclusion, existing coupled architecture tightly binds LoRA adapters with base model, resulting in limited archi-tectural flexibility and inability to address the challenge of insufficient LoRA cache capacity. 
+
+## 8 Conclusion 
+
+We introduce InfiniLoRA, a disaggregated serving system that decouples LoRA execution from base model inference to resolve scalability bottlenecks in multi-tenant scenarios. By leveraging a shared LoRA Server with parallelism-aware execution, SLO-driven provisioning, and critical-path op-timizations, InfiniLoRA can flexibly scale LoRA cache ca-pacity without interfering with the LLM inference pipeline. Our evaluation demonstrates that InfiniLoRA serves a 3.05 ×
+
+higher average request rate while satisfying latency SLOs, and improves the percentage of LoRA adapters satisfying the SLO requirement by 54.0% compared to existing systems. 
+
+> 13
+
+Hongyu Chen et al. 
+
+## References 
+
+[1] Anonymous. 2026. Understanding LoRA As Knowledge Memory: An Empirical Analysis. https://openreview.net/forum?id=i1Mi2R1TsU 
+
+[2] Chieh-Yun Chen, Zhonghao Wang, Qi Chen, Zhifan Ye, Min Shi, Yue Zhao, Yinan Zhao, Hui Qu, Wei-An Lin, Yiru Shen, Ajinkya Kale, Irfan Essa, and Humphrey Shi. 2025. MapReduce LoRA: Advancing the Pareto Front in Multi-Preference Optimization for Generative Models. arXiv:2511.20629 [cs.CV] https://arxiv.org/abs/2511.20629 
+
+[3] Lequn Chen, Zihao Ye, Yongji Wu, Danyang Zhuo, Luis Ceze, and Arvind Krishnamurthy. 2023. Punica: Multi-Tenant LoRA Serving. arXiv:2310.18547 [cs.DC] https://arxiv.org/abs/2310.18547 
+
+[4] Yukang Chen, Shengju Qian, Haotian Tang, Xin Lai, Zhijian Liu, Song Han, and Jiaya Jia. 2024. LongLoRA: Efficient Fine-tuning of Long-Context Large Language Models. arXiv:2309.12307 [cs.CL] https: //arxiv.org/abs/2309.12307 
+
+[5] DeepSeek-AI, Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao Wu, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenyu Zhang, Chong Ruan, Damai Dai, Daya Guo, Dejian Yang, Deli Chen, Dongjie Ji, Erhang Li, Fangyun Lin, Fucong Dai, Fuli Luo, Guangbo Hao, Guanting Chen, Guowei Li, H. Zhang, Han Bao, Hanwei Xu, Haocheng Wang, Haowei Zhang, Honghui Ding, Huajian Xin, Huazuo Gao, Hui Li, Hui Qu, J. L. Cai, Jian Liang, Jianzhong Guo, Jiaqi Ni, Jiashi Li, Jiawei Wang, Jin Chen, Jingchang Chen, Jingyang Yuan, Junjie Qiu, Junlong Li, Junxiao Song, Kai Dong, Kai Hu, Kaige Gao, Kang Guan, Kexin Huang, Kuai Yu, Lean Wang, Lecong Zhang, Lei Xu, Leyi Xia, Liang Zhao, Litong Wang, Liyue Zhang, Meng Li, Miaojun Wang, Mingchuan Zhang, Minghua Zhang, Minghui Tang, Mingming Li, Ning Tian, Panpan Huang, Peiyi Wang, Peng Zhang, Qiancheng Wang, Qihao Zhu, Qinyu Chen, Qiushi Du, R. J. Chen, R. L. Jin, Ruiqi Ge, Ruisong Zhang, Ruizhe Pan, Runji Wang, Runxin Xu, Ruoyu Zhang, Ruyi Chen, S. S. Li, Shanghao Lu, Shangyan Zhou, Shanhuang Chen, Shaoqing Wu, Shengfeng Ye, Shengfeng Ye, Shirong Ma, Shiyu Wang, Shuang Zhou, Shuiping Yu, Shunfeng Zhou, Shuting Pan, T. Wang, Tao Yun, Tian Pei, Tianyu Sun, W. L. Xiao, Wangding Zeng, Wanjia Zhao, Wei An, Wen Liu, Wenfeng Liang, Wenjun Gao, Wenqin Yu, Wentao Zhang, X. Q. Li, Xiangyue Jin, Xianzu Wang, Xiao Bi, Xiaodong Liu, Xiaohan Wang, Xiaojin Shen, Xiaokang Chen, Xiaokang Zhang, Xiaosha Chen, Xiaotao Nie, Xiaowen Sun, Xiaoxiang Wang, Xin Cheng, Xin Liu, Xin Xie, Xingchao Liu, Xingkai Yu, Xinnan Song, Xinxia Shan, Xinyi Zhou, Xinyu Yang, Xinyuan Li, Xuecheng Su, Xuheng Lin, Y. K. Li, Y. Q. Wang, Y. X. Wei, Y. X. Zhu, Yang Zhang, Yanhong Xu, Yanhong Xu, Yanping Huang, Yao Li, Yao Zhao, Yaofeng Sun, Yaohui Li, Yaohui Wang, Yi Yu, Yi Zheng, Yichao Zhang, Yifan Shi, Yiliang Xiong, Ying He, Ying Tang, Yishi Piao, Yisong Wang, Yixuan Tan, Yiyang Ma, Yiyuan Liu, Yongqiang Guo, Yu Wu, Yuan Ou, Yuchen Zhu, Yuduan Wang, Yue Gong, Yuheng Zou, Yujia He, Yukun Zha, Yunfan Xiong, Yunxian Ma, Yuting Yan, Yuxiang Luo, Yuxiang You, Yuxuan Liu, Yuyang Zhou, Z. F. Wu, Z. Z. Ren, Zehui Ren, Zhangli Sha, Zhe Fu, Zhean Xu, Zhen Huang, Zhen Zhang, Zhenda Xie, Zhengyan Zhang, Zhewen Hao, Zhibin Gou, Zhicheng Ma, Zhigang Yan, Zhihong Shao, Zhipeng Xu, Zhiyu Wu, Zhongyu Zhang, Zhuoshu Li, Zihui Gu, Zijia Zhu, Zijun Liu, Zilin Li, Ziwei Xie, Ziyang Song, Ziyi Gao, and Zizheng Pan. 2025. DeepSeek-V3 Technical Report. arXiv:2412.19437 [cs.CL] 
+
+https://arxiv.org/abs/2412.19437 
+
+[6] Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. 2023. QLORA: efficient finetuning of quantized LLMs. In Proceedings of the 37th International Conference on Neural Information Processing Systems (New Orleans, LA, USA) (NIPS ’23) . Curran Associates Inc., Red Hook, NY, USA, Article 441, 28 pages. [7] Kuntai Du, Bowen Wang, Chen Zhang, Yiming Cheng, Qing Lan, Hejian Sang, Yihua Cheng, Jiayi Yao, Xiaoxuan Liu, Yifan Qiao, Ion Stoica, and Junchen Jiang. 2025. PrefillOnly: An Inference Engine for Prefill-only Workloads in Large Language Model Applications. In 
+
+Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles (Lotte Hotel World, Seoul, Republic of Korea) (SOSP ’25) .Association for Computing Machinery, New York, NY, USA, 399–414. doi: 10.1145/3731569.3764834 
+
+[8] William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch Trans-formers: Scaling to Trillion Parameter Models with Simple and Effi-cient Sparsity. arXiv:2101.03961 [cs.LG] https://arxiv.org/abs/2101. 03961 
+
+[9] Tianyu Gao, Alexander Wettig, Howard Yen, and Danqi Chen. 2025. How to Train Long-Context Language Models (Effectively). In ACL .[10] Cunchen Hu, Heyang Huang, Junhao Hu, Jiang Xu, Xusheng Chen, Tao Xie, Chenxi Wang, Sa Wang, Yungang Bao, Ninghui Sun, and Yizhou Shan. 2024. MemServe: Context Caching for Disaggregated LLM Serving with Elastic Memory Pool. arXiv:2406.17565 [cs.DC] 
+
+https://arxiv.org/abs/2406.17565 
+
+[11] Cunchen Hu, Heyang Huang, Liangliang Xu, Xusheng Chen, Chenxi Wang, Jiang Xu, Shuang Chen, Hao Feng, Sa Wang, Yungang Bao, Ninghui Sun, and Yizhou Shan. 2025. ShuffleInfer: Disaggregate LLM Inference for Mixed Downstream Workloads. ACM Trans. Archit. Code Optim. 22, 2, Article 77 (July 2025), 24 pages. doi: 10.1145/3732941 
+
+[12] Chenghao Hu, Yufei Kang, and Baochun Li. 2025. Communication-Efficient MoE Fine-Tuning with Locality-Aware Expert Placement. In 2025 IEEE 45th International Conference on Distributed Computing Systems (ICDCS) . 166–176. doi: 10.1109/ICDCS63083.2025.00025 
+
+[13] Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. 2022. LoRA: Low-Rank Adaptation of Large Language Models. In International Confer-ence on Learning Representations . https://openreview.net/forum?id= nZeVKeeFYf9 
+
+[14] Nikoleta Iliakopoulou, Jovan Stojkovic, Chloe Alverti, Tianyin Xu, Hubertus Franke, and Josep Torrellas. 2025. Chameleon: Adaptive Caching and Scheduling for Many-Adapter LLM Inference Environ-ments. In Proceedings of the 58th IEEE/ACM International Symposium on Microarchitecture (MICRO ’25) . Association for Computing Machinery, New York, NY, USA, 217–231. doi: 10.1145/3725843.3756083 
+
+[15] Shashwat Jaiswal, Shrikara Arun, Anjaly Parayil, Ankur Mallick, Spyros Mastorakis, Alind Khare, Chloi Alverti, Renee St Amant, Chetan Bansal, Victor Rühle, and Josep Torrellas. 2025. Serving Het-erogeneous LoRA Adapters in Distributed LLM Inference Systems. arXiv:2511.22880 [cs.DC] https://arxiv.org/abs/2511.22880 
+
+[16] Albert Q. Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Men-sch, Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, Gianna Lengyel, Guillaume Bour, Guillaume Lample, Lélio Renard Lavaud, Lucile Saulnier, Marie-Anne Lachaux, Pierre Stock, Sandeep Subramanian, Sophia Yang, Szymon Antoniak, Teven Le Scao, Théophile Gervet, Thibaut Lavril, Thomas Wang, Timothée Lacroix, and William El Sayed. 2024. Mixtral of Experts. arXiv:2401.04088 [cs.LG] https: //arxiv.org/abs/2401.04088 
+
+[17] Rui Kong, Qiyang Li, Xinyu Fang, Qingtian Feng, Qingfeng He, Yazhu Dong, Weijun Wang, Yuanchun Li, Linghe Kong, and Yunxin Liu. 2024. LoRA-Switch: Boosting the Efficiency of Dynamic LLM Adapters via System-Algorithm Co-design. arXiv:2405.17741 [cs.AI] https: //arxiv.org/abs/2405.17741 
+
+[18] Xiaoyu Kong, Jiancan Wu, An Zhang, Leheng Sheng, Hui Lin, Xiang Wang, and Xiangnan He. 2024. Customizing language models with instance-wise LoRA for sequential recommendation. In Proceedings of the 38th International Conference on Neural Information Processing Systems (Vancouver, BC, Canada) (NIPS ’24) . Curran Associates Inc., Red Hook, NY, USA, Article 3593, 24 pages. [19] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. In Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles .14 InfiniLoRA: Disaggregated Multi-LoRA Serving for Large Language Models 
+
+[20] Hao Li, Chenghao Yang, An Zhang, Yang Deng, Xiang Wang, and Tat-Seng Chua. 2025. Hello Again! LLM-powered Personalized Agent for Long-term Dialogue. arXiv:2406.05925 [cs.CL] https://arxiv.org/ abs/2406.05925 
+
+[21] Suyi Li, Yifan Qiao, Jiacheng Ma, Shan Yu, Haoran Ma, Ziming Liu, Hang Ren, Wenguang Chen, Yongwei Wu, Weimin Zheng, and Kang Chen. 2025. Toppings: Modular and Extensible Serverless Function Delivery at High Speed. In 2025 USENIX Annual Technical Conference (USENIX ATC 25) . USENIX Association, Seattle, WA. https://www. usenix.org/conference/atc25/presentation/li-suyi-toppings 
+
+[22] Yuanchun Li, Hao Wen, Weijun Wang, Xiangyu Li, Yizhen Yuan, Guo-hong Liu, Jiacheng Liu, Wenxing Xu, Xiang Wang, Yi Sun, Rui Kong, Yile Wang, Hanfei Geng, Jian Luan, Xuefeng Jin, Zilong Ye, Guan-jing Xiong, Fan Zhang, Xiang Li, Mengwei Xu, Zhijun Li, Peng Li, Yang Liu, Ya-Qin Zhang, and Yunxin Liu. 2024. Personal LLM Agents: Insights and Survey about the Capability, Efficiency and Security. arXiv:2401.05459 [cs.HC] https://arxiv.org/abs/2401.05459 
+
+[23] Pak Markthub, Jim Dinan, Sreeram Potluri, and Seth How-ell. 2022. Improving Network Performance of HPC Systems Using NVIDIA Magnum IO NVSHMEM and GPUDirect Async .NVIDIA. https://developer.nvidia.com/blog/improving-network-performance-of-hpc-systems-using-nvidia-magnum-io-nvshmem-and-gpudirect-async/ 
+
+[24] OpenAI. 2025. gpt-oss-120b & gpt-oss-20b Model Card. arXiv:2508.10925 [cs.CL] https://arxiv.org/abs/2508.10925 
+
+[25] Pratyush Patel, Esha Choukse, Chaojie Zhang, Aashaka Shah, Íñigo Goiri, Saeed Maleki, and Ricardo Bianchini. 2025. Splitwise: Efficient Generative LLM Inference Using Phase Splitting. In Proceedings of the 51st Annual International Symposium on Computer Architecture 
+
+(Buenos Aires, Argentina) (ISCA ’24) . IEEE Press, 118–132. doi: 10. 1109/ISCA59077.2024.00019 
+
+[26] Ruoyu Qin, Zheming Li, Weiran He, Jialei Cui, Feng Ren, Mingxing Zhang, Yongwei Wu, Weimin Zheng, and Xinran Xu. 2025. Moon-cake: Trading More Storage for Less Computation — A KVCache-centric Architecture for Serving LLM Chatbot. In 23rd USENIX Confer-ence on File and Storage Technologies (FAST 25) . USENIX Association, Santa Clara, CA, 155–170. https://www.usenix.org/conference/fast25/ presentation/qin 
+
+[27] Samyam Rajbhandari, Conglong Li, Zhewei Yao, Minjia Zhang, Reza Yazdani Aminabadi, Ammar Ahmad Awan, Jeff Rasley, and Yuxiong He. 2022. DeepSpeed-MoE: Advancing Mixture-of-Experts Inference and Training to Power Next-Generation AI Scale. arXiv:2201.05596 [cs.LG] https://arxiv.org/abs/2201.05596 
+
+[28] John Schulman and Thinking Machines Lab. 2025. LoRA Without Regret. Thinking Machines Lab: Connectionism (2025). doi: 10.64434/ tml.20250929 https://thinkingmachines.ai/blog/lora/. [29] Sheng Shen, Le Hou, Yanqi Zhou, Nan Du, Shayne Longpre, Jason Wei, Hyung Won Chung, Barret Zoph, William Fedus, Xinyun Chen, Tu Vu, Yuexin Wu, Wuyang Chen, Albert Webson, Yunxuan Li, Vin-cent Zhao, Hongkun Yu, Kurt Keutzer, Trevor Darrell, and Denny Zhou. 2023. Mixture-of-Experts Meets Instruction Tuning:A Winning Combination for Large Language Models. arXiv:2305.14705 [cs.CL] 
+
+https://arxiv.org/abs/2305.14705 
+
+[30] Zheyu Shen, Yexiao He, Ziyao Wang, Yuning Zhang, Guoheng Sun, Wanghao Ye, and Ang Li. 2025. EdgeLoRA: An Efficient Multi-Tenant LLM Serving System on Edge Devices . Association for Computing Machinery, New York, NY, USA, 138–153. https://doi.org/10.1145/ 3711875.3729141 
+
+[31] Ying Sheng, Shiyi Cao, Dacheng Li, Coleman Hooper, Nicholas Lee, Shuo Yang, Christopher Chou, Banghua Zhu, Lianmin Zheng, Kurt Keutzer, Joseph E. Gonzalez, and Ion Stoica. 2023. S-LoRA: Serving Thousands of Concurrent LoRA Adapters. arXiv preprint arXiv:2311.03285 (2023). [32] Ge Shi, Hanieh Sadri, Qian Wang, Yu Zhang, Ying Xiong, Yong Zhang, and Zhenan Fan. 2025. ExpertWeave: Efficiently Serving Expert-Specialized Fine-Tuned Adapters at Scale. arXiv:2508.17624 [cs.DC] 
+
+https://arxiv.org/abs/2508.17624 
+
+[33] Weijia Shi, Sewon Min, Maria Lomeli, Chunting Zhou, Margaret Li, Xi Victoria Lin, Noah A. Smith, Luke Zettlemoyer, Wen tau Yih, and Mike Lewis. 2024. In-Context Pretraining: Language Modeling Beyond Document Boundaries. In The Twelfth International Confer-ence on Learning Representations . https://openreview.net/forum?id= LXVswInHOo 
+
+[34] Xiao Shi, Jiangsu Du, Zhiguang Chen, and Yutong Lu. 2025. AuLoRA: Fine-Grained Loading and Computation Orchestration for Efficient LoRA LLM Serving. In 2025 IEEE 43rd International Conference on Computer Design (ICCD) . 277–284. doi: 10.1109/ICCD65941.2025.00046 
+
+[35] Qwen Team. 2025. Qwen3 Technical Report. arXiv:2505.09388 [cs.CL] 
+
+https://arxiv.org/abs/2505.09388 
+
+[36] The Mosaic Research Team. 2024. Introducing DBRX: A New State-of-the-Art Open LLM. https://www.databricks.com/blog/introducing-dbrx-new-state-art-open-llm . Accessed: 2026-01-21. [37] Yuxin Wang, Yuhan Chen, Zeyu Li, Xueze Kang, Yuchu Fang, Yeju Zhou, Yang Zheng, Zhenheng Tang, Xin He, Rui Guo, Xin Wang, Qiang Wang, Amelie Chi Zhou, and Xiaowen Chu. 2025. BurstGPT: A Real-World Workload Dataset to Optimize LLM Serving Systems. In Proceedings of the 31st ACM SIGKDD Conference on Knowledge Discovery and Data Mining V.2 (KDD ’25) . ACM, Toronto, ON, Canada. doi: 10.1145/3711896.3737413 
+
+[38] Yu Wang, Dmitry Krotov, Yuanzhe Hu, Yifan Gao, Wangchunshu Zhou, Julian McAuley, Dan Gutfreund, Rogerio Feris, and Zexue He. 2025. M+: Extending MemoryLLM with Scalable Long-Term Memory. arXiv:2502.00592 [cs.CL] https://arxiv.org/abs/2502.00592 
+
+[39] Zhengbo Wang, Jian Liang, Ran He, Zilei Wang, and Tieniu Tan. 2025. LoRA-Pro: Are Low-Rank Adapters Properly Optimized?. In The Thir-teenth International Conference on Learning Representations (ICLR) .[40] Bingyang Wu, Ruidong Zhu, Zili Zhang, Peng Sun, Xuanzhe Liu, and Xin Jin. 2024. dLoRA: Dynamically Orchestrating Requests and Adapters for LoRA LLM Serving. In 18th USENIX Symposium on Oper-ating Systems Design and Implementation (OSDI 24) . USENIX Associa-tion, Santa Clara, CA, 911–927. https://www.usenix.org/conference/ osdi24/presentation/wu-bingyang 
+
+[41] Shuaipeng Wu, Yanying Lin, Shijie Peng, Wenyan Chen, Chong Ma, Min Shen, Le Chen, Chengzhong Xu, and Kejiang Ye. 2025. Rock: Serving Multimodal Models in Cloud with Heterogeneous-Aware Resource Orchestration for Thousands of LoRA Adapters. In 2025 IEEE International Conference on Cluster Computing (CLUSTER) . 1–13. doi: 10.1109/CLUSTER59342.2025.11186463 
+
+[42] Lingnan Xia and Hua Ma. 2024. Enhancing LoRA Model Serving Capacity via Adaptive Operator Scheduling for Multi-Tenancy on GPU. IEEE Access 12 (2024), 160441–160449. doi: 10.1109/ACCESS. 2024.3483250 
+
+[43] Yifei Xia, Fangcheng Fu, Wentao Zhang, Jiawei Jiang, and Bin Cui. 2024. Efficient multi-task LLM quantization and serving for multiple LoRA adapters. In Proceedings of the 38th International Conference on Neural Information Processing Systems (Vancouver, BC, Canada) 
+
+(NIPS ’24) . Curran Associates Inc., Red Hook, NY, USA, Article 2034, 29 pages. [44] Guangxuan Xiao, Jiaming Tang, Jingwei Zuo, Junxian Guo, Shang Yang, Haotian Tang, Yao Fu, and Song Han. 2024. DuoAttention: Efficient Long-Context LLM Inference with Retrieval and Streaming Heads. arXiv:2410.10819 [cs.CL] https://arxiv.org/abs/2410.10819 
+
+[45] Yahe Yang, Chunliang Tao, and Xiaojing Fan. 2025. LoRA-LiteE: A Computationally Efficient Framework for Chatbot Preference-Tuning. arXiv:2411.09947 [cs.CL] https://arxiv.org/abs/2411.09947 
+
+[46] Hang Zhang, Jiuchen Shi, Yixiao Wang, Quan Chen, Yizhou Shan, and Minyi Guo. 2025. Improving the Serving Performance of Multi-LoRA 15 Hongyu Chen et al. 
+
+Large Language Models via Efficient LoRA and KV Cache Management. arXiv:2505.03756 [cs.AR] https://arxiv.org/abs/2505.03756 
+
+[47] Hang Zhang, Jiuchen Shi, Yixiao Wang, Quan Chen, Yizhou Shan, and Minyi Guo. 2025. Improving the Serving Performance of Multi-LoRA Large Language Models via Efficient LoRA and KV Cache Management. arXiv:2505.03756 [cs.AR] https://arxiv.org/abs/2505.03756 
+
+[48] Tianyu Zhang, Peng Zhang, Yusong Gao, and Yun Zhang. 2025. To-gether with SGLang: Best Practices for Serving DeepSeek-R1 on H20-96G. https://lmsys.org/blog/2025-09-26-sglang-ant-group/ . LMSYS Org Blog. [49] You Zhang, Jin Wang, Liang-Chih Yu, Dan Xu, and Xuejie Zhang. 2024. Personalized LoRA for Human-Centered Text Understanding. 
+
+Proceedings of the AAAI Conference on Artificial Intelligence 38, 17 (Mar. 2024), 19588–19596. doi: 10.1609/aaai.v38i17.29931 
+
+[50] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-anzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: disaggregating prefill and decoding for goodput-optimized large language model serv-ing. In Proceedings of the 18th USENIX Conference on Operating Systems Design and Implementation (Santa Clara, CA, USA) (OSDI’24) . USENIX Association, USA, Article 11, 18 pages. [51] Changhai Zhou, Yuhua Zhou, Shiyang Zhang, Yibin Wang, and Zekai Liu. 2025. Dynamic Operator Optimization for Efficient Multi-Tenant LoRA Model Serving. Proceedings of the AAAI Conference on Artificial Intelligence 39, 21 (Apr. 2025), 22910–22918. doi: 10.1609/aaai.v39i21. 34453 
+
+[52] Ruidong Zhu, Ziheng Jiang, Chao Jin, Peng Wu, Cesar A. Stuardo, Dongyang Wang, Xinlei Zhang, Huaping Zhou, Haoran Wei, Yang Cheng, Jianzhe Xiao, Xinyi Zhang, Lingjun Liu, Haibin Lin, Li-Wen Chang, Jianxi Ye, Xiao Yu, Xuanzhe Liu, Xin Jin, and Xin Liu. 2025. MegaScale-Infer: Efficient Mixture-of-Experts Model Serving with Dis-aggregated Expert Parallelism. In Proceedings of the ACM SIGCOMM 2025 Conference (São Francisco Convent, Coimbra, Portugal) (SIG-COMM ’25) . Association for Computing Machinery, New York, NY, USA, 592–608. doi: 10.1145/3718958.3750506 
+
+[53] Ruidong Zhu, Ziyue Jiang, Zhi Zhang, Xin Liu, Xuanzhe Liu, and Xin Jin. 2025. Cannikin: No Lagger of SLO in Concurrent Multiple LoRA LLM Serving. IEEE Transactions on Parallel and Distributed Systems 
+
+36, 9 (2025), 1972–1984. doi: 10.1109/TPDS.2025.3590014 
+
+16 InfiniLoRA: Disaggregated Multi-LoRA Serving for Large Language Models 
+
+## A Appendix 
+
+A.1 Additional Scalability Test A.1.1 Scale with different LoRA load. We further eval-uate InfiniLoRA’s performance sensitivity to varying LoRA workload characteristics. Specifically, we sweep the adapter access distribution skewness 𝑠 (fixing the pool size at 512) and the total number of adapters (fixing the skew parameter 
+
+𝑠 = 1.2 ), as shown in Figure 15. We only compared the experi-ments on Mixtral 8x7B model and request rate of 70 req/s; the other configurations were the same as in the end-to-end eval-uation. For scenarios with high locality ( 𝑠 = 1.5 ) or smaller adapter pools (256), we downscale the LoRA Server resources to 4-GPUs following the provisioning policy detailed in Sec-tion 4.2, and we use 8-GPUs for other configurations. The results demonstrate that InfiniLoRA successfully meets SLOs across the majority of configurations. The only exception occurs with a large pool of 1024 adapters. In this regime, we believe that provisioning additional resources to LoRA Server is necessary. Doing so not only recovers SLO attain-ment rate but also enables supporting a larger number of concurrent LLM instances. 10 2        
+
+> 10 1
+> 10 0
+> 10 1
+> 10 2
+> P95 TTFT (s)  SLO (0.25s) SLO (0.25s)
+> 1.1 1.2 1.5
+> LoRA Distribution (Zipf s)
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> SLO Attainment (%)
+> Target (90%)
+> 1024 512 256
+> Num Total LoRAs
+> Target (90%)
+> S-LoRA InfiniLoRA
+
+Figure 15. Scalability under varying LoRA popularity distri-butions and adapter counts. 
+
+A.1.2 Scale with batch size. We evaluate LoRA Server’s processing latency across varying task sizes as shown in Figure 16. Our experimental setup consists of a 4-GPU LoRA Server serving two types of LLM instances: a Mixtral 8x7B model (2 GPUs) or a Scaled MoE model (4 GPUs). We observe that communication latency scales linearly with batch size, as it is strictly bound by the send/receive bandwidth of the LLM instance’s NICs. In contrast, LoRA computation time increases sub-linearly with batch size. This behavior stems from the power-law distribution of LoRA popularity: linearly increasing the batch size does not lead to a proportional rise in the number of distinct LoRA invocations, which is the primary driver of computation latency due to the memory-bound nature of LoRA computation. Consequently, when the number of tokens per iteration reaches 1024 or 4096 (cor-responding to a batch size of 512 for Mixtral 8x7B or 1024 for Scaled MoE), network bandwidth becomes the dominant bottleneck, leaving the LoRA Server’s compute resources un-derutilized. However, such large batch sizes are rarely seen in production due to KV cache capacity constraints and strict TPOT requirements during decoding. Therefore, despite the theoretical hardware underutilization in these extreme sce-narios, InfiniLoRA maintains high efficiency under realistic end-to-end workloads. 32 64 128 256      
+
+> Batch size
+> 0
+> 500
+> 1000
+> Time (  s)
+> 73
+> 120
+> 82
+> 95
+> 137
+> 121
+> 145
+> 142
+> 207
+> 246
+> 204
+> 396
+> Mixtral 8x7B
+> 64 128 256 512
+> Batch size
+> 0
+> 500
+> 1000
+> 1500
+> Time (  s)
+> 101
+> 158
+> 105
+> 144
+> 181
+> 170
+> 233
+> 299
+> 304
+> 407
+> 409
+> 559
+> Scaled MoE
+> Recv LoRA Computation Send Back
+
+Figure 16. Per-iteration latency breakdown on the LoRA Server under varying load. 
+
+A.1.3 Scale with network bandwidth. Finally, we inves-tigate InfiniLoRA’s sensitivity to the underlying interconnect bandwidth and latency. We compare the default inter-node deployment (via InfiniBand) against a collocated deployment where the LoRA Server and LLM instances reside on a single 8-GPU node connected via full-mesh NVLink. We use a total of 256 adapters and fix the request rate at 30 req/s. The LoRA Server is configured with 2 GPUs, while each LLM instance consists of 2 GPUs hosting a Mixtral 8x7B model. We vary the number of LLM instances from 1 to 3. All other settings remain consistent with the end-to-end evaluation. As shown in Figure 17, the NVLink-based configuration benefits significantly from the lower latency and higher band-width of intra-node communication. Compared to the Infini-Band deployment, NVLink reduces average TPOT by 14.6% and improves the SLO attainment rate by up to 46.1% across varying numbers of LLM instances. This confirms that while InfiniLoRA is designed for disaggregated clusters, it can read-ily exploit faster interconnects to further improve serving performance. 1 2 3     
+
+> Num LLM Instances
+> 0.00
+> 0.05
+> 0.10
+> 0.15
+> 0.20
+> 0.25
+> P95 TTFT (s)  SLO (0.25s)
+> 123
+> Num LLM Instances
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> SLO Attainment (%)
+> Target (90%)
+> 123
+> Num LLM Instances
+> 0.00
+> 0.01
+> 0.02
+> 0.03
+> AVG TPOT (s)
+> InfiniBand NVLink
+
+Figure 17. Impact of interconnect bandwidth on In-finiLoRA’s serving performance: NVLink vs. InfiniBand. 
+
+17 Hongyu Chen et al. 
+
+A.2 Microbenmark A.2.1 LoRA data layout. We conduct a microbenchmark to analyze the latency breakdown of LoRA execution un-der different parallelization strategies, as detailed in Table 4. The LoRA Server is deployed on 8 GPUs with four paral-lelism configurations: pipeline parallel ( 𝐸𝑃 1-𝑃𝑃 8), expert par-allel ( 𝐸𝑃 8-𝑃𝑃 1), and two hybrid configurations ( 𝐸𝑃 2-𝑃𝑃 4 and 
+
+𝐸𝑃 4-𝑃𝑃 2) (Data Parallelism is omited for its significant de-fects). Workloads are generated by an LLM instance running the Mixtral 8x7B model at two representative batch sizes. The 𝐸𝑃 1-𝑃𝑃 8 configuration assumes an ideal scenario in which multiple LLM instances are naturally distributed across pipeline stages without interference. However, it fails to achieve optimal performance, primarily due to high LoRA ex-ecution latency and the inherent instability of asynchronous pipelines. For the remaining three configurations involving expert parallelism, communication overhead remains rela-tively constant, as it is bottlenecked by the NIC bandwidth of the LLM instance. The pure expert-parallel setup ( 𝐸𝑃 8-𝑃𝑃 1)exhibits significant diminishing returns: distributing LoRA execution across too many GPUs paradoxically increases both computation and communication latencies. Among the hybrid configurations, 𝐸𝑃 4-𝑃𝑃 2 offers a more favorable trade-off than 𝐸𝑃 2-𝑃𝑃 4. The latter relies heavily on perfect load balancing across a deep pipeline, making it highly susceptible to performance degradation caused by inter-execution interference when multiple LLM instances share the same pipeline stage. In contrast, 𝐸𝑃 4-𝑃𝑃 2 maxi-mizes per-stage processing capability for LoRA execution while using two pipeline stages to sustain throughput and avoid a larger synchronization scope. We empirically vali-date this in Figure 18, where the end-to-end performance comparison confirms the superiority of the 𝐸𝑃 4-𝑃𝑃 2 configu-ration. 
+
+Table 4. Latency breakdown of LoRA execution and base MoE computation under varying parallelism configurations (μs). 
+
+𝐸𝑃 𝑥 -𝑃𝑃 𝑦 
+
+Batch Size = 128 Batch Size = 256 Recv LoRA Send MoE Recv LoRA Send MoE 
+
+𝐸𝑃 1-𝑃𝑃 8 243 342 384 493 527 526 734 762 
+
+𝐸𝑃 2-𝑃𝑃 4 155 212 221 493 279 315 402 764 
+
+𝐸𝑃 4-𝑃𝑃 2 145 142 207 492 246 204 396 763 
+
+𝐸𝑃 8-𝑃𝑃 1 173 163 255 493 310 205 441 763 
+
+A.2.2 LoRA kernels. We evaluate the performance of our proposed LoRA computation kernels against two state-of-the-art baselines, Punica [ 3 ] and S-LoRA [ 31 ], as shown in Figure 19. The workload comprises 512 distinct LoRA adapters with a batch size of 1024, where LoRA invocation probability follows a Zipf distribution ( 𝑠 = 1.2). Overall, InfiniLoRA’s kernels demonstrate significant ad-vantages over the baselines in both latency and GPU memory 10 20 30 40 50 60 70 80                 
+
+> Request Rate
+> 10 1
+> 10 0
+> P95 TTFT (s)  SLO (0.25s)
+> 10 20 30 40 50 60 70 80
+> Request Rate
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> SLO Attainment (%)
+> Target (90%)
+> 10 20 30 40 50 60 70 80
+> Request Rate
+> 0.05
+> 0.10
+> 0.15
+> 0.20
+> 0.25
+> 0.30
+> 0.35
+> 0.40
+> Avg TPOT (s)  SLO (0.1s)
+> EP2-PP4 EP4-PP2
+
+Figure 18. End-to-end performance comparison of two LoRA data layouts ( 𝐸𝑃 2-𝑃𝑃 4 and 𝐸𝑃 4-𝑃𝑃 2) under the same LoRA cache capacity. bandwidth utilization. Specifically, InfiniLoRA-BGMV excels during the shrink phase but exhibits performance degrada-tion in the expand phase, primarily due to the larger volume of data written back in the latter. In contrast, InfiniLoRA-SGMV maintains consistent performance across both phases. Furthermore, InfiniLoRA-SGMV achieves lower latency than InfiniLoRA-BGMV by aggregating tokens that share the same LoRA adapter into a single GEMM operation, thereby reduc-ing memory bandwidth consumption effectively. 1k 2k 4k 8k 16k        
+
+> Feature In
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> 1.2
+> 1.4
+> Latency (ms)
+> Shrink Phase
+> 1k 2k 4k 8k 16k
+> Feature Out
+> Expand Phase
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> 2.5
+> 3.0
+> 3.5
+> 4.0
+> Bandwidth (TB/s)
+> InfiniLoRA-BGMV InfiniLoRA-SGMV S-LoRA-BGMV Punica-SGMV
+
+Figure 19. Characterization of latency and bandwidth for distinct LoRA kernels across shrink/expand phases. Dashed lines represent bandwidth and solid lines indicate latency. 
+
+18
