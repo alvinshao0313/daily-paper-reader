@@ -6,304 +6,232 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-16
-- 运行时间：2026-04-16 20:50:54 UTC
+- 最新运行日期：2026-04-17
+- 运行时间：2026-04-17 20:44:32 UTC
 - 运行状态：成功
-- 本次总论文数：94
-- 精读区：82
+- 本次总论文数：70
+- 精读区：58
 - 速读区：12
 
 ### 今日简报（AI）
-今日深度解析 94 篇 AI 论文，重点聚焦 LLM 智能体推理优化与混合二进制专家模型（MoBiE）的效能突破。
-“先选择后解决”的范式路由显著提升了智能体复杂任务处理能力，而二进制专家模型则在量化推理上实现了性能飞跃。
-建议关注大模型在遥感应用及内存高效优化（SAGE）方面的跨界融合，把握模型轻量化与智能化的新趋势。
-- 详情：[/202604/16/README](/202604/16/README)
+今日深度解析 70 篇 AI 论文，聚焦具备长期记忆的主动型智能体与长视频高效压缩技术。
+PASK 框架通过意图感知重塑智能体交互，而小型视觉语言模型正成为长视频理解的关键“压缩器”。
+建议关注智能体在医疗推理与多模态协作中的能力演进，探索更具个性化与主动性的 AI 助手应用。
+- 详情：[/202604/17/README](/202604/17/README)
 
 ### 精读区论文标签
-1. [Select-then-Solve: Paradigm Routing as Inference-Time Optimization for LLM Agents](/202604/16/2604.06753v1-select-then-solve-paradigm-routing-as-inference-time-optimization-for-llm-agents)  
+1. [PASK: Toward Intent-Aware Proactive Agents with Long-Term Memory](/202604/17/2604.08000v1-pask-toward-intent-aware-proactive-agents-with-long-term-memory)  
    标签：评分：10.0/10、query:llm-agent
-   evidence：比较了 ReAct、反思和规划执行等推理范式
-2. [MoBiE: Efficient Inference of Mixture of Binary Experts under Post-Training Quantization](/202604/16/2604.06798v2-mobie-efficient-inference-of-mixture-of-binary-experts-under-post-training-quantization)  
+   evidence：具有长期记忆和任务执行能力的主动智能体
+2. [Small Vision-Language Models are Smart Compressors for Long Video Understanding](/202604/17/2604.08120v1-small-vision-language-models-are-smart-compressors-for-long-video-understanding)  
    标签：评分：10.0/10、query:model-compression
-   evidence：训练后量化下基于MoE的LLM二值化框架
-3. [MoBiE: Efficient Inference of Mixture of Binary Experts under Post-Training Quantization](/202604/16/2604.06798v3-mobie-efficient-inference-of-mixture-of-binary-experts-under-post-training-quantization)  
+   evidence：用于压缩多模态大模型中长视频表示的跨模态蒸馏技术。
+3. ["Theater of Mind" for LLMs: A Cognitive Architecture Based on Global Workspace Theory](/202604/17/2604.08206v1-theater-of-mind-for-llms-a-cognitive-architecture-based-on-global-workspace-theory)  
+   标签：评分：10.0/10、query:llm-agent
+   evidence：针对自主智能体的认知架构，解决记忆和多智能体停滞问题
+4. [Dissecting Bug Triggers and Failure Modes in Modern Agentic Frameworks: An Empirical Study](/202604/17/2604.08906v1-dissecting-bug-triggers-and-failure-modes-in-modern-agentic-frameworks-an-empirical-study)  
+   标签：评分：10.0/10、query:llm-agent
+   evidence：对多智能体框架中错误和故障模式的实证研究
+5. [Three Roles, One Model: Role Orchestration at Inference Time to Close the Performance Gap Between Small and Large Agents](/202604/17/2604.11465v2-three-roles-one-model-role-orchestration-at-inference-time-to-close-the-performance-gap-between-small-and-large-agents)  
+   标签：评分：10.0/10、query:llm-agent
+   evidence：利用推理时脚手架和量化技术提升LLM智能体在工具使用任务中的表现
+6. [Context Kubernetes: Declarative Orchestration of Enterprise Knowledge for Agentic AI Systems](/202604/17/2604.11623v1-context-kubernetes-declarative-orchestration-of-enterprise-knowledge-for-agentic-ai-systems)  
+   标签：评分：10.0/10、query:llm-agent
+   evidence：为智能体AI系统编排企业知识
+7. [Agentic Aggregation for Parallel Scaling of Long-Horizon Agentic Tasks](/202604/17/2604.11753v1-agentic-aggregation-for-parallel-scaling-of-long-horizon-agentic-tasks)  
+   标签：评分：10.0/10、query:llm-agent
+   evidence：长程智能体任务的并行扩展及工具增强轨迹聚合
+8. [APEX-MEM: Agentic Semi-Structured Memory with Temporal Reasoning for Long-Term Conversational AI](/202604/17/2604.14362v1-apex-mem-agentic-semi-structured-memory-with-temporal-reasoning-for-long-term-conversational-ai)  
+   标签：评分：10.0/10、query:llm-agent
+   evidence：具有时间推理和多工具检索的智能体半结构化记忆
+9. [Coalition Formation in LLM Agent Networks: Stability Analysis and Convergence Guarantees](/202604/17/2604.14386v1-coalition-formation-in-llm-agent-networks-stability-analysis-and-convergence-guarantees)  
+   标签：评分：10.0/10、query:llm-agent
+   evidence：LLM智能体网络中的联盟形成及稳定性分析
+10. [SpaceMind: A Modular and Self-Evolving Embodied Vision-Language Agent Framework for Autonomous On-orbit Servicing](/202604/17/2604.14399v1-spacemind-a-modular-and-self-evolving-embodied-vision-language-agent-framework-for-autonomous-on-orbit-servicing)  
+   标签：评分：10.0/10、query:llm-agent
+   evidence：用于推理、工具使用和任务执行的VLM智能体框架
+11. [El Agente Forjador: Task-Driven Agent Generation for Quantum Simulation](/202604/17/2604.14609v1-el-agente-forjador-task-driven-agent-generation-for-quantum-simulation)  
+   标签：评分：10.0/10、query:llm-agent
+   evidence：用于工具生成、任务执行和评估的多智能体框架
+12. [Switch-KD: Visual-Switch Knowledge Distillation for Vision-Language Models](/202604/17/2604.14629v1-switch-kd-visual-switch-knowledge-distillation-for-vision-language-models)  
    标签：评分：10.0/10、query:model-compression
-   evidence：针对MoE架构大语言模型的训练后量化与二值化
-4. [EmoMAS: Emotion-Aware Multi-Agent System for High-Stakes Edge-Deployable Negotiation with Bayesian Orchestration](/202604/16/2604.07003v1-emomas-emotion-aware-multi-agent-system-for-high-stakes-edge-deployable-negotiation-with-bayesian-orchestration)  
+   evidence：视觉语言模型的知识蒸馏以提高效率
+13. [SWE-TRACE: Optimizing Long-Horizon SWE Agents Through Rubric Process Reward Models and Heuristic Test-Time Scaling](/202604/17/2604.14820v1-swe-trace-optimizing-long-horizon-swe-agents-through-rubric-process-reward-models-and-heuristic-test-time-scaling)  
    标签：评分：10.0/10、query:llm-agent
-   evidence：基于LLM和SLM的贝叶斯多智能体自动谈判框架
-5. [RoboAgent: Chaining Basic Capabilities for Embodied Task Planning](/202604/16/2604.07774v1-roboagent-chaining-basic-capabilities-for-embodied-task-planning)  
+   evidence：通过智能体准则评估优化长周期软件工程智能体
+14. [Does RL Expand the Capability Boundary of LLM Agents? A PASS@(k,T) Analysis](/202604/17/2604.14877v1-does-rl-expand-the-capability-boundary-of-llm-agents-a-passkt-analysis)  
    标签：评分：10.0/10、query:llm-agent
-   evidence：基于视觉语言模型的具身任务规划与多轮交互智能体
-6. [Networking-Aware Energy Efficiency in Agentic AI Inference: A Survey](/202604/16/2604.07857v1-networking-aware-energy-efficiency-in-agentic-ai-inference-a-survey)  
+   evidence：强化学习用于智能体工具调用及能力扩展
+15. [IE as Cache: Information Extraction Enhanced Agentic Reasoning](/202604/17/2604.14930v1-ie-as-cache-information-extraction-enhanced-agentic-reasoning)  
    标签：评分：10.0/10、query:llm-agent
-   evidence：关于集成感知、推理和行动的智能体AI闭环管线的综述
-7. [PASK: Toward Intent-Aware Proactive Agents with Long-Term Memory](/202604/16/2604.08000v1-pask-toward-intent-aware-proactive-agents-with-long-term-memory)  
+   evidence：将信息抽取作为认知缓存以增强智能体推理
+16. [RaTA-Tool: Retrieval-based Tool Selection with Multimodal Large Language Models](/202604/17/2604.14951v1-rata-tool-retrieval-based-tool-selection-with-multimodal-large-language-models)  
    标签：评分：10.0/10、query:llm-agent
-   evidence：具有长期记忆建模的主动式 AI 智能体系统
-8. [Small Vision-Language Models are Smart Compressors for Long Video Understanding](/202604/16/2604.08120v1-small-vision-language-models-are-smart-compressors-for-long-video-understanding)  
+   evidence：多模态大模型智能体的工具选择与调用
+17. [Dr.~RTL: Autonomous Agentic RTL Optimization through Tool-Grounded Self-Improvement](/202604/17/2604.14989v1-drrtl-autonomous-agentic-rtl-optimization-through-tool-grounded-self-improvement)  
+   标签：评分：10.0/10、query:llm-agent
+   evidence：具有工具落地自改进能力的 RTL 优化智能体框架
+18. [Autogenesis: A Self-Evolving Agent Protocol](/202604/17/2604.15034v1-autogenesis-a-self-evolving-agent-protocol)  
+   标签：评分：10.0/10、query:llm-agent
+   evidence：将提示、智能体、工具、环境和记忆建模为资源的智能体协议
+19. [Autonomous Evolution of EDA Tools: Multi-Agent Self-Evolved ABC](/202604/17/2604.15082v1-autonomous-evolution-of-eda-tools-multi-agent-self-evolved-abc)  
+   标签：评分：10.0/10、query:llm-agent
+   evidence：利用LLM智能体的多智能体自我演化框架
+20. [Compressing Sequences in the Latent Embedding Space: $K$-Token Merging for Large Language Models](/202604/17/2604.15153v1-compressing-sequences-in-the-latent-embedding-space-k-token-merging-for-large-language-models)  
    标签：评分：10.0/10、query:model-compression
-   evidence：通过蒸馏实现多模态大模型的长视频理解压缩
-9. ["Theater of Mind" for LLMs: A Cognitive Architecture Based on Global Workspace Theory](/202604/16/2604.08206v1-theater-of-mind-for-llms-a-cognitive-architecture-based-on-global-workspace-theory)  
-   标签：评分：10.0/10、query:llm-agent
-   evidence：具备记忆与执行能力的自主智能体认知架构
-10. [Externalization in LLM Agents: A Unified Review of Memory, Skills, Protocols and Harness Engineering](/202604/16/2604.08224v1-externalization-in-llm-agents-a-unified-review-of-memory-skills-protocols-and-harness-engineering)  
-   标签：评分：10.0/10、query:llm-agent
-   evidence：综述大模型智能体基础设施，包括记忆、技能和协议
-11. [Dissecting Bug Triggers and Failure Modes in Modern Agentic Frameworks: An Empirical Study](/202604/16/2604.08906v1-dissecting-bug-triggers-and-failure-modes-in-modern-agentic-frameworks-an-empirical-study)  
-   标签：评分：10.0/10、query:llm-agent
-   evidence：现代智能体框架中 Bug 的实证研究
-12. [SEA-Eval: A Benchmark for Evaluating Self-Evolving Agents Beyond Episodic Assessment](/202604/16/2604.08988v1-sea-eval-a-benchmark-for-evaluating-self-evolving-agents-beyond-episodic-assessment)  
-   标签：评分：10.0/10、query:llm-agent
-   evidence：评估超越回合制执行的自进化大模型智能体的基准
-13. [UIPress: Bringing Optical Token Compression to UI-to-Code Generation](/202604/16/2604.09442v1-uipress-bringing-optical-token-compression-to-ui-to-code-generation)  
+   evidence：大语言模型的潜空间标记压缩框架
+21. [VisPCO: Visual Token Pruning Configuration Optimization via Budget-Aware Pareto-Frontier Learning for Vision-Language Models](/202604/17/2604.15188v1-vispco-visual-token-pruning-configuration-optimization-via-budget-aware-pareto-frontier-learning-for-vision-language-models)  
    标签：评分：10.0/10、query:model-compression
-   evidence：视觉语言模型 (VLM) 的光学标记压缩
-14. [Agentic Workflows for Resolving Conflict Over Shared Resources: A Power Grid Application](/202604/16/2604.09823v1-agentic-workflows-for-resolving-conflict-over-shared-resources-a-power-grid-application)  
+   evidence：针对视觉语言模型（VLM）的视觉Token剪枝
+22. [RadAgent: A tool-using AI agent for stepwise interpretation of chest computed tomography](/202604/17/2604.15231v1-radagent-a-tool-using-ai-agent-for-stepwise-interpretation-of-chest-computed-tomography)  
    标签：评分：10.0/10、query:llm-agent
-   evidence：协调多个基于大语言模型智能体的冲突解决框架
-15. [ABot-Claw: A Foundation for Persistent, Cooperative, and Self-Evolving Robotic Agents](/202604/16/2604.10096v1-abot-claw-a-foundation-for-persistent-cooperative-and-self-evolving-robotic-agents)  
-   标签：评分：10.0/10、query:llm-agent
-   evidence：具有规划和工具调用能力的协作机器人智能体
-16. [From Query to Counsel: Structured Reasoning with a Multi-Agent Framework and Dataset for Legal Consultation](/202604/16/2604.10470v1-from-query-to-counsel-structured-reasoning-with-a-multi-agent-framework-and-dataset-for-legal-consultation)  
-   标签：评分：10.0/10、query:llm-agent
-   evidence：用于法律咨询的模块化多智能体框架
-17. [Mem$^2$Evolve: Towards Self-Evolving Agents via Co-Evolutionary Capability Expansion and Experience Distillation](/202604/16/2604.10923v1-mem2evolve-towards-self-evolving-agents-via-co-evolutionary-capability-expansion-and-experience-distillation)  
-   标签：评分：10.0/10、query:llm-agent
-   evidence：通过能力扩展和经验蒸馏实现的自进化智能体
-18. [Escaping the Context Bottleneck: Active Context Curation for LLM Agents via Reinforcement Learning](/202604/16/2604.11462v1-escaping-the-context-bottleneck-active-context-curation-for-llm-agents-via-reinforcement-learning)  
-   标签：评分：10.0/10、query:llm-agent
-   evidence：LLM智能体的自动上下文管理与记忆维护
-19. [Agentic Aggregation for Parallel Scaling of Long-Horizon Agentic Tasks](/202604/16/2604.11753v1-agentic-aggregation-for-parallel-scaling-of-long-horizon-agentic-tasks)  
-   标签：评分：10.0/10、query:llm-agent
-   evidence：用于长程工具增强智能体任务并行扩展的聚合智能体
-20. [M2HRI: An LLM-Driven Multimodal Multi-Agent Framework for Personalized Human-Robot Interaction](/202604/16/2604.11975v1-m2hri-an-llm-driven-multimodal-multi-agent-framework-for-personalized-human-robot-interaction)  
-   标签：评分：10.0/10、query:llm-agent
-   evidence：具有长期记忆的人机交互多模态多智能体框架
-21. [CLASP: Class-Adaptive Layer Fusion and Dual-Stage Pruning for Multimodal Large Language Models](/202604/16/2604.12767v1-clasp-class-adaptive-layer-fusion-and-dual-stage-pruning-for-multimodal-large-language-models)  
-   标签：评分：10.0/10、query:model-compression
-   evidence：多模态大语言模型（MLLM）的双阶段剪枝
-22. [AgentForge: Execution-Grounded Multi-Agent LLM Framework for Autonomous Software Engineering](/202604/16/2604.13120v1-agentforge-execution-grounded-multi-agent-llm-framework-for-autonomous-software-engineering)  
-   标签：评分：10.0/10、query:llm-agent
-   evidence：具有共享记忆的软件工程多智能体LLM框架
-23. [MOONSHOT : A Framework for Multi-Objective Pruning of Vision and Large Language Models](/202604/16/2604.13287v1-moonshot--a-framework-for-multi-objective-pruning-of-vision-and-large-language-models)  
-   标签：评分：10.0/10、query:model-compression
-   evidence：针对视觉和语言大模型的多目标剪枝框架
-24. [Cross-Domain Query Translation for Network Troubleshooting: A Multi-Agent LLM Framework with Privacy Preservation and Self-Reflection](/202604/16/2604.13353v1-cross-domain-query-translation-for-network-troubleshooting-a-multi-agent-llm-framework-with-privacy-preservation-and-self-reflection)  
-   标签：评分：10.0/10、query:llm-agent
-   evidence：具有反思推理能力的多智能体大语言模型框架
-25. [AudioKV: KV Cache Eviction in Efficient Large Audio Language Models](/202604/16/2604.06694v1-audiokv-kv-cache-eviction-in-efficient-large-audio-language-models)  
+   evidence：用于CT逐步解释的工具调用AI智能体
+23. [Many-Tier Instruction Hierarchy in LLM Agents](/202604/17/2604.09443v2-many-tier-instruction-hierarchy-in-llm-agents)  
+   标签：评分：9.0/10、query:llm-agent
+   evidence：LLM智能体及多智能体环境下的指令层级管理
+24. [Many-Tier Instruction Hierarchy in LLM Agents](/202604/17/2604.09443v3-many-tier-instruction-hierarchy-in-llm-agents)  
+   标签：评分：9.0/10、query:llm-agent
+   evidence：LLM智能体中的指令层级与冲突解决
+25. [Tango: Taming Visual Signals for Efficient Video Large Language Models](/202604/17/2604.09547v1-tango-taming-visual-signals-for-efficient-video-large-language-models)  
    标签：评分：9.0/10、query:model-compression
-   evidence：大语言音频模型的KV缓存压缩
-26. [Fast-dVLM: Efficient Block-Diffusion VLM via Direct Conversion from Autoregressive VLM](/202604/16/2604.06832v2-fast-dvlm-efficient-block-diffusion-vlm-via-direct-conversion-from-autoregressive-vlm)  
+   evidence：高效视频大语言模型的 Token 剪枝
+26. [ADAM: A Systematic Data Extraction Attack on Agent Memory via Adaptive Querying](/202604/17/2604.09747v1-adam-a-systematic-data-extraction-attack-on-agent-memory-via-adaptive-querying)  
+   标签：评分：9.0/10、query:llm-agent
+   evidence：针对LLM智能体记忆模块的数据提取攻击
+27. [Self-Distilled Reinforcement Learning for Co-Evolving Agentic Recommender Systems](/202604/17/2604.10029v1-self-distilled-reinforcement-learning-for-co-evolving-agentic-recommender-systems)  
+   标签：评分：9.0/10、query:llm-agent
+   evidence：使用文本记忆和迭代推理的智能体推荐系统
+28. [ABot-Claw: A Foundation for Persistent, Cooperative, and Self-Evolving Robotic Agents](/202604/17/2604.10096v1-abot-claw-a-foundation-for-persistent-cooperative-and-self-evolving-robotic-agents)  
+   标签：评分：9.0/10、query:llm-agent
+   evidence：协作式及多机器人执行智能体的基础架构
+29. [CodeComp: Structural KV Cache Compression for Agentic Coding](/202604/17/2604.10235v1-codecomp-structural-kv-cache-compression-for-agentic-coding)  
    标签：评分：9.0/10、query:model-compression
-   evidence：通过块扩散转换实现高效视觉语言模型部署
-27. [FedDetox: Robust Federated SLM Alignment via On-Device Data Sanitization](/202604/16/2604.06833v1-feddetox-robust-federated-slm-alignment-via-on-device-data-sanitization)  
+   evidence：针对智能体编程任务的KV缓存压缩技术
+30. [Agent^2 RL-Bench: Can LLM Agents Engineer Agentic RL Post-Training?](/202604/17/2604.10547v1-agent2-rl-bench-can-llm-agents-engineer-agentic-rl-post-training)  
+   标签：评分：9.0/10、query:llm-agent
+   evidence：LLM 智能体自主设计并运行强化学习流水线
+31. [OccuBench: Evaluating AI Agents on Real-World Professional Tasks via Language Environment Simulation](/202604/17/2604.10866v2-occubench-evaluating-ai-agents-on-real-world-professional-tasks-via-language-environment-simulation)  
+   标签：评分：9.0/10、query:llm-agent
+   evidence：通过模拟评估AI智能体在现实任务中的表现
+32. [MMR-AD: A Large-Scale Multimodal Dataset for Benchmarking General Anomaly Detection with Multimodal Large Language Models](/202604/17/2604.10971v1-mmr-ad-a-large-scale-multimodal-dataset-for-benchmarking-general-anomaly-detection-with-multimodal-large-language-models)  
    标签：评分：9.0/10、query:model-compression
-   evidence：用于小语言模型安全对齐的知识蒸馏
-28. [STQuant: Spatio-Temporal Adaptive Framework for Optimizer Quantization in Large Multimodal Model Training](/202604/16/2604.06836v2-stquant-spatio-temporal-adaptive-framework-for-optimizer-quantization-in-large-multimodal-model-training)  
+   evidence：使用多模态大语言模型（MLLM）进行通用异常检测的基准测试
+33. [Semantic-Geometric Dual Compression: Training-Free Visual Token Reduction for Ultra-High-Resolution Remote Sensing Understanding](/202604/17/2604.11122v1-semantic-geometric-dual-compression-training-free-visual-token-reduction-for-ultra-high-resolution-remote-sensing-understanding)  
    标签：评分：9.0/10、query:model-compression
-   evidence：大语言多模态模型训练中的优化器量化自适应框架
-29. [AV-SQL: Decomposing Complex Text-to-SQL Queries with Agentic Views](/202604/16/2604.07041v1-av-sql-decomposing-complex-text-to-sql-queries-with-agentic-views)  
+   evidence：多模态大模型的视觉Token减少与压缩
+34. [CocoaBench: Evaluating Unified Digital Agents in the Wild](/202604/17/2604.11201v2-cocoabench-evaluating-unified-digital-agents-in-the-wild)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：用于Text-to-SQL规划与推理的智能体框架
-30. [Trust-as-a-Service: Task-Specific Orchestration for Effective Task Completion via Model Context Protocol-Aided Agentic AI](/202604/16/2604.07065v1-trust-as-a-service-task-specific-orchestration-for-effective-task-completion-via-model-context-protocol-aided-agentic-ai)  
+   evidence：结合视觉、搜索和编码能力的统一数字智能体基准测试
+35. [SemaClaw: A Step Towards General-Purpose Personal AI Agents through Harness Engineering](/202604/17/2604.11548v1-semaclaw-a-step-towards-general-purpose-personal-ai-agents-through-harness-engineering)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：智能体AI中的任务特定编排与协作执行
-31. [A Physical Agentic Loop for Language-Guided Grasping with Execution-State Monitoring](/202604/16/2604.07395v1-a-physical-agentic-loop-for-language-guided-grasping-with-execution-state-monitoring)  
+   evidence：通用个人AI智能体和智能体AI工程的基础设施
+36. [Context Kubernetes: Declarative Orchestration of Enterprise Knowledge for Agentic AI Systems](/202604/17/2604.11623v3-context-kubernetes-declarative-orchestration-of-enterprise-knowledge-for-agentic-ai-systems)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：具备执行监控的具身智能体物理代理环路
-32. [Beyond Human-Readable: Rethinking Software Engineering Conventions for the Agentic Development Era](/202604/16/2604.07502v1-beyond-human-readable-rethinking-software-engineering-conventions-for-the-agentic-development-era)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：智能体AI开发与基于大语言模型的智能体
-33. [From LLM to Silicon: RL-Driven ASIC Architecture Exploration for On-Device AI Inference](/202604/16/2604.07526v1-from-llm-to-silicon-rl-driven-asic-architecture-exploration-for-on-device-ai-inference)  
+   evidence：为智能体AI系统编排企业知识
+37. [POINTS-Long: Adaptive Dual-Mode Visual Reasoning in MLLMs](/202604/17/2604.11627v1-points-long-adaptive-dual-mode-visual-reasoning-in-mllms)  
    标签：评分：9.0/10、query:model-compression
-   evidence：大语言模型与视觉语言模型在专用集成电路上的高效部署与推理加速
-34. [ORACLE-SWE: Quantifying the Contribution of Oracle Information Signals on SWE Agents](/202604/16/2604.07789v1-oracle-swe-quantifying-the-contribution-of-oracle-information-signals-on-swe-agents)  
+   evidence：具有动态视觉标记缩放的原生双模式多模态大模型
+38. [WebAgentGuard: A Reasoning-Driven Guard Model for Detecting Prompt Injection Attacks in Web Agents](/202604/17/2604.12284v1-webagentguard-a-reasoning-driven-guard-model-for-detecting-prompt-injection-attacks-in-web-agents)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：量化信息信号对软件工程智能体的贡献
-35. [Harnessing Embodied Agents: Runtime Governance for Policy-Constrained Execution](/202604/16/2604.07833v1-harnessing-embodied-agents-runtime-governance-for-policy-constrained-execution)  
+   evidence：用于检测 Web 智能体提示注入攻击的推理驱动防御模型
+39. [Agentic Insight Generation in VSM Simulations](/202604/17/2604.12421v1-agentic-insight-generation-in-vsm-simulations)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：具身智能体策略约束执行的运行时治理框架
-36. [Harnessing Embodied Agents: Runtime Governance for Policy-Constrained Execution](/202604/16/2604.07833v2-harnessing-embodied-agents-runtime-governance-for-policy-constrained-execution)  
+   evidence：用于多跳推理的智能体架构
+40. [Parallax: Why AI Agents That Think Must Never Act](/202604/17/2604.12986v1-parallax-why-ai-agents-that-think-must-never-act)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：具身智能体策略约束执行的运行时治理
-37. [Don't Overthink It: Inter-Rollout Action Agreement as a Free Adaptive-Compute Signal for LLM Agents](/202604/16/2604.08369v1-dont-overthink-it-inter-rollout-action-agreement-as-a-free-adaptive-compute-signal-for-llm-agents)  
+   evidence：具备执行能力的自主AI智能体安全范式
+41. [Towards Scalable Lightweight GUI Agents via Multi-role Orchestration](/202604/17/2604.13488v1-towards-scalable-lightweight-gui-agents-via-multi-role-orchestration)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：大语言模型智能体的自适应计算缩放以提高可靠性
-38. [Verify Before You Commit: Towards Faithful Reasoning in LLM Agents via Self-Auditing](/202604/16/2604.08401v1-verify-before-you-commit-towards-faithful-reasoning-in-llm-agents-via-self-auditing)  
+   evidence：通过多角色编排实现轻量级GUI智能体
+42. [Evolvable Embodied Agent for Robotic Manipulation via Long Short-Term Reflection and Optimization](/202604/17/2604.13533v1-evolvable-embodied-agent-for-robotic-manipulation-via-long-short-term-reflection-and-optimization)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：通过自我审计实现 LLM 智能体的忠实推理
-39. [OpenKedge: Governing Agentic Mutation with Execution-Bound Safety and Evidence Chains](/202604/16/2604.08601v1-openkedge-governing-agentic-mutation-with-execution-bound-safety-and-evidence-chains)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：通过执行绑定安全机制治理自主AI智能体
-40. [Every Response Counts: Quantifying Uncertainty of LLM-based Multi-Agent Systems through Tensor Decomposition](/202604/16/2604.08708v1-every-response-counts-quantifying-uncertainty-of-llm-based-multi-agent-systems-through-tensor-decomposition)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：量化基于大模型的多智能体系统（MAS）的不确定性
-41. [Litmus (Re)Agent: A Benchmark and Agentic System for Predictive Evaluation of Multilingual Models](/202604/16/2604.08970v1-litmus-reagent-a-benchmark-and-agentic-system-for-predictive-evaluation-of-multilingual-models)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：用于多语言模型预测性评估的DAG编排智能体系统
-42. [SAGE: A Service Agent Graph-guided Evaluation Benchmark](/202604/16/2604.09285v1-sage-a-service-agent-graph-guided-evaluation-benchmark)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：用于服务智能体评估和逻辑合规性的多智能体基准测试
-43. [SkillMOO: Multi-Objective Optimization of Agent Skills for Software Engineering](/202604/16/2604.09297v1-skillmoo-multi-objective-optimization-of-agent-skills-for-software-engineering)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：利用求解和优化智能体优化软件工程中的智能体技能
-44. [Many-Tier Instruction Hierarchy in LLM Agents](/202604/16/2604.09443v1-many-tier-instruction-hierarchy-in-llm-agents)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：现实场景下LLM智能体的指令层级管理
-45. [Many-Tier Instruction Hierarchy in LLM Agents](/202604/16/2604.09443v2-many-tier-instruction-hierarchy-in-llm-agents)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：解决大语言模型智能体指令冲突的指令层级
-46. [Many-Tier Instruction Hierarchy in LLM Agents](/202604/16/2604.09443v3-many-tier-instruction-hierarchy-in-llm-agents)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：解决大模型智能体指令冲突的指令层级体系
-47. [Tango: Taming Visual Signals for Efficient Video Large Language Models](/202604/16/2604.09547v2-tango-taming-visual-signals-for-efficient-video-large-language-models)  
+   evidence：包含经验反思的智能体框架
+43. [UHR-BAT: Budget-Aware Token Compression Vision-Language model for Ultra-High-Resolution Remote Sensing](/202604/17/2604.13565v1-uhr-bat-budget-aware-token-compression-vision-language-model-for-ultra-high-resolution-remote-sensing)  
    标签：评分：9.0/10、query:model-compression
-   evidence：用于高效视频大语言模型的Token剪枝
-48. [Agentic Compilation: Mitigating the LLM Rerun Crisis for Minimized-Inference-Cost Web Automation](/202604/16/2604.09718v1-agentic-compilation-mitigating-the-llm-rerun-crisis-for-minimized-inference-cost-web-automation)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：用于网页自动化和降低任务执行成本的智能体框架
-49. [Text-Guided 6D Object Pose Rearrangement via Closed-Loop VLM Agents](/202604/16/2604.09781v1-text-guided-6d-object-pose-rearrangement-via-closed-loop-vlm-agents)  
+   evidence：用于提高效率的视觉语言模型Token压缩
+44. [SLQ: Bridging Modalities via Shared Latent Queries for Retrieval with Frozen MLLMs](/202604/17/2604.13710v1-slq-bridging-modalities-via-shared-latent-queries-for-retrieval-with-frozen-mllms)  
    标签：评分：9.0/10、query:model-compression
-   evidence：用于 3D 视觉推理和物体重新排列的闭环 VLM 智能体
-50. [Toward Explanatory Equilibrium: Verifiable Reasoning as a Coordination Mechanism under Asymmetric Information](/202604/16/2604.09917v1-toward-explanatory-equilibrium-verifiable-reasoning-as-a-coordination-mechanism-under-asymmetric-information)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：可验证推理作为多智能体系统中的协作机制
-51. [Self-Distilled Reinforcement Learning for Co-Evolving Agentic Recommender Systems](/202604/16/2604.10029v1-self-distilled-reinforcement-learning-for-co-evolving-agentic-recommender-systems)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：具有多轮交互和文本记忆的智能体推荐系统
-52. [Adapting 2D Multi-Modal Large Language Model for 3D CT Image Analysis](/202604/16/2604.10233v1-adapting-2d-multi-modal-large-language-model-for-3d-ct-image-analysis)  
+   evidence：将冻结的多模态大语言模型（MLLM）适配于检索任务
+45. [One Token per Highly Selective Frame: Towards Extreme Compression for Long Video Understanding](/202604/17/2604.14149v2-one-token-per-highly-selective-frame-towards-extreme-compression-for-long-video-understanding)  
    标签：评分：9.0/10、query:model-compression
-   evidence：适配2D多模态大语言模型 (MLLM)
-53. [CodeComp: Structural KV Cache Compression for Agentic Coding](/202604/16/2604.10235v1-codecomp-structural-kv-cache-compression-for-agentic-coding)  
-   标签：评分：9.0/10、query:model-compression
-   evidence：针对智能体编程任务的 KV 缓存压缩
-54. [CodeQuant: Unified Clustering and Quantization for Enhanced Outlier Smoothing in Low-Precision Mixture-of-Experts](/202604/16/2604.10496v1-codequant-unified-clustering-and-quantization-for-enhanced-outlier-smoothing-in-low-precision-mixture-of-experts)  
-   标签：评分：9.0/10、query:model-compression
-   evidence：大语言模型与混合专家模型的训练后量化
-55. [Agent^2 RL-Bench: Can LLM Agents Engineer Agentic RL Post-Training?](/202604/16/2604.10547v1-agent2-rl-bench-can-llm-agents-engineer-agentic-rl-post-training)  
+   evidence：针对视觉语言模型（VLM）的极度视频标记压缩技术
+46. [Dive into Claude Code: The Design Space of Today's and Future AI Agent Systems](/202604/17/2604.14228v1-dive-into-claude-code-the-design-space-of-todays-and-future-ai-agent-systems)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：LLM智能体自主设计强化学习流水线以实现模型对齐
-56. [OccuBench: Evaluating AI Agents on Real-World Professional Tasks via Language World Models](/202604/16/2604.10866v1-occubench-evaluating-ai-agents-on-real-world-professional-tasks-via-language-world-models)  
+   evidence：智能体编码工具架构与设计原则分析
+47. [Enhancing LLM-based Search Agents via Contribution Weighted Group Relative Policy Optimization](/202604/17/2604.14267v1-enhancing-llm-based-search-agents-via-contribution-weighted-group-relative-policy-optimization)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：使用多智能体合成技术评估AI智能体在现实任务中的表现的基准
-57. [Semantic-Geometric Dual Compression: Training-Free Visual Token Reduction for Ultra-High-Resolution Remote Sensing Understanding](/202604/16/2604.11122v1-semantic-geometric-dual-compression-training-free-visual-token-reduction-for-ultra-high-resolution-remote-sensing-understanding)  
-   标签：评分：9.0/10、query:model-compression
-   evidence：针对多模态大模型和超高分辨率图像的免训练视觉标记缩减技术
-58. [CocoaBench: Evaluating Unified Digital Agents in the Wild](/202604/16/2604.11201v2-cocoabench-evaluating-unified-digital-agents-in-the-wild)  
+   evidence：通过强化学习和过程监督增强基于大语言模型的搜索智能体
+48. [Credo: Declarative Control of LLM Pipelines via Beliefs and Policies](/202604/17/2604.14401v1-credo-declarative-control-of-llm-pipelines-via-beliefs-and-policies)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：结合视觉、搜索和代码能力的统一数字智能体评估基准
-59. [Evaluating LLM Agents on Automated Software Analysis Tasks](/202604/16/2604.11270v1-evaluating-llm-agents-on-automated-software-analysis-tasks)  
+   evidence：通过信念和策略对智能体AI系统进行声明式控制
+49. [Demonstration of Pneuma-Seeker: Agentic System for Reifying and Fulfilling Information Needs on Tabular Data](/202604/17/2604.14422v1-demonstration-of-pneuma-seeker-agentic-system-for-reifying-and-fulfilling-information-needs-on-tabular-data)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：针对大语言模型智能体在自动化软件分析和工具配置方面的基准测试
-60. [METRO: Towards Strategy Induction from Expert Dialogue Transcripts for Non-collaborative Dialogues](/202604/16/2604.11427v2-metro-towards-strategy-induction-from-expert-dialogue-transcripts-for-non-collaborative-dialogues)  
+   evidence：用于分析协作的智能体系统
+50. [Don't Retrieve, Navigate: Distilling Enterprise Knowledge into Navigable Agent Skills for QA and RAG](/202604/17/2604.14572v1-dont-retrieve-navigate-distilling-enterprise-knowledge-into-navigable-agent-skills-for-qa-and-rag)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：为非协作对话智能体归纳策略动作和规划逻辑
-61. [Three Roles, One Model: Role Orchestration at Inference Time to Close the Performance Gap Between Small and Large Agents](/202604/16/2604.11465v2-three-roles-one-model-role-orchestration-at-inference-time-to-close-the-performance-gap-between-small-and-large-agents)  
+   evidence：大模型智能体导航分层技能目录
+51. [AgileLog: A Forkable Shared Log for Agents on Data Streams](/202604/17/2604.14590v1-agilelog-a-forkable-shared-log-for-agents-on-data-streams)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：针对量化模型在工具使用任务上的小型智能体推理时脚手架技术
-62. [SemaClaw: A Step Towards General-Purpose Personal AI Agents through Harness Engineering](/202604/16/2604.11548v1-semaclaw-a-step-towards-general-purpose-personal-ai-agents-through-harness-engineering)  
+   evidence：为在流数据上运行的AI智能体提供共享日志抽象
+52. [AgentGA: Evolving Code Solutions in Agent-Seed Space](/202604/17/2604.14655v1-agentga-evolving-code-solutions-in-agent-seed-space)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：个人AI智能体基础设施与可控系统的治理工程
-63. [CodeTracer: Towards Traceable Agent States](/202604/16/2604.11641v1-codetracer-towards-traceable-agent-states)  
+   evidence：进化自主代码生成智能体的框架
+53. [SGA-MCTS: Decoupling Planning from Execution via Training-Free Atomic Experience Retrieval](/202604/17/2604.14712v1-sga-mcts-decoupling-planning-from-execution-via-training-free-atomic-experience-retrieval)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：针对智能体状态、工具调用和多阶段工作流的追踪架构
-64. [EA-Agent: A Structured Multi-Step Reasoning Agent for Entity Alignment](/202604/16/2604.11686v1-ea-agent-a-structured-multi-step-reasoning-agent-for-entity-alignment)  
+   evidence：大模型智能体的规划与执行解耦
+54. [Toward Agentic RAG for Ukrainian](/202604/17/2604.14896v1-toward-agentic-rag-for-ukrainian)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：用于多步推理和实体对齐的LLM智能体
-65. [$λ_A$: A Typed Lambda Calculus for LLM Agent Composition](/202604/16/2604.11767v1-a-a-typed-lambda-calculus-for-llm-agent-composition)  
+   evidence：执行查询改写和答案重试循环的智能体层
+55. [ADAPT: Benchmarking Commonsense Planning under Unspecified Affordance Constraints](/202604/17/2604.14902v1-adapt-benchmarking-commonsense-planning-under-unspecified-affordance-constraints)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：智能体组合的形式化语义与类型化 Lambda 演算
-66. [ClawGuard: A Runtime Security Framework for Tool-Augmented LLM Agents Against Indirect Prompt Injection](/202604/16/2604.11790v1-clawguard-a-runtime-security-framework-for-tool-augmented-llm-agents-against-indirect-prompt-injection)  
+   evidence：具身智能体常识规划与环境可用性评估基准
+56. [SAGER: Self-Evolving User Policy Skills for Recommendation Agent](/202604/17/2604.14972v1-sager-self-evolving-user-policy-skills-for-recommendation-agent)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：工具增强型LLM智能体的安全框架
-67. [Spatial Atlas: Compute-Grounded Reasoning for Spatial-Aware Research Agent Benchmarks](/202604/16/2604.12102v1-spatial-atlas-compute-grounded-reasoning-for-spatial-aware-research-agent-benchmarks)  
+   evidence：具有演化记忆与推理能力的推荐智能体
+57. [OpenMobile: Building Open Mobile Agents with Task and Trajectory Synthesis](/202604/17/2604.15093v1-openmobile-building-open-mobile-agents-with-task-and-trajectory-synthesis)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：针对空间感知研究智能体和规划的计算落地推理
-68. [Aethon: A Reference-Based Replication Primitive for Constant-Time Instantiation of Stateful AI Agents](/202604/16/2604.12129v1-aethon-a-reference-based-replication-primitive-for-constant-time-instantiation-of-stateful-ai-agents)  
+   evidence：由视觉语言模型驱动、具备环境记忆和轨迹合成能力的移动智能体
+58. [Feedback-Driven Execution for LLM-Based Binary Analysis](/202604/17/2604.15136v1-feedback-driven-execution-for-llm-based-binary-analysis)  
    标签：评分：9.0/10、query:llm-agent
-   evidence：有状态、工具调用及协作智能体的运行时架构
-69. [Frontier-Eng: Benchmarking Self-Evolving Agents on Real-World Engineering Tasks with Generative Optimization](/202604/16/2604.12290v1-frontier-eng-benchmarking-self-evolving-agents-on-real-world-engineering-tasks-with-generative-optimization)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：在工程任务上对自我演进的LLM智能体进行基准测试
-70. [Agentic Insight Generation in VSM Simulations](/202604/16/2604.12421v1-agentic-insight-generation-in-vsm-simulations)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：用于多跳推理和数据分析的两步智能体架构
-71. [CIA: Inferring the Communication Topology from LLM-based Multi-Agent Systems](/202604/16/2604.12461v1-cia-inferring-the-communication-topology-from-llm-based-multi-agent-systems)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：研究基于大语言模型的多智能体系统中的通信拓扑与安全
-72. [DeCoNav: Dialog enhanced Long-Horizon Collaborative Vision-Language Navigation](/202604/16/2604.12486v1-deconav-dialog-enhanced-long-horizon-collaborative-vision-language-navigation)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：多机器人系统的协作视觉语言导航
-73. [Transferable Expertise for Autonomous Agents via Real-World Case-Based Learning](/202604/16/2604.12717v1-transferable-expertise-for-autonomous-agents-via-real-world-case-based-learning)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：自主智能体通过案例学习框架转移先前经验
-74. [Applying an Agentic Coding Tool for Improving Published Algorithm Implementations](/202604/16/2604.13109v1-applying-an-agentic-coding-tool-for-improving-published-algorithm-implementations)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：用于改进算法实现的智能体编码工具
-75. [Multi-Agent Object Detection Framework Based on Raspberry Pi YOLO Detector and Slack-Ollama Natural Language Interface](/202604/16/2604.13345v1-multi-agent-object-detection-framework-based-on-raspberry-pi-yolo-detector-and-slack-ollama-natural-language-interface)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：使用大语言模型自然语言接口的多智能体目标检测框架
-76. [Towards Scalable Lightweight GUI Agents via Multi-role Orchestration](/202604/16/2604.13488v1-towards-scalable-lightweight-gui-agents-via-multi-role-orchestration)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：基于多模态大模型的自主GUI智能体与多智能体系统
-77. [Evolvable Embodied Agent for Robotic Manipulation via Long Short-Term Reflection and Optimization](/202604/16/2604.13533v1-evolvable-embodied-agent-for-robotic-manipulation-via-long-short-term-reflection-and-optimization)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：利用视觉语言模型进行环境理解、规划以及对过去经验的反思
-78. [Training-Free Test-Time Contrastive Learning for Large Language Models](/202604/16/2604.13552v1-training-free-test-time-contrastive-learning-for-large-language-models)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：用于大语言模型推理的多智能体角色扮演与反思循环
-79. [AgentComm: Semantic Communication for Embodied Agents](/202604/16/2604.13558v1-agentcomm-semantic-communication-for-embodied-agents)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：多智能体协作的语义通信
-80. [UHR-BAT: Budget-Aware Token Compression Vision-Language model for Ultra-High-Resolution Remote Sensing](/202604/16/2604.13565v1-uhr-bat-budget-aware-token-compression-vision-language-model-for-ultra-high-resolution-remote-sensing)  
-   标签：评分：9.0/10、query:model-compression
-   evidence：视觉语言模型的Token压缩
-81. [EmbodiedClaw: Conversational Workflow Execution for Embodied AI Development](/202604/16/2604.13800v1-embodiedclaw-conversational-workflow-execution-for-embodied-ai-development)  
-   标签：评分：9.0/10、query:llm-agent
-   evidence：用于具身智能开发工作流规划与执行的对话智能体
-82. [One Token per Highly Selective Frame: Towards Extreme Compression for Long Video Understanding](/202604/16/2604.14149v1-one-token-per-highly-selective-frame-towards-extreme-compression-for-long-video-understanding)  
-   标签：评分：9.0/10、query:model-compression
-   evidence：视觉语言模型的极端视频 Token 压缩
+   evidence：通过推理-动作-观察循环进行基于大模型的分析
 
 ### 速读区论文标签
-1. [SAGE: Sign-Adaptive Gradient for Memory-Efficient LLM Optimization](/202604/16/2604.07663v1-sage-sign-adaptive-gradient-for-memory-efficient-llm-optimization)  
+1. [Learning Without Losing Identity: Capability Evolution for Embodied Agents](/202604/17/2604.07799v1-learning-without-losing-identity-capability-evolution-for-embodied-agents)  
+   标签：评分：8.0/10、query:llm-agent
+   evidence：具身智能体在保持认知身份的同时进行能力演进
+2. [Fundus-R1: Training a Fundus-Reading MLLM with Knowledge-Aware Reasoning on Public Data](/202604/17/2604.08322v1-fundus-r1-training-a-fundus-reading-mllm-with-knowledge-aware-reasoning-on-public-data)  
    标签：评分：8.0/10、query:model-compression
-   evidence：LLM训练的内存高效优化
-2. [RemoteAgent: Bridging Vague Human Intents and Earth Observation with RL-based Agentic MLLMs](/202604/16/2604.07765v1-remoteagent-bridging-vague-human-intents-and-earth-observation-with-rl-based-agentic-mllms)  
+   evidence：训练具备推理能力的医疗多模态大模型
+3. [PSI: Shared State as the Missing Layer for Coherent AI-Generated Instruments in Personal AI Agents](/202604/17/2604.08529v1-psi-shared-state-as-the-missing-layer-for-coherent-ai-generated-instruments-in-personal-ai-agents)  
+   标签：评分：8.0/10、query:llm-agent
+   evidence：用于个人AI智能体协同和跨模块推理的共享状态架构
+4. [VisionFoundry: Teaching VLMs Visual Perception with Synthetic Images](/202604/17/2604.09531v1-visionfoundry-teaching-vlms-visual-perception-with-synthetic-images)  
    标签：评分：8.0/10、query:model-compression
-   evidence：用于地球观测的强化学习智能体多模态大模型
-3. [DSCA: Dynamic Subspace Concept Alignment for Lifelong VLM Editing](/202604/16/2604.07965v1-dsca-dynamic-subspace-concept-alignment-for-lifelong-vlm-editing)  
-   标签：评分：8.0/10、query:model-compression
-   evidence：视觉语言模型（VLM）的终身编辑
-4. [DMax: Aggressive Parallel Decoding for dLLMs](/202604/16/2604.08302v1-dmax-aggressive-parallel-decoding-for-dllms)  
-   标签：评分：8.0/10、query:model-compression
-   evidence：扩散语言模型的高效并行解码
-5. [ReAlign: Optimizing the Visual Document Retriever with Reasoning-Guided Fine-Grained Alignment](/202604/16/2604.07419v1-realign-optimizing-the-visual-document-retriever-with-reasoning-guided-fine-grained-alignment)  
+   evidence：利用LLM生成的合成数据提升视觉语言模型（VLM）的感知能力
+5. [DCD: Domain-Oriented Design for Controlled Retrieval-Augmented Generation](/202604/17/2604.07590v1-dcd-domain-oriented-design-for-controlled-retrieval-augmented-generation)  
+   标签：评分：7.0/10、query:llm-agent
+   evidence：RAG系统的结构化工作流与路由
+6. [A-IO: Adaptive Inference Orchestration for Memory-Bound NPUs](/202604/17/2604.09752v2-a-io-adaptive-inference-orchestration-for-memory-bound-npus)  
    标签：评分：7.0/10、query:model-compression
-   evidence：利用视觉语言模型的推理能力进行文档检索
-6. [KV Cache Offloading for Context-Intensive Tasks](/202604/16/2604.08426v1-kv-cache-offloading-for-context-intensive-tasks)  
+   evidence：NPU平台上大语言模型的推理编排与加速
+7. [Discrete Flow Maps](/202604/17/2604.09784v1-discrete-flow-maps)  
    标签：评分：7.0/10、query:model-compression
-   evidence：用于上下文密集型任务高效推理的KV缓存卸载
-7. [Dictionary-Aligned Concept Control for Safeguarding Multimodal LLMs](/202604/16/2604.08846v1-dictionary-aligned-concept-control-for-safeguarding-multimodal-llms)  
+   evidence：将生成轨迹压缩为单步映射
+8. [Discrete Flow Maps](/202604/17/2604.09784v2-discrete-flow-maps)  
    标签：评分：7.0/10、query:model-compression
-   evidence：专注于通过激活引导保护多模态大语言模型（MLLM）的安全
-8. [A-IO: Adaptive Inference Orchestration for Memory-Bound NPUs](/202604/16/2604.09752v1-a-io-adaptive-inference-orchestration-for-memory-bound-npus)  
-   标签：评分：7.0/10、query:model-compression
-   evidence：大语言模型在 NPU 上的高效部署与加速
-9. [Compressing Correct-by-Design Synthesis for Stochastic Homogeneous Multi-Agent Systems with Counting LTL](/202604/16/2604.06868v1-compressing-correct-by-design-synthesis-for-stochastic-homogeneous-multi-agent-systems-with-counting-ltl)  
+   evidence：大语言模型并行生成的轨迹压缩技术
+9. [Counting to Four is still a Chore for VLMs](/202604/17/2604.10039v1-counting-to-four-is-still-a-chore-for-vlms)  
+   标签：评分：6.0/10、query:model-compression
+   evidence：视觉语言模型（VLM）计数行为的实证研究
+10. [VLMaterial: Vision-Language Model-Based Camera-Radar Fusion for Physics-Grounded Material Identification](/202604/17/2604.11671v2-vlmaterial-vision-language-model-based-camera-radar-fusion-for-physics-grounded-material-identification)  
+   标签：评分：6.0/10、query:model-compression
+   evidence：将视觉语言模型（VLM）与雷达知识融合
+11. [MoshiRAG: Asynchronous Knowledge Retrieval for Full-Duplex Speech Language Models](/202604/17/2604.12928v1-moshirag-asynchronous-knowledge-retrieval-for-full-duplex-speech-language-models)  
    标签：评分：6.0/10、query:llm-agent
-   evidence：随机多智能体系统的安全保证
-10. [Making MLLMs Blind: Adversarial Smuggling Attacks in MLLM Content Moderation](/202604/16/2604.06950v2-making-mllms-blind-adversarial-smuggling-attacks-in-mllm-content-moderation)  
+   evidence：语音语言模型的模块化方法与选择性检索
+12. [Indexing Multimodal Language Models for Large-scale Image Retrieval](/202604/17/2604.13268v1-indexing-multimodal-language-models-for-large-scale-image-retrieval)  
    标签：评分：6.0/10、query:model-compression
-   evidence：针对多模态大语言模型（MLLM）的对抗性攻击
-11. [Efficient Learned Data Compression via Dual-Stream Feature Decoupling](/202604/16/2604.07239v1-efficient-learned-data-compression-via-dual-stream-feature-decoupling)  
-   标签：评分：6.0/10、query:model-compression
-   evidence：通过特征解耦实现高效的学习数据压缩
-12. [Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions](/202604/16/2604.07931v1-robust-length-prediction-a-perspective-from-heavy-tailed-prompt-conditioned-distributions)  
-   标签：评分：6.0/10、query:model-compression
-   evidence：用于高效LLM服务和调度的输出长度预测
+   evidence：研究MLLM在大规模图像检索任务中的应用
 
 
 <div class="dpr-home-promo-card">
