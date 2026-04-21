@@ -1,0 +1,616 @@
+Title: GSQ: Highly-Accurate Low-Precision Scalar Quantization for LLMs via Gumbel-Softmax Sampling
+
+URL Source: https://arxiv.org/pdf/2604.18556v1
+
+Published Time: Tue, 21 Apr 2026 03:02:59 GMT
+
+Number of Pages: 21
+
+Markdown Content:
+# GSQ: Highly-Accurate Low-Precision Scalar Quantization for LLMs via Gumbel-Softmax Sampling 
+
+Alireza Dadgarnia †
+
+ISTA 
+
+Soroush Tabesh 
+
+ISTA 
+
+Mahdi Nikdan 
+
+ISTA 
+
+Michael Helcig 
+
+ETH Zürich 
+
+Eldar Kurtic 
+
+ISTA & Red Hat AI 
+
+Dan Alistarh †
+
+ISTA & Red Hat AI 
+
+## Abstract 
+
+Weight quantization has become a standard tool for efficient LLM deployment, especially for local inference, where models are now routinely served at 2–3 bits per parameter. The state of the art is currently split into two sets of methods: simple scalar quantization techniques, such as GPTQ or AWQ, which are widely deployed but plateau in accuracy at 3–4 bits per parameter (bpp), and “second-generation” vector- or trellis-quantized methods, such as QTIP, GPTVQ and AQLM, which push the accuracy frontier at low bit-widths but are notoriously hard to implement and to scale, and have gained relatively less traction. In this paper, we ask whether this gap is fundamental, or whether a carefully optimized scalar quantizer can recover most of it. We answer in the affirmative, by introducing GSQ (Gumbel-Softmax Quantization), a post-training scalar quantization method which jointly learns the per-coordinate grid assignments and the per-group scales using a Gumbel-Softmax relaxation of the discrete grid. GSQ matches the cardinality of the relaxation to the small number of levels available in the target bit-width regime (e.g., 3–8 levels for ternary and 3 bpp, respectively), making the relaxation tight and the optimization tractable. Practically, on the standard Llama-3.1-8B/70B-Instruct models, GSQ closes most of the gap between scalar quantization and the QTIP frontier at 2
+
+and 3 bits, while using a symmetric scalar grid with group-wise quantization, and thus fully compatible with existing scalar inference kernels. We further show that GSQ scales to trillion-scale Mixture-of-Experts models such as Kimi-K2.5, where vector-quantized methods are difficult to apply. 
+
+## 1 Introduction 
+
+The memory and bandwidth costs of LLM inference have made weight quantization a standard approach for efficient deployment. Among the many quantization directions that have been stud-ied [Frantar et al., 2022, Lin et al., 2024, Dettmers et al., 2022, 2023, Lee et al., 2024, Ashkboos et al., 2024, Liu et al., 2024, Sun et al., 2024, Xiao et al., 2023, Chee et al., 2023, Tseng et al., 2024a,b, Egiazarian et al., 2024, van Baalen et al., 2024, Chen et al., 2025a], weight-only quantization has emerged as the standard for local deployment, where the bottleneck is memory rather than compute, and where serving stacks such as llama.cpp [Gerganov and contributors, 2023] and Ollama [Ollama contributors, 2023] have made compressed models accessible to a broad audience. It is now common to obtain usable versions of large open models at around 2–3 bits per parameter, and a whole open-source ecosystem of “quants” has emerged around repositories such as Hugging Face [Hugging Face, 2024, Unsloth, 2026]. 
+
+> †Corresponding authors: alirezadadgarnia1378@gmail.com, dan.alistarh@ist.ac.at Preprint.
+> arXiv:2604.18556v1 [cs.CL] 20 Apr 2026
+
+Existing techniques. Broadly, weight quantization techniques can be visualized as two successive “waves”. The first wave investigated scalar (1D) quantization methods, with llama.cpp [Gerganov and contributors, 2023], bitsandbytes [Dettmers et al., 2021, 2022], GPTQ [Frantar et al., 2022], and AWQ [Lin et al., 2024] being among the most popular methods. These approaches round each weight independently to a small uniform grid, are simple to implement, and benefit from highly optimized and relatively simple unpacking kernels; as a result, they enjoy by far the broadest practical adoption. Their main limitation is accuracy : scalar quantization techniques have hit a clear error wall around 
+
+3–4 bits per parameter, below which output quality degrades sharply [Frantar et al., 2022, Chen et al., 2025a]. The second wave , by contrast, has focused on much more expressive vector-quantized or trellis-coded representations, including AQLM [Egiazarian et al., 2024], QuIP# [Tseng et al., 2024a], QTIP [Tseng et al., 2024b] with its implementation exllamav3 [Turboderp, 2025], and GPTVQ [van Baalen et al., 2024]. By minimizing reconstruction MSE jointly over groups of weights, these methods substantially reduce accuracy loss at 2–3 bits per parameter; yet, unfortunately, the resulting representations are considerably harder to implement, integrate, and scale. Specifically, Tseng et al. [2024b] observed that, although VQ and trellis methods yield major memory savings, they lead to only very small decoding speedups vs BF16 due to format complexity. We are thus left with a clear gap: on one side, second-generation VQ / trellis methods push the low-bit accuracy frontier, but struggle for scale and adoption. On the other, simple scalar quantization techniques are well-supported and easy to apply, but plateau in terms of achievable accuracy. The question we ask in this paper is: Can we design a scalar quantization scheme that bridges most of the accuracy gap to complex vector- or trellis-based techniques, while remaining a drop-in replacement for existing scalar formats? 
+
+Our approach. We answer this question in the affirmative, by proposing GSQ (Gumbel-Softmax Quantization), a post-training scalar quantization method which closes most of the gap to second-wave techniques while staying entirely within the standard scalar weight-only format. GSQ preserves the simplicity of the scalar setting: it produces symmetric, group-wise, b-bit weights drawn from a small uniform grid, and is therefore directly compatible with existing scalar inference kernels. Yet, on the accuracy side, it substantially improves over previous scalar-focused methods such as GPTQ [Frantar et al., 2022], AWQ [Lin et al., 2024], QuIP [Chee et al., 2023], and EfficientQAT [Chen et al., 2025a] at 2 and 3 bits, where recovers the majority of the gap to the strongest vector- and trellis-quantized baselines. Although calibration-based, GSQ also scales to very large Mixture-of-Experts (MoE) models, including the trillion-parameter-scale Kimi-K2 [Team et al., 2025], where second-wave methods have so far never been applied. 
+
+Method overview. The key idea behind GSQ is that we want to reformulate layer-wise reconstruc-tion as a differentiable discrete-assignment problem. For each weight coordinate, we introduce a small set of trainable logits over the candidate grid points, and obtain a soft quantized weight via Gumbel-Softmax sampling [Maddison et al., 2016, Jang et al., 2016]. The resulting reconstruction loss is fully differentiable in both the per-group scales and the discrete assignments, and can be optimized jointly via gradient-based methods. As the temperature is annealed, the soft assignments collapse onto hard grid points, yielding a fully discrete quantized layer at the end of training. One key observation about grid size is that the Gumbel-Softmax relaxation a natural fit for low-bit scalar quantization. In the regimes we are interested in, for instance at ternary and 2-bit precision, the cardinality of the per-coordinate grid is 3–4, so a Gumbel-Softmax distribution over the entire grid introduces only a few of logits per weight and can be optimized end-to-end at LLM scale. At higher bit-widths (e.g. 3-4 bpp), where the grid grows exponentially, we replace the global relaxation with a local-shift formulation in which only a small number of nearest grid points around the current assignment are considered, keeping memory and compute overhead linear in the number of weights. This combination allows GSQ to operate uniformly across the entire low- to mid-bit range, while always reducing to a small, well-behaved discrete optimization problem at each coordinate. 
+
+Accuracy results. Empirically, GSQ sets a new state of the art for scalar quantization at low bit-widths. For standard benchmark experiments on Llama-3.1-8B-Instruct and Llama-3.1-70B-Instruct, at 2 bits per parameter, GSQ improves average zero-shot accuracy by a remarkable 4.76 and 4.14 
+
+points, respectively over the best scalar baseline (EfficientQAT), and trails QTIP, the strongest and most complex prior method, by only 1.33 and 1.68 points, respectively. At 3 bits, the picture is similar: GSQ matches or surpasses all scalar baselines, and is essentially on par with QTIP on the 270B model. Notably, these results are obtained with symmetric group-wise quantization, without any zero-point parameters, in contrast to most baselines, which is direct evidence that the gains come from better optimization of the discrete assignments rather than from a more flexible quantizer. On the same models, ternary ( 1.58 -bit) GSQ already exceeds all scalar baselines even if they are run at higher 
+
+2-bit precision. Furthermore, because GSQ produces standard scalar layers, it naturally supports non-uniform bit allocation across layers; on Llama-3.1-70B-Instruct, mixed 2/3-bit configurations at 
+
+2.37 and 2.62 average bits per parameter retain most of the 3-bit accuracy while substantially reducing model size. We provide speedup results by leveraging the recent Humming kernels [InclusionAI, 2025]. A second important feature is scalability. Because GSQ only requires per-coordinate discrete optimization and per-group scales, its memory footprint is close to that of a standard scalar PTQ approach such as GPTQ or AWQ. This allows us to directly apply GSQ to massive Mixture-of-Experts models such as Kimi-K2 and its newer 2.5 variant, where the codebook training and per-block updates required by vector-quantized methods become prohibitively expensive, and where second-generation methods have so far not been applied. To our knowledge, GSQ is the first method to obtain low-bit, close-to-lossless quantization of trillion-parameter MoE models using a fully scalar, kernel-compatible format. 
+
+Summary. Overall, our results suggest that the accuracy gap between scalar and second-wave quantization techniques is, to a large extent, an optimization gap rather than a representational one: most of it can be closed by better discrete optimization within the standard scalar format, without giving up kernel compatibility or scalability. The remainder of the paper is organized as follows. Section 2 discusses related work in post-training and extreme quantization. Section 3 introduces our notation, the Gumbel-Softmax relaxation, and the ternary, 2-bit, and general b-bit instantiations of GSQ. Section 4 presents experimental results on dense Llama models and on Kimi-K2/2.5, and Section 5 concludes. 
+
+## 2 Related Work 
+
+Post-training quantization (PTQ) for LLMs. PTQ addresses the problem of quantizing a pre-trained model without the need for costly re-training. LLM.int8() [Dettmers et al., 2022] showed that quantizing 99.9% of features to INT8 while keeping the outliers in 16-bit achieves significant memory and runtime improvements. Frantar et al. [2022] introduced GPTQ, which uses second-order information to minimize layer-wise quantization error based on the Optimal Brain Surgeon framework [Hassibi et al., 1993], while AWQ [Lin et al., 2024] used activation statistics to identify and protect a small set of weights. Outlier-aware formats [Dettmers et al., 2023, Lee et al., 2024] suggest keeping a small set of outlier weights in high-precision. More recently, rotation-based methods have emerged, enabling near-lossless 4-bit quantization of weight, activations, and KV cache [Ashkboos et al., 2024, Liu et al., 2024, Sun et al., 2024]. As discussed, vector/codebook methods target 2-bit compression or less while retaining full-precision execution, where QuIP [Chee et al., 2023], QuIP# [Tseng et al., 2024a], QTIP [Tseng et al., 2024b], AQLM [Egiazarian et al., 2024], and PV Tuning [Malinovskii et al., 2024] are strong baselines. 
+
+Quantization-aware training (QAT). In contrast to PTQ, quantization-aware training (QAT) fine-tunes the model under simulated low-precision arithmetic. EfficientQAT [Chen et al., 2025a] makes QAT practical for scalar quantization of LLMs by combining block-wise training of model parameters with a final end-to-end optimization of quantization parameters. Early work on training binary networks [Courbariaux et al., 2015, Rastegari et al., 2016] established that 1-bit weights are possible for general deep neural networks. For LLMs, BitNet [Wang et al., 2023] and follow-up work argue that training in ternary (1.58-bit) can be competitive with full precision. TernaryLLM Chen et al. [2024b] uses trainable scale and zero-point parameters along with a specialized information-theoretic knowledge distillation objective. In the post-training settings, PT 2-LLM [Yan et al., 2025] enables ternary quantization via iteratively alternating between refining the grid and rounding. Tequila [Huang et al., 2025] reactivates deadzone-trapped weights by re-introducing them as dynamic bias parameters. PTQTP [Xiao et al., 2025] decomposes the weights into two trit-planes, achieving multiplication-free additive inference. PT-BitNet [Guo et al., 2025] first transforms the weights to make them quantizaition-friendly, then quantizes each weight block separately. For binary PTQ, BiLLM [Huang et al., 2024] compresses outlier weights by a binary residual approximation approach, while simply 3binarizing the remaining weights. DB-LLM [Chen et al., 2024a] decomposes its 2-bit budget into two independent binaries. ARB-LLM [Li et al., 2024] present alternating refined binarization to progressively update the binary parameters. PB-LLM [Shang et al., 2023] simply keeps the salient weights in high-precision, while binarizing the rest. PTQ1.61 [Zhao et al., 2025] takes a similar approach, except that the salient weights are structured and are quantized to 4-bits. STBLLM [Dong et al., 2024] combines N:M sparsity with binarization of non-pruned weights and provides system support for this format. 
+
+Quantization of mixture-of-experts (MoE) models. MoE quantization must preserve both expert and router quality, since small logit changes in routers might impact expert selection. In this context, QMoE [Frantar and Alistarh, 2023] was the first to enable sub-1-bit compression at trillion-parameter scale with custom on-the-fly decoding kernels. MoQa [Zheng et al., 2025] assigns different bit-width to each expert based on their sensitivity and distribution of tokens. MoPEQ [Chitty-Venkata et al., 2025] replaces the criteria with the more rigorous Hessian trace approximation. EAQuant [Fu et al., 2025] introduces expert smoothing to suppress activation outliers, aligns the logit distribution of the router to preserve expert selection, and balances calibration data across experts. Similarly, ExpertQuant [Fang and Huang] uses a Jaccard loss to ensure the top-k selected experts remain unchanged, while MoEQuant [Hu et al., 2025] specifically addresses the data imbalance problem. Additionally, EAC-MoE [Chen et al., 2025b] not only calibrates the routers to preserve expert selection, but also suggests pruning less frequently used experts altogether. 
+
+Differentiable compression. Because quantization and sparsity introduce discrete choices (round-ing, masks), many approaches use differentiable proxies. LSQ [Esser et al., 2019] learns quantizer step sizes via backpropagation, and DiffQ [Défossez et al., 2021] uses pseudo quantization noise to optimize bit allocation in a differentiable way. The Gumbel-Softmax relaxation allows gradient-based learning of discrete decisions and has been applied to neural architecture search [Herrmann et al., 2020]. MaskLLM [Fang et al., 2024] uses the same idea to learn semi-structured N:M masks end-to-end using Gumbel-Softmax sampling. 
+
+## 3 The Gumbel-Softmax Quantization (GSQ) Method 
+
+3.1 Notation 
+
+Let f (·; w) denote a function parameterized by weights w ∈ Rd that we aim to compress. In practice, this may represent a single linear layer, a sub-module (such as a Transformer block), or an entire neural network. Given calibration input data x, the objective is to find a compressed parameterization 
+
+ˆw that satisfies a constraint set C while minimizing the output reconstruction error: 
+
+ˆw = arg min 
+
+> ¯w
+
+∥f (x; ¯ w) − f (x; w)∥2 
+
+> F
+
+s.t. ¯w ∈ C (1) where ∥·∥ F denotes the Frobenius norm. 
+
+3.2 Gumbel-Softmax Sampling 
+
+Optimizing the objective in Equation 1 becomes challenging when the constraint set C includes discrete components, since standard gradient-based methods are not directly applicable. This difficulty arises naturally in model compression: quantization requires mapping weights to a discrete grid, while sparsity needs setting a specific subset of weights to zero. To address this challenge, our method leverages Gumbel-Softmax sampling [Maddison et al., 2016, Jang et al., 2016] to make the discrete selection process differentiable. Gumbel-Softmax sampling, summarized in Algorithm 1, avoids strictly selecting a single value from the discrete set D by computing a “soft” sample as a weighted sum over all candidate values. Specifically, each member of D is assigned a learnable logit ℓ, to which random noise gℓ is added to simulate sampling; these perturbed logits are then normalized into probabilities pℓ. The temperature parameter τ controls the sharpness of this distribution: training begins with a higher τ to allow gradients to flow through multiple candidates, and as τ is annealed toward zero, the weighted sum effectively converges to a single discrete element. 4Algorithm 1 Gumbel-Softmax Sampling 
+
+Require: Finite set D = {d1, d 2, ..., d n}, with assigned scalar logits ℓ1, ℓ 2, ..., ℓ n, temperature 
+
+τ > 0, scale κ > 0
+
+Ensure: Soft sample ˜d 
+
+> 1:
+
+for i ∈ { 1, 2, ..., n } do  
+
+> 2:
+
+draw gi ∼ Gumbel(0 , 1)  
+
+> 3:
+
+end for  
+
+> 4:
+
+for i ∈ { 1, 2, ..., n } do  
+
+> 5:
+
+pi ←
+
+exp 
+
+ κℓ i + gi
+
+τ
+
+X
+
+> j∈{ 1,2,...,n }
+
+exp 
+
+ κℓ j + gj
+
+τ
+
+ 
+
+> 6:
+
+end for  
+
+> 7:
+
+return ˜d ← X
+
+> i∈{ 1,2,...,n }
+
+pidi
+
+This optimization introduces |D| learnable logits. In the special case where D contains only two elements, instead of introducing two separate logits, we use a single logit ℓ and assign −ℓ as the logit for the other element. Under this parameterization, the resulting softmax is equivalent to a sigmoid function with (noisy) logit 2ℓ. This reduces the number of trainable parameters by half in the binary case and substantially lowers the associated memory overhead. 
+
+3.3 The Ternary Quantization Case 
+
+We begin by describing how Gumbel-Softmax sampling is used to compress the model parameters into a ternary quantization format. Specifically, we impose the following constraint in Objective 1: 
+
+Cternary =  ¯w | ¯w = s · m ⊙ b; s ∈ R, m ∈ { 0, 1}d, b ∈ {− 1, 1}d . (2) Under this formulation, a ternary-quantized vector is parameterized by three components: a binary mask m indicating which entries are zero, a binary sign vector b specifying whether each nonzero entry is −1 or +1 , and a scaling factor s. This parameterization introduces 2d binary decisions, which we relax using 2d instances of binary Gumbel-Softmax sampling. Concretely, we jointly optimize the scale s, the mask logits ℓ(m) ∈ Rd, and the sign logits ℓ(b) ∈ Rd. At each training step, m and b are obtained by applying Gumbel-Softmax sampling to ℓ(m) and ℓ(b), respectively. The full procedure is provided in Algorithm 2. Although the formulation above assumes a single shared scale value (i.e., symmetric global quantization), the same framework extends naturally to asymmetric and/or group-wise quantization with minor modifications. 
+
+Initialization. Instead of initializing the logits randomly, we warm-start from the GPTQ ternary solution qGPTQ ∈ {− 1, 0, 1}d [Frantar et al., 2022]. Recall that the mask logit ℓ(m) 
+
+> i
+
+controls whether weight i is nonzero: a positive logit favors mi = 1 (active), while a negative logit favors mi = 0 
+
+(pruned). Similarly, the sign logit ℓ(b) 
+
+> i
+
+controls the sign of the nonzero weight: a positive logit favors bi = +1 and a negative logit favors bi = −1. We therefore initialize each logit to reflect the corresponding GPTQ decision: 
+
+(ℓ(m)
+
+> GPTQ
+
+)i =
+
++1 .0, if (qGPTQ )i̸ = 0 ,
+
+−1.0, if (qGPTQ )i = 0 , (ℓ(b)
+
+> GPTQ
+
+)i =
+
+
+
++1 .0, if (qGPTQ )i = +1 ,
+
+−1.0, if (qGPTQ )i = −1,
+
+0.0, if (qGPTQ )i = 0 .
+
+(3) When (qGPTQ )i = 0 , the sign logit is initialized to 0, since the sign is irrelevant at initialization but may become active during subsequent optimization if the mask flips to nonzero. To prevent the optimization from getting trapped near the GPTQ solution, we inject isotropic Gaussian noise into the logits before training. Concretely, we initialize the mask and sign logits as 
+
+ℓ = σinit 
+
+
+
+ϵ + α ℓGPTQ 
+
+
+
+, ϵ ∼ N (0, I), (4) 5Algorithm 2 Ternary GSQ 
+
+Require: Weights w ∈ Rd, Calibration data x
+
+Require: Temperature schedule τt, noise scale schedule κt
+
+Ensure: Ternary weights ˆw ∈ {− s, 0, s }d 
+
+> 1:
+
+Initialize scale s ∈ R 
+
+> 2:
+
+Initialize mask logits ℓ(m) ∈ Rd 
+
+> 3:
+
+Initialize sign logits ℓ(b) ∈ Rd 
+
+> 4:
+
+for t = 1 to T do  
+
+> 5:
+
+for i = 1 to d do  
+
+> 6:
+
+˜mi ← GumbelSoftmax ({0, 1}, {− ℓ(m) 
+
+> i
+
+, ℓ(m) 
+
+> i
+
+}, τ t, κ t) 
+
+> 7:
+
+˜bi ← GumbelSoftmax ({− 1, 1}, {− ℓ(b) 
+
+> i
+
+, ℓ(b) 
+
+> i
+
+}, τ t, κ t) 
+
+> 8:
+
+end for  
+
+> 9:
+
+¯w ← s · ˜m ⊙ ˜b 
+
+> 10:
+
+L ← ∥ f (x; ¯ w) − f (x; w)∥2 
+
+> F
+> 11:
+
+Update s, ℓm, ℓb using gradient ∇L  
+
+> 12:
+
+end for  
+
+> 13:
+
+ˆm ← 0 where ℓ(m) < 0 else 1 
+
+> 14:
+
+ˆb ← − 1 where ℓ(b) < 0 else 1 
+
+> 15:
+
+return ˆw ← s · ˆm ⊙ ˆb
+
+where α ∈ R controls the strength of the GPTQ warm-start relative to the injected noise, and 
+
+σinit ∈ R sets the overall scale of the logits. In the limit α → 0, the initialization reduces to pure noise, while a large α recovers the GPTQ initialization. Notably, we also initialize the quantization scale value s to the scale computed by GPTQ. 
+
+3.4 General Scalar Quantization 
+
+We now describe how GSQ extends to general scalar quantization. Suppose the goal is to quantize the model parameters to b bits using symmetric quantization with a single shared scale factor. In this setting, the constraint set C in Objective 1 can be written as 
+
+Cb-bit =  ¯w ¯w = s · q; s ∈ R, q ∈ G db , (5) where Gb denotes the ordered quantization grid, with cardinality |G b| = 2 b, specifying the set of values that each quantized parameter may take. This formulation imposes no structural restrictions on the grid and therefore accommodates both uniform and non-uniform quantization schemes. To enable gradient-based optimization, we apply Gumbel–Softmax sampling independently to each of the d coordinates. Each such instance introduces 2b trainable logits, i.e., the logits can be concatenated into ℓ ∈ Rd×4. With this relaxation, we jointly optimize the logits ℓ and the scale parameter s.
+
+The 2-bit case. As a direct application, consider 2-bit uniform quantization with G2 =
+
+{− 2, −1, 0, 1}. In this case, each coordinate is associated with 4 trainable logits for Gumbel– Softmax sampling. Together with the shared scale parameter s, this yields a total of 4d + 1 trainable parameters. Algorithm 3 provides the full implementation details for this setting. Although the grid itself is skewed toward negative values, we allow the scale s to take negative values as well, thereby removing any inherent bias toward either side. 
+
+Higher bit-widths. As the bit-width b increases, the number of trainable logits, and consequently the required memory, grows exponentially, causing the naive formulation to quickly become intractable. To address this issue, for b > 2, we use a local shift-based formulation, explained below and summarized in Figure 1. The key observation is that, during optimization, each coordinate typically remains close to its initialized quantized value, and large jumps across the quantization grid rarely happen. Motivated by this, instead of assigning a logit to every value in Gb, we only learn a small discrete shift relative to the initialized grid point. 6Algorithm 3 2-bit GSQ 
+
+Require: Weights w ∈ Rd, Calibration data x, Grid G2 = {− 2, −1, 0, 1}
+
+Require: Temperature schedule τt, noise scale schedule κt
+
+Ensure: Quantized weights ˆw 
+
+> 1:
+
+Initialize scale s ∈ R 
+
+> 2:
+
+Initialize logits ℓ ∈ Rd×4 for grid G2 
+
+> 3:
+
+for t = 1 to T do  
+
+> 4:
+
+for i = 1 to d do  
+
+> 5:
+
+˜qi ← GumbelSoftmax (G2, ℓi, :, τ t, κ t) 
+
+> 6:
+
+end for  
+
+> 7:
+
+¯w ← s · ˜q 
+
+> 8:
+
+L ← ∥ f (x; ¯ w) − f (x; w)∥2 
+
+> F
+> 9:
+
+Update s, θ using gradient ∇L  
+
+> 10:
+
+end for  
+
+> 11:
+
+ˆq ← arg max q∈G 2 ℓ 
+
+> 12:
+
+return ˆw ← s · ˆq
+
+Specifically, suppose we are given an initialized quantized vector q0 ∈ G db . For each coordinate 
+
+i ∈ { 1, . . . , d }, let j0 
+
+> i
+
+∈ { 1, . . . , 2b} denote the index of the initialized grid point, i.e., 
+
+q0 
+
+> i
+
+= ( Gb)j0 
+
+> i
+
+. (6) Instead of introducing 2b logits for coordinate i, we introduce only 5 logits corresponding to a discrete shift δi ∈ {− 2, −1, 0, 1, 2}. Let ℓδ ∈ Rd×5 denote the corresponding trainable logits. At each training step, δi is obtained by applying Gumbel-Softmax sampling to the i-th row of ℓδ . The resulting grid index is then 
+
+ji = clip( j0 
+
+> i
+
++ δi, 1, 2b), (7) where clip( x, a, b ) = min {max {x, a }, b } clips the value into the valid range. The final quantized value is 
+
+qi = ( Gb)ji . (8) Equivalently, the constraint set becomes 
+
+Cshift  
+
+> b-bit
+
+=
+
+n
+
+¯w ¯w = s · q, s ∈ R, q i = ( Gb)clip( j0   
+
+> i+δi,1,2b)
+
+, δ i ∈ {− 2, −1, 0, 1, 2}
+
+o
+
+. (9) Under this parameterization, each coordinate requires only 5 trainable logits rather than 2b. Therefore, the total number of trainable parameters is reduced from d × 2b + 1 to 5d + 1 , making higher-bit optimization practical while still allowing each coordinate to move to nearby grid values. 
+
+Initialization. As in the ternary case, we use GPTQ [Frantar et al., 2022] for initialization. We initialize the logits in a way that the induced distribution for each coordinate i follows a Gaussian-like prior around the GPTQ solution qGPTQ ∈ G db :
+
+(ℓGPTQ )i,k ∝ − (ck − μi)2
+
+2 , μi =
+
+(qGPTQ )i, b = 2 ,
+
+0, b > 2,
+
+where ck denotes the k-th candidate value. For b = 2 , the candidates are the grid points ck ∈ G 2,whereas for b > 2 they are the discrete shifts ck ∈ {− 2, −1, 0, 1, 2}. In the latter case, the GPTQ solution is already encoded in the starting grid indices j0 
+
+> i
+
+, so centering at μi = 0 favors remaining at the GPTQ-assigned grid point. Then, for each coordinate, we subtract the mean logit and inject noise as in Equation 4 for the ternary case. This creates an initialization that is concentrated around the GPTQ solution while allowing exploration of other candidates. 
+
+3.5 Implementation Details Objective. Unlike most PTQ methods, GSQ is not tied to a layerwise quadratic objective. In principle, it can optimize richer objectives directly over the quantized parameters, such as block-level reconstruction losses or model-level task-aware losses. This flexibility, however, comes at the cost of 7Before Training After Training                
+
+> Naive
+> 2blogits per coord.
+> GPTQ
+> logit
+> GPTQ GSQ
+> Local Shift
+> 5 logits per coord.
+> −2−10+1 +2 shift δ
+> GPTQ
+> logit
+> −2−10+1 +2 shift δ
+> GPTQ GSQ
+
+Figure 1: Local-shift parameterization at higher bit-widths. Each row shows, for a single weight coordinate, the logit distribution over candidate grid points before and after training. The red bar and dot mark the GPTQ-initialized grid point used to warm-start the logits; the green bar and dot mark the grid point selected by GSQ after training. Top (naive): placing one trainable logit on every grid point costs 2b logits per coordinate, which quickly becomes prohibitive as b grows. Bottom (local shift): we instead assign logits only to a discrete shift δi ∈ {− 2, −1, 0, +1 , +2 } relative to the GPTQ-initialized grid index (dashed window), reducing the per-coordinate parameter count from 2b
+
+to 5. In both cases the distribution is initialized as a Gaussian centered at the GPTQ solution. additional memory, since GSQ introduces auxiliary trainable logits whose footprint is typically 2-5×
+
+that of the weights being quantized. As a result, jointly optimizing the entire model is prohibitively expensive for large transformers and MoEs. In practice, we adopt a combination of objectives during optimization. For example, in the ternary quantization setting, where the GPTQ initialization is particularly weak, we first warm up the logits (initialized from GPTQ) using a cheaper layerwise quadratic objective applied independently to each linear layer. This is then followed by a blockwise or expertwise optimization stage. The exact procedure depends on the model and setting, and is described in Section 4. We note that this differs from approaches that first quantize each layer independently, and afterwards perform a limited block-level tuning over a small subset of continuous parameters such as the quantization scales [Tseng et al., 2024a, Egiazarian et al., 2024]. In GSQ, the discrete assignments and their associated continuous parameters are optimized jointly. 
+
+Optimizer. The Gumbel-Softmax relaxation can enter a saturated regime in which the relaxed categorical distribution becomes nearly one-hot, for example due to temperature annealing or growing logit gaps. In this regime, the softmax Jacobian collapses, driving the logit gradients, and consequently their second moment, toward zero. This phenomenon has also been noted in related work [Fang et al., 2024], which mitigates it through problem-specific regularization and by increasing the ϵ
+
+hyperparameter in AdamW (e.g., to 10 −5). When gradients vanish, AdamW effectively stalls: since 
+
+mt is an exponential moving average of the gradients, mt → 0, and the update magnitude satisfies 
+
+|∆θt| ≤ η|mt|/√ϵ → 0. To address this issue, we instead use Lion [Chen et al., 2023], which does not rely on second-moment normalization and updates parameters using the sign of the first-moment estimate, making it less sensitive to vanishing gradient magnitudes. 
+
+Gradient accumulation. Conventionally, gradient accumulation is a purely hardware-driven trick used to emulate larger batch sizes under memory constraints, and it has no effect on the underly-ing training dynamics. In our setting, however, it plays an additional role: because we resample 
+
+the Gumbel noise independently for each forward pass, averaging gradients across micro-batches 8directly reduces the variance contributed by Gumbel-Softmax sampling. We find that using gra-dient accumulation explicitly as a variance-reduction mechanism leads to noticeably more stable optimization. 
+
+## 4 Experiments 
+
+We evaluate GSQ across several extreme weight-only PTQ settings. Our results show that GSQ (a) achieves state-of-the-art performance among scalar quantization methods in the sub-3-bit regime, (b) remains effective at very large scale on already-compressed MoEs such as Kimi K2.5 [Team et al., 2026], and (c) stays competitive with recent vector quantization (VQ) methods, which are more expressive but also structurally more complex and typically require codebook-lookup kernels that are less portable and harder to optimize compared to standard low-precision matrix multiplication. 
+
+4.1 Experimental Setup Models. We evaluate on two dense models, Llama-3.1-8B-Instruct and Llama-3.1-70B-Instruct [Grattafiori et al., 2024], as well as the MoE model Kimi-K2.5 [Team et al., 2026]. For the Llama models, we quantize all non-embedding and non-head linear layers, with one exception: in the 8B model, we find the down_proj of the second layer to be unstable under compression and leave it in full precision. For Kimi-K2.5, we quantize only the non-shared expert weights while leaving the shared experts untouched; we also skip the vision-related components and only evaluate the language model. This choice results in a setup where the majority of weights are stored and executed in low-bit scalar format while a small subset (shared experts, embedding and head layers) remains in higher precision. In practice, this has minimal impact on end-to-end latency and memory footprint, since the unquantized components account for a small fraction of total parameters. As a result, inference remains fully compatible with standard scalar quantization kernels, with only a minor reduction in compression ratio relative to a fully quantized model. 
+
+Quantization configuration. We mainly consider 2-bit and 3-bit weight-only quantization with a group size of 128 . GSQ uses a symmetric scalar quantizer, where each group shares a single scale value. Groups are formed row-wise over consecutive entries, following the standard packing layout used in prior work. We also include brief ternary quantization experiments (i.e., 1.58 -bit). In addition, we evaluate non-uniform bit allocation, in which different layers are assigned different bit-widths (e.g., a mix of 2-bit and 3-bit) so as to achieve a fractional average rate such as 2.37 or 2.62 bits per parameter. 
+
+Training details. We perform block-wise optimization with a Gumbel-Softmax relaxation over the discrete assignments, followed by a scale-only fine-tuning. The temperature τ is annealed linearly from 2 to 0.05 , and the scale factor κ is annealed from 100 to 500 , following the schedule used in the prior work MaskLLM [Fang et al., 2024]. The training loss is the mean-squared error between the outputs of the full-precision and the quantized modules. For more details, please refer to Appendix A.1. 
+
+Within-block staging. For the Llama models, we do not optimize all quantized layers inside a transformer block jointly under the block reconstruction loss. Although this joint formulation is the most natural choice, and is used by prior work such as Egiazarian et al. [2024] and Chen et al. [2025a], we found it to be suboptimal in our setting. The block reconstruction loss is only a surrogate for the final quality of the quantized model, and the signal it provides is not equally informative for all layers in the block: for layers that appear earlier in the computation graph, their effect on the block output is mediated by all subsequent operations, so the block-level loss is a more indirect signal for them than for later layers such as the MLP. This intuition is consistent with the staged strategies used by Tseng et al. [2024b] and Tseng et al. [2024a], which also partition the block and optimize one group at a time rather than all layers jointly. Based on this, we adopt the following staged schedule within each block. Ideally, the query and key projections would be optimized jointly, since what matters for attention is their interaction through the attention logits rather than the reconstruction of each matrix in isolation. For larger models this joint optimization becomes expensive, so as a cheaper approximation we first optimize the query and key projections independently , each under its own linear reconstruction loss. We then freeze them 9and optimize the value and output projections jointly under the self-attention output reconstruction loss. Finally, we freeze the attention layers and optimize the MLP projections under the full block reconstruction loss. Once a block is quantized, it is frozen, and the next block is optimized using inputs produced by the already-quantized prefix of the network, which makes the compression aware of the quantization error accumulated so far. For Kimi-K2.5, we do not apply this within-block staging: each non-shared expert is considered on its own and its linear layers are optimized jointly under the corresponding reconstruction loss. 
+
+Calibration data and training budget. For calibration data, we use FineWeb-Edu [Lozhkov et al., 2024] in Llama experiments, and OpenThoughts [Guha et al., 2025] for Kimi K2.5 experiments. Unless otherwise stated, we use 4096 sequences of length 4096 . For block-wise training, we run 20 
+
+epochs for the Llama models and 10 epochs for Kimi-K2.5. For end-to-end scale-only fine-tuning on the Llama models, we run a single epoch over the same 4096 sequences. 
+
+4.2 Baselines 
+
+We compare GSQ against both scalar and vector quantization baselines. 
+
+Scalar quantization baselines. We include GPTQ [Frantar et al., 2022], QuIP [Chee et al., 2023], and EfficientQAT [Chen et al., 2025a] as baselines; these methods are allowed to use asymmetric quantization with per-group zero-points, which gives them strictly more representational freedom than GSQ. Whenever a released quantized checkpoint is available, we re-evaluate it directly under our evaluation pipeline; otherwise, we run the official codebase with the hyperparameters recommended by the original authors. For GPTQ and QuIP, we use 512 calibration samples as is standard, and for EfficientQAT we follow the authors’ suggested setup. 
+
+Vector quantization baselines. We compare against QTIP [Tseng et al., 2024b] and PV-Tuning [Malinovskii et al., 2024], which optimizes over an AQLM vector quantized representation, as these are two state-of-the-art methods in the low-bit regime. Since VQ methods are not restricted to a small scalar grid, they are generally more expressive than scalar quantizers at the same bit-width; we therefore view the comparison to VQ as a particularly hard test for GSQ. 
+
+Evaluation protocol. We evaluate all models with lm-eval-harness [Gao et al., 2023] in the zero-shot setting, using a maximum sequence length of 4096 . For the Llama models, we report accuracy on ARC-Easy, ARC-Challenge, HellaSwag, WinoGrande, and PIQA [Clark et al., 2018, Zellers et al., 2019, Sakaguchi et al., 2021, Bisk et al., 2020]. These are standard zero-shot reasoning and commonsense benchmarks widely used in the quantization literature, and together they cover multi-choice scientific reasoning, commonsense completion, and physical reasoning. For Kimi-K2.5 model, we additionally focus on long-context and reasoning evaluations. More specifically, for long-context, we evaluate models on OpenAI-MRCR [Vodrahalli et al., 2024] bench-mark across all sequence-length buckets from 0 to 256k, which is the model’s maximum supported sequence length. For each sequence length bucket, we report average pass@1 score over 5 repetitions. As for reasoning evaluations, we focus on AIME25 [Zhang and Math-AI, 2025], GPQA:Diamond [Rein et al., 2024], MATH500 [Lightman et al., 2023], and LiveCodeBench-v6 [Jain et al., 2024]. We report the average pass@1 score: over 10 repetitions for AIME25 and LiveCodeBench-v6, and over 5 repetitions for GPQA:Diamond and MATH500. For both, long-context and reasoning evaluations, we follow Kimi’s suggested sampling parameters: temperature=1.0 and top_p=0.95 .
+
+Randomness and reproducibility. GSQ is stochastic due to Gumbel-Softmax sampling. However, repeated runs on early-layer block-wise reconstruction show low variance in the optimization loss, hence given the cost of 70B- and MoE-scale quantization, we report a single run per configuration. All experiments were conducted primarily on nodes with 8×H200 or 8×B300 GPUs. 
+
+4.3 Llama-3.1 Results 
+
+Table 1 reports zero-shot accuracy on Llama-3.1-8B-Instruct and Llama-3.1-70B-Instruct at 2 bits, 
+
+3 bits, and non-uniform quantization settings. The main finding is consistent across model scales 10 Table 1: Zero-shot results on dense Llama models with ternary, 2-bit, 3-bit, and non-uniform quanti-zation (denoted by the NU superscript). We report accuracy on five standard zero-shot benchmarks, along with the average bits per parameter (bit/param), referring to the average number of bits needed to store a quantized tensor in the given format (excluding non-quantized tensors).                                                                                                                                                                                                                                  
+
+> Llama-3.1-8B-Instruct Llama-3.1-70B-Instruct Method bit/param ARC-C ARC-E Hella. PIQA Wino. Avg. bit/param ARC-C ARC-E Hella. PIQA Wino. Avg. FP16/BF16 16 55.12 79.63 79.16 80.85 73.80 73.71 16 63.48 83.92 84.58 83.95 79.01 78.99 QTIP 3.00 53.92 79.42 78.30 80.25 72.14 72.81 3.00 61.77 82.79 84.21 83.79 78.30 78.17 GPTQ 3.25 39.68 58.67 64.24 67.03 66.30 59.18 3.25 60.75 80.64 82.37 83.30 77.98 77.01 QuIP 3.25 52.30 76.68 75.37 78.84 71.90 71.02 3.25 62.12 82.45 82.83 82.10 78.06 77.51 EfficientQAT 3.25 52.99 78.91 76.85 79.76 71.59 72.02 3.25 61.86 83.88 82.79 82.48 76.01 77.40
+> GSQ (ours) 3.13 52.99 78.37 76.66 80.03 73.56 72.32 3.13 62.12 82.83 83.30 82.75 78.93 77.99 GSQ (ours) –––––––2.62 NU 59.60 81.40 82.90 82.90 80.40 77.50
+> GSQ (ours) 2.37 NU 50.26 74.41 74.81 78.13 69.61 69.44 2.37 NU 60.20 81.40 82.60 82.40 80.60 77.40 QTIP 2.00 50.68 75.42 75.02 78.18 70.09 69.88 2.00 61.69 81.69 82.95 82.43 77.51 77.25 PV-Tuning 2.27 50.26 73.91 75.28 79.16 70.56 69.83 2.07 58.62 80.72 82.72 81.56 77.74 76.27 GPTQ 2.37 24.91 27.61 30.50 52.83 51.78 37.53 2.37 38.23 58.63 60.11 72.80 57.14 57.38 QuIP 2.37 23.72 28.96 38.65 53.86 50.83 39.20 2.37 39.51 60.44 68.95 73.61 65.35 61.57 EfficientQAT 2.37 43.77 67.55 68.65 74.65 64.33 63.79 2.37 54.86 77.27 79.01 80.36 65.67 71.43
+> GSQ (ours) 2.13 48.12 72.35 73.42 78.07 70.80 68.55 2.13 58.87 79.55 82.11 81.07 76.24 75.57 GSQ (ours) 1.71 42.83 67.13 67.91 73.50 65.82 63.44 –––––––
+
+and bit-widths: GSQ is the strongest scalar quantization method in our comparisons and even remains competitive with recent VQ approaches. 2-bit results. At 2 bits, GSQ substantially improves over GPTQ, QuIP, and EfficientQAT in average accuracy on both the 8B and 70B models. This is notable because GSQ employs symmetric 
+
+quantization without zero-points, whereas the scalar baselines are permitted additional asymmetric parameters. The improvement therefore cannot be attributed to a more flexible scalar quantizer; it comes from improved optimization of the discrete assignments. This is precisely the regime in which GSQ is designed to help, where the scalar grid is small enough that greedy or local assignment choices cause significant quantization error. GSQ remains below the strongest VQ baselines, which is expected given that VQ methods rely on more expressive codebook-based representations and are not restricted to a few scalar levels. Nevertheless, the remaining gap is considerably smaller than the gap between prior scalar methods and VQ. On Llama-3.1-70B at 2 bits, GSQ exceeds the best scalar baseline by 4.14 average points, trails QTIP and PV-Tuning by only 1.68 and 0.70 points, respectively. This proves that a carefully optimized symmetric scalar quantizer can close a substantial portion of the gap to far more expressive low-bit schemes. 
+
+3-bit results. At 3 bits, all methods improve, but the overall ordering is preserved. GSQ again outperforms the scalar baselines and approaches the VQ frontier, now by a considerably smaller margin. The persistence of this trend at 3 bits indicates that GSQ is beneficial beyond the most extreme 2-bit setting and that the underlying discrete optimization problem remains non-trivial as the grid grows from four to eight levels. 
+
+Non-Uniform results. Because GSQ produces standard scalar quantized layers, it naturally supports 
+
+non-uniform bit allocation, in which different layers are assigned different bit-widths (e.g., some layers at 3 bits and others at 2 bits) to achieve a target average rate. This is motivated by the observation that not all layers are equally sensitive to quantization: allocating more bits to sensitive layers and fewer to robust ones can yield a better accuracy-compression trade-off than using a single uniform bit-width everywhere. Table 1 includes non-uniform GSQ results on Llama-3.1-70B-Instruct at 2.62 and 2.37 average bits per parameter. These configurations interpolate between the uniform 
+
+3-bit and 2-bit operating points. Llama-3.1-8B-Instruct is also evaluated at 2.37 average bits per parameter. 
+
+Ternary (1.58-bit) results. Table 1 additionally reports ternary quantization results for GSQ on Llama-3.1-8B-Instruct. Despite operating at a lower bit-width, ternary GSQ outperforms or matches 11 Table 2: End-to-end inference speedup for GSQ-quantized Llama-3.1-70B-Instruct on NVIDIA L40s GPUs (vLLM + Humming kernels). TPS/GPU = output tokens per second per GPU.                   
+
+> Method Avg bit/param ShareGPT Speedup TPS/GPU
+> BF16 (4 GPU) 16.00 60.3 1.00 ×
+> Uniform 3-bit 3.00 289.6 4.80 ×
+> Non-uniform 2.62 2.62 301.1 4.99 ×
+> Non-uniform 2.37 2.37 329.2 5.46 ×
+> Uniform 2-bit 2.00 374.0 6.20 ×
+
+all scalar quantization baselines run at the higher 2-bit precision, improving by more than 20 average accuracy points over 2-bit GPTQ and QuIP and nearly matching EfficientQAT. 
+
+Speedup. A key advantage of scalar quantization over vector- or trellis-based methods is that it can directly leverage highly optimized low-precision GEMM kernels, translating memory savings into proportional throughput gains. Table 2 reports end-to-end inference throughput for GSQ-quantized Llama-3.1-70B-Instruct models served with vLLM [Kwon et al., 2023] and Humming kernels [InclusionAI, 2025] on NVIDIA L40s GPUs. We report output tokens per second per GPU (TPS/GPU) to normalize across tensor-parallelism configurations, using a representative ShareGPT (short, conversational) workload. 3 Uniform 2-bit quantization achieves up to 6.2× speedup over BF16, while the non-uniform configurations at 2.37 and 2.62 average bits provide 4.99 –5.46 × speedup, demonstrating that non-uniform bit allocation offers a practical accuracy–throughput trade-off within a single, kernel-compatible scalar format. 
+
+4.4 Kimi-K2.5 Results 
+
+We further evaluate GSQ on Kimi-K2.5, a 1T parameters mixture-of-experts model, which is natively quantized to 4-bit. In this setting, we quantize the model only to 2 bits ; unlike the dense Llama experiments, we do not compare against external quantization baselines and instead focus on the comparison between the original full-precision model and its 2-bit GSQ counterpart. As explained before, we quantize only the expert weights, leave shared experts untouched, and ignore the vision components. Table 3 reports the results on several reasoning and coding benchmarks. Overall, the results show that GSQ remains remarkably strong even in this significantly more challenging MoE setting. On mathematical and coding-oriented evaluations, the 2-bit GSQ model stays very close to the original model and in some cases even improves upon it. In particular, GSQ improves from 61 .37 to 69 .37 on LiveCodeBench v6 and from 96 .68 to 97 .32 on MATH500, while remaining competitive on AIME 25 ( 95 .33 to 93 .00 ). On the other hand, we observe a more noticeable drop on GPQA Diamond, from 
+
+89 .29 to 76 .57 .We believe this pattern is largely explained by the calibration dataset. For Kimi-K2.5, GSQ is trained solely on the OpenThoughts dataset, which is heavily skewed toward mathematics and code. As a result, the quantized model appears particularly well adapted to mathematical reasoning and code generation, while losing some performance on domains that are less represented in calibration, such as science-heavy question answering. The drop on GPQA Diamond, which contains questions from areas such as biology, chemistry, and physics, is consistent with this interpretation. We therefore view this result not primarily as a limitation of the quantization method itself, but as evidence that calibration data composition matters substantially for low-bit quantization of very large instruction-tuned models. We also evaluate long-context performance using OpenAI-MRCR across multiple context-length ranges. The results show that GSQ preserves long-context behavior reasonably well. At shorter and medium context lengths, the quantized model is competitive with or better than the original model, improving from 95 .37 to 97 .81 in the 0–8k range, from 77 .81 to 85 .75 in the 8k–16k range, and from 
+
+69 .19 to 74 .41 in the 16k–32k range. At longer ranges, however, the trend reverses slightly: GSQ drops from 57 .10 to 53 .73 in 32k–64k, from 59 .50 to 59 .03 in 64k–128k, and from 46 .04 to 44 .91 in 128k–256k. Thus, while 2-bit GSQ retains strong long-context capability overall, the most extreme context lengths remain more fragile under aggressive quantization. 
+
+> 3https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered
+
+12 Table 3: Results on Kimi-K2.5. We compare the original model and its 2-bit GSQ version on mathematical reasoning, scientific QA, and coding benchmarks. Here, n denotes the number of repeated evaluation runs used to estimate the reported score.                       
+
+> Method bit/param AIME 25 GPQA Diamond LiveCodeBench v6 MATH 500 (n= 10 )(n= 5 )(n= 10 )(n= 5 )Base 4.5 95.33 89.29 61.37 96.68 GSQ (Ours) 2.125 93.00 76.57 69.37 97.32
+
+Table 4: Kimi K2.5 long-context results on OpenAI-MRCR with 3 repeats and 4 needles. GSQ preserves strong performance up to medium-long contexts and even improves over the original model in the shorter ranges, while showing modest degradation at the longest context lengths.                      
+
+> Method bit/param 0–8k 8k–16k 16k–32k 32k–64k 64k–128k 128k–256k Base 4.5 95.37 77.81 69.19 57.10 59.50 46.04
+> GSQ (Ours) 2.125 97.81 85.75 74.41 53.73 59.03 44.91
+
+A final point worth noting is that our LiveCodeBench score for the original Kimi-K2.5 model is lower than the number reported in the model card (roughly 85%). We were not able to reproduce that figure because the exact evaluation protocol used there is not publicly disclosed. For fairness, all numbers in Table 3 and Table 4 are therefore obtained under the same evaluation pipeline, and the comparison between the original and quantized models should be interpreted within that common setup. 
+
+## 5 Conclusion 
+
+We presented a sampling-based quantization method suggesting that the apparent divide between “simple” scalar quantization and more expressive vector- or trellis-based methods is smaller than previously believed. In the low-bit regime, much of the gap appears to be an optimization gap rather than a fundamental limitation of scalar formats. By turning per-weight grid assignment into a differentiable discrete optimization problem, GSQ substantially improves the accuracy of standard symmetric group-wise scalar quantization at 2 and 3 bits, while preserving full compatibility with existing scalar inference kernels and deployment stacks. Although the area of weight quantization is by now very well studied, our work presents a new combination of accuracy, simplicity, and kernel compatibility. On dense Llama models, GSQ consistently outperforms prior scalar baselines and closes most of the gap to state-of-the-art VQ methods; at ternary precision, it is already competitive with or better than several stronger-bit scalar alternatives. At the same time, because GSQ does not rely on learned codebooks or specialized decoding schemes, it remains practical at the scale of modern MoE models, where more expressive quantizers are difficult to train and deploy. More broadly, these results indicate that there is still substantial headroom in hardware-friendly scalar quantization, provided that the discrete optimization problem is treated seriously. An important direction for future work is to extend this idea beyond weight-only PTQ—for example to activation and KV-cache quantization, richer blockwise or task-aware objectives, and more efficient relaxations for even lower-bit or jointly quantized settings. 
+
+## Acknowledgements 
+
+The authors would like to thank Verda Cloud for computational support, and in particular Paul Chang for his consistent, prompt and generous help throughout the project. We acknowledge the use of Humming kernels developed by Jinzhen Lin and the Venus Team, Ant Group. The ISTA team was supported in part by the FWF Bilateral AI Center of Excellence, as well as a generous grant from the NVIDIA corporation. 13 References 
+
+Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. Quarot: Outlier-free 4-bit inference in rotated llms. Advances in Neural Information Processing Systems , 37:100213–100240, 2024. Yonatan Bisk, Rowan Zellers, Jianfeng Gao, Yejin Choi, et al. Piqa: Reasoning about physical commonsense in natural language. In Proceedings of the AAAI conference on artificial intelligence ,volume 34, pages 7432–7439, 2020. Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher M De Sa. Quip: 2-bit quantization of large language models with guarantees. Advances in Neural Information Processing Systems , 36: 4396–4429, 2023. Hong Chen, Chengtao Lv, Liang Ding, Haotong Qin, Xiabin Zhou, Yifu Ding, Xuebo Liu, Min Zhang, Jinyang Guo, Xianglong Liu, et al. Db-llm: Accurate dual-binarization for efficient llms. 
+
+arXiv preprint arXiv:2402.11960 , 2024a. Mengzhao Chen, Wenqi Shao, Peng Xu, Jiahao Wang, Peng Gao, Kaipeng Zhang, and Ping Luo. Efficientqat: Efficient quantization-aware training for large language models. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) ,pages 10081–10100, 2025a. Tianqi Chen, Zhe Li, Weixiang Xu, Zeyu Zhu, Dong Li, Lu Tian, Emad Barsoum, Peisong Wang, and Jian Cheng. Ternaryllm: Ternarized large language model. arXiv preprint arXiv:2406.07177 ,2024b. Xiangning Chen, Chen Liang, Da Huang, Esteban Real, Kaiyuan Wang, Yao Liu, Hieu Pham, Xuanyi Dong, Thang Luong, Cho-Jui Hsieh, Yifeng Lu, and Quoc V. Le. Symbolic discovery of optimization algorithms, 2023. URL https://arxiv.org/abs/2302.06675 .Yuanteng Chen, Yuantian Shao, Peisong Wang, and Jian Cheng. Eac-moe: Expert-selection aware compressor for mixture-of-experts large language models. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 12942– 12963, 2025b. Krishna Teja Chitty-Venkata, Jie Ye, and Murali Emani. Mopeq: Mixture of mixed precision quantized experts. In Proceedings of the IEEE/CVF International Conference on Computer Vision ,pages 4023–4032, 2025. Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. Think you have solved question answering? try arc, the ai2 reasoning challenge. 
+
+arXiv preprint arXiv:1803.05457 , 2018. Matthieu Courbariaux, Yoshua Bengio, and Jean-Pierre David. Binaryconnect: Training deep neural networks with binary weights during propagations. Advances in neural information processing systems , 28, 2015. Alexandre Défossez, Yossi Adi, and Gabriel Synnaeve. Differentiable model compression via pseudo quantization noise. arXiv preprint arXiv:2104.09987 , 2021. Tim Dettmers, Mike Lewis, Sam Shleifer, and Luke Zettlemoyer. 8-bit optimizers via block-wise quantization. arXiv preprint arXiv:2110.02861 , 2021. Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. Llm.int8(): 8-bit matrix multiplication for transformers at scale. arXiv preprint arXiv:2208.07339 , 2022. Tim Dettmers, Ruslan Svirschevski, Vage Egiazarian, Denis Kuznedelev, Elias Frantar, Saleh Ashk-boos, Alexander Borzunov, Torsten Hoefler, and Dan Alistarh. Spqr: A sparse-quantized represen-tation for near-lossless llm weight compression. arXiv preprint arXiv:2306.03078 , 2023. Peijie Dong, Lujun Li, Yuedong Zhong, Dayou Du, Ruibo Fan, Yuhan Chen, Zhenheng Tang, Qiang Wang, Wei Xue, Yike Guo, et al. Stbllm: Breaking the 1-bit barrier with structured binary llms. 
+
+arXiv preprint arXiv:2408.01803 , 2024. 14 Vage Egiazarian, Andrei Panferov, Denis Kuznedelev, Elias Frantar, Artem Babenko, and Dan Alistarh. Extreme compression of large language models via additive quantization. arXiv preprint arXiv:2401.06118 , 2024. Steven K Esser, Jeffrey L McKinstry, Deepika Bablani, Rathinakumar Appuswamy, and Dharmen-dra S Modha. Learned step size quantization. arXiv preprint arXiv:1902.08153 , 2019. Gongfan Fang, Hongxu Yin, Saurav Muralidharan, Greg Heinrich, Jeff Pool, Jan Kautz, Pavlo Molchanov, and Xinchao Wang. Maskllm: Learnable semi-structured sparsity for large language models. Advances in Neural Information Processing Systems , 37:7736–7758, 2024. Yi-Zeng Fang and Juinn-Dar Huang. Router choice matters: Rank-aware post-training quantization for moe models. Elias Frantar and Dan Alistarh. Qmoe: Practical sub-1-bit compression of trillion-parameter models. 
+
+arXiv preprint arXiv:2310.16795 , 2023. Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. Gptq: Accurate post-training quantization for generative pre-trained transformers. arXiv preprint arXiv:2210.17323 , 2022. Zhongqian Fu, Ning Ding, Kai Han, Xianzhi Yu, Xiaosong Li, Xinghao Chen, Yehui Tang, and Yunhe Wang. Eaquant: Enhancing post-training quantization for moe models via expert-aware optimization. arXiv preprint arXiv:2506.13329 , 2025. Leo Gao, Jonathan Tow, Baber Abbasi, Stella Biderman, Sid Black, Anthony DiPofi, Charles Foster, Laurence Golding, Jeffrey Hsu, Alain Le Noac’h, Haonan Li, Kyle McDonell, Niklas Muennighoff, Chris Ociepa, Jason Phang, Laria Reynolds, Hailey Schoelkopf, Aviya Skowron, Lintang Sutawika, Eric Tang, Anish Thite, Ben Wang, Kevin Wang, and Andy Zou. A framework for few-shot language model evaluation, 12 2023. URL https://zenodo.org/records/10256836 .Georgi Gerganov and contributors. llama.cpp: Inference of LLaMA models in pure C/C++. https: //github.com/ggerganov/llama.cpp , 2023. Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, et al. The llama 3 herd of models. arXiv preprint arXiv:2407.21783 , 2024. Etash Guha, Ryan Marten, Sedrick Keh, Negin Raoof, Georgios Smyrnis, Hritik Bansal, Marianna Nezhurina, Jean Mercat, Trung Vu, Zayne Sprague, Ashima Suvarna, Benjamin Feuer, Liangyu Chen, Zaid Khan, Eric Frankel, Sachin Grover, Caroline Choi, Niklas Muennighoff, Shiye Su, Wanjia Zhao, John Yang, Shreyas Pimpalgaonkar, Kartik Sharma, Charlie Cheng-Jie Ji, Yichuan Deng, Sarah Pratt, Vivek Ramanujan, Jon Saad-Falcon, Jeffrey Li, Achal Dave, Alon Albalak, Kushal Arora, Blake Wulfe, Chinmay Hegde, Greg Durrett, Sewoong Oh, Mohit Bansal, Saadia Gabriel, Aditya Grover, Kai-Wei Chang, Vaishaal Shankar, Aaron Gokaslan, Mike A. Merrill, Tatsunori Hashimoto, Yejin Choi, Jenia Jitsev, Reinhard Heckel, Maheswaran Sathiamoorthy, Alexandros G. Dimakis, and Ludwig Schmidt. Openthoughts: Data recipes for reasoning models, 2025. URL https://arxiv.org/abs/2506.04178 .Yufei Guo, Zecheng Hao, Jiahang Shao, Jie Zhou, Xiaode Liu, Xin Tong, Yuhan Zhang, Yuanpei Chen, Weihang Peng, and Zhe Ma. Pt-bitnet: Scaling up the 1-bit large language model with post-training quantization. Neural Networks , page 107855, 2025. Babak Hassibi, David G Stork, and Gregory J Wolff. Optimal brain surgeon and general network pruning. In IEEE international conference on neural networks , pages 293–299. IEEE, 1993. Charles Herrmann, Richard Strong Bowen, and Ramin Zabih. Channel selection using gumbel softmax. In European conference on computer vision , pages 241–257. Springer, 2020. Xing Hu, Zhixuan Chen, Dawei Yang, Zukang Xu, Chen Xu, Zhihang Yuan, Sifan Zhou, and Jiangyong Yu. Moequant: Enhancing quantization for mixture-of-experts large language models via expert-balanced sampling and affinity guidance. arXiv preprint arXiv:2505.03804 , 2025. 15 Hong Huang, Decheng Wu, Rui Cen, Guanghua Yu, Zonghang Li, Kai Liu, Jianchen Zhu, Peng Chen, Xue Liu, and Dapeng Wu. Tequila: Trapping-free ternary quantization for large language models. 
+
+arXiv preprint arXiv:2509.23809 , 2025. Wei Huang, Yangdong Liu, Haotong Qin, Ying Li, Shiming Zhang, Xianglong Liu, Michele Magno, and Xiaojuan Qi. Billm: Pushing the limit of post-training quantization for llms. arXiv preprint arXiv:2402.04291 , 2024. Hugging Face. The Hugging Face model hub. https://huggingface.co/models , 2024. InclusionAI. Humming: An open-source toolkit for efficient LLM inference with mixed-precision quantization, 2025. URL https://github.com/inclusionAI/humming . Open-source library for vLLM-integrated weight-only quantization kernels supporting integer bitwidths 4–8. Naman Jain, King Han, Alex Gu, Wen-Ding Li, Fanjia Yan, Tianjun Zhang, Sida Wang, Armando Solar-Lezama, Koushik Sen, and Ion Stoica. Livecodebench: Holistic and contamination free evaluation of large language models for code. arXiv preprint arXiv:2403.07974 , 2024. Eric Jang, Shixiang Gu, and Ben Poole. Categorical reparameterization with gumbel-softmax. arXiv preprint arXiv:1611.01144 , 2016. Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with pagedattention. In Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles , 2023. Changhun Lee, Jungyu Jin, Taesu Kim, Hyungjun Kim, and Eunhyeok Park. Owq: Outlier-aware weight quantization for efficient fine-tuning and inference of large language models. In Proceedings of the AAAI Conference on Artificial Intelligence , volume 38, pages 13355–13364, 2024. Zhiteng Li, Xianglong Yan, Tianao Zhang, Haotong Qin, Dong Xie, Jiang Tian, Linghe Kong, Yulun Zhang, Xiaokang Yang, et al. Arb-llm: Alternating refined binarizations for large language models. 
+
+arXiv preprint arXiv:2410.03129 , 2024. Hunter Lightman, Vineet Kosaraju, Yuri Burda, Harrison Edwards, Bowen Baker, Teddy Lee, Jan Leike, John Schulman, Ilya Sutskever, and Karl Cobbe. Let’s verify step by step. In The twelfth international conference on learning representations , 2023. Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. Awq: Activation-aware weight quantization for on-device llm compression and acceleration. Proceedings of machine learning and systems , 6: 87–100, 2024. Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Krish-namoorthi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. Spinquant: Llm quantization with learned rotations. arXiv preprint arXiv:2405.16406 , 2024. Anton Lozhkov, Loubna Ben Allal, Leandro von Werra, and Thomas Wolf. Fineweb-edu: the finest collection of educational content, 2024. URL https://huggingface.co/datasets/ HuggingFaceFW/fineweb-edu .Chris J Maddison, Andriy Mnih, and Yee Whye Teh. The concrete distribution: A continuous relaxation of discrete random variables. arXiv preprint arXiv:1611.00712 , 2016. Vladimir Malinovskii, Denis Mazur, Ivan Ilin, Denis Kuznedelev, Konstantin Burlachenko, Kai Yi, Dan Alistarh, and Peter Richtarik. Pv-tuning: Beyond straight-through estimation for extreme llm compression. Advances in Neural Information Processing Systems , 37:5074–5121, 2024. Vladimir Malinovskii, Andrei Panferov, Ivan Ilin, Han Guo, Peter Richtárik, and Dan Alistarh. HIGGS: Pushing the limits of large language model quantization via the linearity theorem. In 
+
+Proceedings of the 2025 Conference of the North American Chapter of the Association for Compu-tational Linguistics , volume 1, pages 10857–10886. Association for Computational Linguistics, 2025. 16 Ollama contributors. Ollama: Get up and running with large language models locally. https: //github.com/ollama/ollama , 2023. Mohammad Rastegari, Vicente Ordonez, Joseph Redmon, and Ali Farhadi. Xnor-net: Imagenet classification using binary convolutional neural networks. In European conference on computer vision , pages 525–542. Springer, 2016. David Rein, Betty Li Hou, Asa Cooper Stickland, Jackson Petty, Richard Yuanzhe Pang, Julien Dirani, Julian Michael, and Samuel R Bowman. Gpqa: A graduate-level google-proof q&a benchmark. In 
+
+First conference on language modeling , 2024. Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. Winogrande: An adversarial winograd schema challenge at scale. Communications of the ACM , 64(9):99–106, 2021. Yuzhang Shang, Zhihang Yuan, Qiang Wu, and Zhen Dong. Pb-llm: Partially binarized large language models. arXiv preprint arXiv:2310.00034 , 2023. Yuxuan Sun, Ruikang Liu, Haoli Bai, Han Bao, Kang Zhao, Yuening Li, Jiaxin Hu, Xianzhi Yu, Lu Hou, Chun Yuan, et al. Flatquant: Flatness matters for llm quantization. arXiv preprint arXiv:2410.09426 , 2024. Kimi Team, Yifan Bai, Yiping Bao, Y Charles, Cheng Chen, Guanduo Chen, Haiting Chen, Huarong Chen, Jiahao Chen, Ningxin Chen, et al. Kimi k2: Open agentic intelligence. arXiv preprint arXiv:2507.20534 , 2025. Kimi Team, Tongtong Bai, Yifan Bai, Yiping Bao, SH Cai, Yuan Cao, Y Charles, HS Che, Cheng Chen, Guanduo Chen, et al. Kimi k2. 5: Visual agentic intelligence. arXiv preprint arXiv:2602.02276 , 2026. Albert Tseng, Jerry Chee, Qingyao Sun, Volodymyr Kuleshov, and Christopher De Sa. Quip#: Even better llm quantization with hadamard incoherence and lattice codebooks. arXiv preprint arXiv:2402.04396 , 2024a. Albert Tseng, Qingyao Sun, David Hou, and Christopher M De Sa. Qtip: Quantization with trellises and incoherence processing. Advances in Neural Information Processing Systems , 37:59597–59620, 2024b. Turboderp. exllamav3: An optimized quantization and inference library for local LLMs. https: //github.com/turboderp-org/exllamav3 , 2025. Unsloth. Kimi-k2.5. https://huggingface.co/unsloth/Kimi-K2.5 , 2026. Mart van Baalen, Andrey Kuzmin, Markus Nagel, Peter Couperus, Cédric Bastoul, Eric Mahurin, Tijmen Blankevoort, and Paul Whatmough. GPTVQ: The blessing of dimensionality for LLM quantization. In International Conference on Machine Learning (ICML) , 2024. Kiran Vodrahalli, Santiago Ontanon, Nilesh Tripuraneni, Kelvin Xu, Sanil Jain, Rakesh Shivanna, Jeffrey Hui, Nishanth Dikkala, Mehran Kazemi, Bahare Fatemi, et al. Michelangelo: Long context evaluations beyond haystacks via latent structure queries. arXiv preprint arXiv:2409.12640 , 2024. Hongyu Wang, Shuming Ma, Li Dong, Shaohan Huang, Huaijie Wang, Lingxiao Ma, Fan Yang, Ruiping Wang, Yi Wu, and Furu Wei. Bitnet: Scaling 1-bit transformers for large language models. 
+
+arXiv preprint arXiv:2310.11453 , 2023. Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. Smoothquant: Accurate and efficient post-training quantization for large language models. In International conference on machine learning , pages 38087–38099. PMLR, 2023. He Xiao, Runming Yang, Qingyao Yang, Wendong Xu, Zhen Li, Yupeng Su, Zhengwu Liu, Hongxia Yang, and Ngai Wong. Ptqtp: Post-training quantization to trit-planes for large language models. 
+
+arXiv preprint arXiv:2509.16989 , 2025. 17 Xianglong Yan, Chengzhu Bao, Zhiteng Li, Tianao Zhang, Kaicheng Yang, Haotong Qin, Ruobing Xie, Xingwu Sun, and Yulun Zhang. Pt 2-llm: Post-training ternarization for large language models. 
+
+arXiv preprint arXiv:2510.03267 , 2025. Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. Hellaswag: Can a machine really finish your sentence? In Proceedings of the 57th annual meeting of the association for computational linguistics , pages 4791–4800, 2019. Yifan Zhang and Team Math-AI. American invitational mathematics examination (aime) 2025, 2025. Jiaqi Zhao, Miao Zhang, Ming Wang, Yuzhang Shang, Kaihao Zhang, Weili Guan, Yaowei Wang, and Min Zhang. Ptq1. 61: Push the real limit of extremely low-bit post-training quantization methods for large language models. arXiv preprint arXiv:2502.13179 , 2025. Zihao Zheng, Xiuping Cui, Size Zheng, Maoliang Li, Jiayu Chen, Yun Liang, and Xiang Chen. Moqa: Rethinking moe quantization with multi-stage data-model distribution awareness. arXiv preprint arXiv:2503.21135 , 2025. 18 Table 5: Training hyperparameters for the Llama experiments.                                                        
+
+> Bit-width Logits lr Group scales lr Weight decay Betas Epochs # Seqs. Seq. len. Batch size Group size τschedule κschedule αstd
+> 1.58 -bit 1e-4 5e-5 1.0(0 .9,0.95) 20 4096 4096 64 128 linear: 2→0.05 linear: 100 →500 30.01 2/3-bit 1e-4 5e-5 1.0(0 .9,0.95) 20 4096 4096 64 128 linear: 2→0.05 linear: 100 →500 60.01
+
+Table 6: Training hyperparameters for the Kimi experiment.                                    
+
+> Bit-width Logits lr Group scales lr Weight decay Betas Epochs # Seqs. Seq. len. Batch size Group size τschedule κschedule αstd
+> 2-bit 2e-4 1e-5 1.0(0 .9,0.95) 10 4096 4096 64 128 linear: 2→0.05 linear: 100 →500 60.01
+
+## A Additional Experimental Details 
+
+A.1 Full training hyperparameters 
+
+Tables 5 and 6 summarize the training hyperparameters used in our block-wise optimization experi-ments. For the dense Llama models, we use 20 epochs of block-wise optimization. For Kimi models, we use only 10 epochs. Although Kimi models are much larger overall, the optimization problem is decomposed across 384 experts and solved independently for each expert. As a result, each individual optimization problem is substantially smaller than in the dense Llama models, which makes fewer epochs sufficient in practice. There is one additional stabilization detail for Llama-3.1-70B. For this model only, we apply gradient clipping during training, and only to the logits of the discrete parameters, not to the group scales. The clipping threshold is set to 10 −6 for the 2-bit setting and 10 −8 for the 3-bit setting. 
+
+A.2 Effect of end-to-end scale-only fine-tuning 
+
+Table 7 isolates the contribution of the end-to-end scale-only fine-tuning stage for the 2-bit Llama models. In this stage, the discrete assignments found by block-wise optimization are kept fixed, and only the per-group scales are updated using the distillation objective described in Section 4.3. This ablation shows how much additional performance can be recovered by a lightweight global refinement after the block-wise discrete search. The results in Table 7 show that the block-wise stage already captures the main benefit of the discrete optimization, while a single end-to-end pass that updates only the scales can provide an additional refinement without revisiting the discrete assignments. 
+
+A.3 Connection to MaskLLM: a 2:4 sparsity comparison 
+
+Our method is directly inspired by MaskLLM [Fang et al., 2024]. Conceptually, GSQ extends the same discrete optimization viewpoint from structured sparsity to low-bit quantization, while also changing the optimization granularity from end-to-end training to block-wise training. Since the latter is substantially cheaper, it is natural to ask whether the block-wise formulation remains competitive even in the original setting for which MaskLLM was designed. To answer this, we perform an additional experiment on Llama-2-7B in the original 2:4 structured sparsity setting of MaskLLM. This experiment isolates the optimization strategy from the represen-tation format: rather than comparing sparsity to quantization, we compare end-to-end MaskLLM training to our block-wise formulation on the same sparsity task. Importantly, the two methods do not optimize exactly the same variables. MaskLLM learns only the binary sparsity mask while keeping the underlying dense weights fixed at their original pretrained values. In contrast, in our formulation we jointly optimize both the mask and the weight values. Therefore, this comparison should not be interpreted as a strictly matched ablation, but rather as evidence that the proposed optimization framework remains effective, and in practice stronger, even when applied back to the structured sparsity setting that originally motivated MaskLLM. As shown in Table 8, the block-wise variant yields a better average zero-shot score across the same five tasks used in the main text. 19 Table 7: Effect of end-to-end scale-only fine-tuning on the 2-bit GSQ models.                                                  
+
+> Llama-3.1-8B-Instruct Llama-3.1-70B-Instruct Setting ARC-C ARC-E Hella. PIQA Wino. Avg. ARC-C ARC-E Hella. PIQA Wino. Avg. GSQ, block-wise only 44.20 72.18 66.70 76.44 68.19 65.54 57.25 79.71 78.08 80.09 77.11 74.45 GSQ, + scale fine-tuning 48.12 72.35 73.42 78.07 70.80 68.55 58.87 79.55 82.11 81.07 76.24 75.57
+> ∆+3 .92 +0 .17 +6 .72 +1 .63 +2 .61 +3 .01 +1 .62 −0.16 +4 .03 +0 .98 −0.87 +1 .12
+
+Table 8: Comparison to MaskLLM on the original 2:4 structured sparsity task of Fang et al. [2024], evaluated on Llama-2-7B.                         
+
+> Method ARC-C ARC-E Hella. PIQA Wino. Avg. FP16/BF16 46.25 74.58 75.98 79.11 69.14 69.01 MaskLLM (end-to-end, mask-only) 37.97 64.98 68.27 76.22 65.19 62.53 GSQ (block-wise, mask + weights) 40.02 68.18 65.31 75.35 65.43 62.86
+
+A.4 End-to-end Compression Runtime 
+
+Table 9 summarizes the end-to-end runtime of GSQ across different models using 8×H200 GPUs. As expected, the total runtime increases with model size. The 8B model completes in 10 hours, while Llama-3.1-70B-Instruct requires 68 hours. Interestingly, although Kimi-K2.5 is substantially larger than Llama-3.1-70B-Instruct, it completes in only 39 hours. This is mainly due to two factors. First, we do not quantize the attention layers for Kimi-K2.5, which decreases its computational cost. Second, we train Kimi-K2.5 for fewer epochs, which further reduces its total runtime. Overall, these results show that GSQ remains practical at different model scales, although larger models introduce a substantially higher runtime overhead. 
+
+A.5 GSM8K Results on Kimi-K2 Thinking 
+
+Table 10 reports GSM8K (flexible) accuracy for Kimi-K2 Thinking under GSQ and GPTQ [Frantar et al., 2022] at several bit-widths, including non-uniform configurations produced with HIGGS [Ma-linovskii et al., 2025]. GSQ retains over 92% accuracy down to 2 bits (uniform) and degrades gracefully to 91.05% at 1.75 average bits per parameter. GPTQ follows a similar trend at higher bit-widths but drops sharply at 2 bits (84.61%), showing the advantage of the discrete optimization in the low-bit regime. 20 Model Runtime Llama-3.1-8B-Instruct 10 hours Llama-3.1-70B-Instruct 68 hours Kimi-K2.5 39 hours 
+
+Table 9: Total runtime of GSQ for different models on 8×H200 GPUs. Table 10: GSM8K (flexible) accuracy on Kimi-K2.5 at various bit-widths. 
+
+Bit-width GSQ (Ours) GPTQ 
+
+4 (uniform) – 94.39 3 (uniform) – 93.78 2 (uniform) 92.95 84.61 1.75 (non-uniform) 91.05 –1.56 (uniform) 89.16 –
+
+21

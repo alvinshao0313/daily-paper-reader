@@ -1,0 +1,865 @@
+Title: Hive: A Multi-Agent Infrastructure for Algorithm- and Task-Level Scaling
+
+URL Source: https://arxiv.org/pdf/2604.17353v1
+
+Published Time: Tue, 21 Apr 2026 01:15:19 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# Hive: A Multi-Agent Infrastructure for Algorithm- and Task-Level Scaling 
+
+## Zizhang Luo ∗
+
+semiwaker@pku.edu.cn 
+
+Peking University Beijing, China 
+
+## Yuhao Luo ∗
+
+luoyuhao584@gmail.com 
+
+Peking University Beijing, China 
+
+## Youwei Xiao 
+
+shallwe@pku.edu.cn 
+
+Peking University Beijing, China 
+
+## Yansong Xu 
+
+yansongxu.mail@gmail.com 
+
+Peking University Beijing, China 
+
+## Runlin Guo 
+
+linyu22373@gmail.com 
+
+Peking University Beijing, China 
+
+## Yun Liang 
+
+ericlyun@pku.edu.cn 
+
+Peking University Beijing, China 
+
+## Abstract 
+
+Large language models are increasingly deployed as com-plex agentic systems that scale with task complexity. While prior work has extensively explored model- and system-level scaling, algorithm- and task-level scaling remain largely un-addressed, constraining the full potential of agentic systems. At the algorithm level, allocating additional inference-time computation can enhance workflow capacity but introduces cross-path redundancy: overlapping computations across multiple reasoning branches. At the task level, complex tasks can be decomposed into subproblems and delegated across multiple agents for improved scalability and parallelism. However, existing infrastructures’ scheduling is unaware of the existence of multiple agents, missing opportunities to optimize resource allocation. We propose Hive, a multi-agent infrastructure that enables algorithm- and task-level scaling. Hive features a description frontend that captures per-agent behavior and supports test-time scaling algorithms. Leveraging this specification, our backend introduces two key mechanisms: Logits Cache that reuses intermediate logits across redundant sampling paths to mitigate cross-path redundancy at the algorithm level, and 
+
+Agent-Aware Scheduling that efficiently allocates compute and KV-cache resources according to agent contributions at the task level. Experiments show that Logits Cache achieves an average speedup of 1.11 ×–1.76 × for re-sampling, and 
+
+Agent-Aware Scheduling reduces the hotspot miss rate by 
+
+33% –51% .
+
+Keywords: Multi-Agent System, LLM Inference, Test-Time Scaling 
+
+## 1 Introduction 
+
+Large language models (LLMs) have advanced rapidly in re-cent years [ 19 , 25 , 29 , 31 ], demonstrating strong capabilities in reasoning, generation, and decision-making. As their com-petence continues to grow, their role is also shifting from single-turn response engines to agentic problem solvers that 
+
+> ∗
+
+Both authors contributed equally to this work. root 
+
+guess1 
+
+guess2 
+
+verify 
+
+> The counter is not resetting
+> The counter overflows when it's full
+
+guess3 
+
+> overflow <= counter === 4'hff
+
+verify 
+
+guess4 
+
+> overflow <= counter === 4'hff && enable
+
+verify 
+
+(a) Algorithm-level Scaling using Tree-of-Thoughts Main Agent  
+
+> Context Gathering Agent
+> Lint Resolution Agent
+> Language Server
+> Waveform Viewer
+> Linter
+> File System
+> Tools Agents
+> Call & Response Simulator
+
+(b) Task-level Scaling by Task Delegation 
+
+Figure 1. Case study on a Hardware Verification Agent can plan over multiple steps, invoke external tools, and co-ordinate toward complex goals[ 2, 23 , 26 ]. In these emerging workloads, inference is no longer a collection of independent prompt-response pairs; instead, it becomes a stateful process in which context accumulates across turns, intermediate re-sults are repeatedly reused, and multiple reasoning branches or agents may coexist within a single task. As problem complexity continues to grow, effectively solv-ing real-world tasks often requires scaling LLM systems along multiple dimensions rather than relying on a fixed model and static inference procedure. To better character-ize this trend, we summarize the scaling landscape of LLM systems into four complementary paradigms: 
+
+• Model-Level Scaling directly improves the capability of LLMs by increasing model size and fine-tuning with domain-specific datasets, typically leading to stronger rea-soning and generation ability. 
+
+1
+
+> arXiv:2604.17353v1 [cs.AI] 19 Apr 2026 Zizhang Luo, Yuhao Luo, Youwei Xiao, Yansong Xu, Runlin Guo, and Yun Liang
+
+• System-Level Scaling improves serving efficiency through additional hardware resources and parallelism, enabling higher throughput, lower latency, and better scalability under concurrent workloads. 
+
+• Algorithm-Level Scaling improves the potential of the same workflow by allocating additional computation at inference time, e.g., test-time scaling[39]. 
+
+• Task-Level Scaling improves the scalability and robust-ness of problem solving by decomposing complex objec-tives into multiple interacting subproblems, often coordi-nated through multi-agent systems. However, optimization in existing inference systems has been concentrated mainly on model-level and system-level scaling. At the model level, substantial effort has been de-voted to quantization and compression[ 6 , 7 , 12 , 38 ], improv-ing model-hardware efficiency by reducing memory foot-print and computation cost. At the system level, a wide range of serving architectures and deployment strategies, such as PD-Disaggregation[ 28 , 41 ] and context parallelism[ 13 , 20 ], have been developed to improve the utilization of available hardware resources. By contrast, little attention has been paid to runtime support for algorithm-level and task-level scaling, even though both are becoming increasingly impor-tant in general or domain-specific agentic workloads. We illustrate the significance of algorithm- and task-level scaling through a case study on a hardware verification agent designed for RTL-level Automatic Program Repair (APR). At the algorithm level, the inherent stochasticity of large lan-guage models is unacceptable in high-assurance domains such as hardware verification, making test-time scaling es-sential for reliability. As shown in Figure 1a, the agent em-ploys Tree-of-Thought [ 36 ] to navigate the solution space and identify a verifying patch. The low-level intricacies of hardware create a vast and sparse solution landscape, where a naive ReAct loop is prone to losing focus. In contrast, Tree-of-Thoughts enables efficient exploration across multiple reasoning branches. Yet, this approach introduces Cross-Path Redundancy : as branches expand, they often share common prefixes and intermediate generations, which is a universal challenge to the major test-time scaling methods based on re-sampling. Existing inference engines [ 16 , 40 ]treat these branches as independent requests, leading to re-peated computation and significant overhead. Task-level scaling further enhances agentic systems by delegating subtasks to specialized agents. In the hardware verification example (Figure 1b), three agents collaborate: a main agent orchestrates program repair and simulation, a context-gathering agent extracts information via language server and waveform viewer, and a lint-resolution agent han-dles static issues to offload the main agent. This orchestration keeps each agent’s context focused and prevents overcrowd-ing. However, multi-agent systems raise a new challenge for the infrastructure: heterogeneous runtime character-istics among agents—varying input/output lengths, cache footprints, and context reuse patterns. In this example, the main agent is more significant and takes many more tokens than the other two agents. Current inference engines remain largely agent-unaware, processing all requests uniformly and failing to exploit the distinct execution patterns of different agents. In this paper, we present Hive , a multi-agent inference infrastructure for hardware verification that rethinks how modern inference engines support algorithm-level and task-level scaling. The key insight behind Hive is that the inef-ficiency of scaling workloads does not merely arise from increased compute demand, but also from the fact that ex-isting inference engines are not designed to fully exploit their structural regularities. Hive is composed of a multi-agent description front-end and LLM inference back-end. The front-end captures the per-agent behavior, supports test-time-scaling algorithms, and models multi-agent interaction as asynchronous coroutine-like task spawning and synchro-nization. In the back-end, for algorithm-level scaling, Hive in-troduces Logits Cache , a new caching paradigm that reuses intermediate logits across redundant sampling paths. Un-like existing inference engines that treat different reasoning branches as independent executions, Logits Cache captures reusable probability distribution on states across branches and avoids repeated re-sampling computation, thereby accel-erating hybrid test-time scaling while preserving output de-terminism. For task-level scaling, Hive introduces the Agent-Aware Scheduling mechanism that allocates compute and KV cache resources according to agent-specific runtime char-acteristics. By adapting resource allocation to the heteroge-neous behavior of different agents, Hive improves KV cache retention efficiency and overall serving utilization under multi-agent workloads. Experiments show that Logits Cache achieves an average speedup of 1.11 ×–1.76 × for re-sampling, and Agent-Aware Scheduling reduces the hotspot miss rate by 33% –51% .The main contributions of this paper are as follows: 
+
+• We propose Hive , a multi-agent inference infrastructure for hardware verification that provides algorithm-level and task-level scaling by modeling multi-agent and test-time scaling with the front-end and jointly optimizes in-ference execution in the back-end. 
+
+• For algorithm-level scaling , we propose a new caching paradigm called Logits Cache for hybrid test-time scaling to reduce redundant computation. 
+
+• For task-level scaling , we identify distinctive hetero-geneity in multi-agent workloads, and propose an agent-aware scheduler that allocates resources according to agent-specific characteristics. 
+
+> 2
+
+Hive: A Multi-Agent Infrastructure for Algorithm- and Task-Level Scaling Input   
+
+> state 1 state 2
+> state 4
+> state 3
+> state 5 state 6
+> state 7 state 8 ......
+> Output
+
+(a) Overall Tree-of-Thoughts workflow        
+
+> Thought
+> state 9 state 10
+> Pre fi ll
+> Logits Logits
+> Pre fi ll
+> Logits
+> Decode
+> Logits
+> Decode
+> ...... Decode ...... Decode
+> Logits Logits
+> Logits Logits
+> Decode Decode
+> ...... ......
+
+(b)  Detailed Tree-of-Thoughts process for State 4         
+
+> state 7 state 8
+> state 4 Pre fi ll
+> Logits Logits
+> Logits
+> Decode
+> Logits
+> Resample
+> ...... Decode ...... Resample
+> Logits Logits
+> Logits Logits
+> Decode Pre fi ll
+> ...... ......
+
+(c) Tree-of-Thoughts process using Logits Cache  
+
+> Load logits
+> state 8 state 7
+> state 4
+> ......
+
+Figure 2. (a) An example of branching reasoning in Tree-of-Thought. (b) A detailed view of the sampling process for State 4. (c) Tree-of-Thoughts process using Logits Cache 
+
+## 2 Background 
+
+2.1 Large Language Model (LLM) Inference 
+
+Modern LLMs[ 19 , 29 , 31 ] are typically served through an autoregressive inference process. Given an input prompt, the serving system first executes a prefill stage to process all prompt tokens and construct the KV cache, and then en-ters the decode stage to generate output tokens one by one. At each decoding step, the model produces a logits distri-bution over the vocabulary, from which the next token is selected or sampled according to the decoding strategy. Dur-ing decoding, the system reuses the cached keys and values from previous steps, thereby avoiding recomputation over the full prefix and significantly improving serving efficiency. This split execution model makes KV cache management, scheduling, and resource allocation central to the design of high-performance LLM inference systems[1, 28, 41]. 
+
+2.2 Test-Time Scaling 
+
+While training-time scaling has been the primary driver of recent advances in LLM capability[10, 15], its benefits have gradually slowed due to the high cost of pretraining and the limited availability of high-quality data. This trend has motivated the development of test-time scaling [ 39 ], which aims to improve model performance by allocating additional computation during inference rather than during training. As an inference infrastructure, we focus on three types of test-time scaling: parallel [17 , 33 ] scaling multi-samples the same prompt, sequential [3, 22 ] scaling iteratively improves on top of previous reply, and hybrid [36 , 37 ] scaling has both features of the prior two methods and forms a tree. Decision   
+
+> Patcher Viewer Searcher
+
+1
+
+> Summary
+
+3
+
+4
+
+2Assign Task Review Code Context Summary Context Query Code Draft Code Slice Compressed Context Retrieved Knowledge 
+
+> veri fi cation
+
+Figure 3. Simplified R 3A[ 21 ] multi-agent workflow example with five agents: Decision , Patcher , Viewer , Summary , and 
+
+Searcher .
+
+2.3 Multi-Agent System 
+
+A multi-agent system (MAS) consists of multiple interacting agents that collaborate through communication, informa-tion sharing, and decentralized decision-making to accom-plish a common objective. MAS has been widely proposed as a pivotal pathway for harnessing collective intelligence while preserving the specialized characteristics of individ-ual agents[ 8 , 11 , 18 ]. Compared with a single-agent system, which handles the entire task within a single execution en-tity, MAS provides a more natural abstraction for complex tasks that require decomposition, role specialization, and iterative coordination, and more fine-grained context man-agement. Besides, MAS also benefits from the parallel nature of LLMs, where batching can provide free computation and weight reuse, especially in self-hosted situations. 
+
+3Zizhang Luo, Yuhao Luo, Youwei Xiao, Yansong Xu, Runlin Guo, and Yun Liang decision view  
+
+> sum
+> ce
+> sum
+> patch code
+> search
+> view
+> 0
+> 20
+> 40
+> 60
+> Tokens(k)
+> Output Tokens
+> Non-cached Input Tokens
+> Cached Prefix Tokens
+> Invocations
+> 10
+> 20
+> 30
+> Invocations
+
+Figure 4. Profiling results of the R3A [ 21 ] multi-agent system based on 105 captured calls. Bars: Token usage across agent roles, including non-cached input tokens, output tokens, and cached prefix tokens. Line: Invocation counts across agent roles. 
+
+## 3 Motivation 
+
+3.1 Cross-Path Redundancy 
+
+At the algorithm level , we observed that test-time scal-ing, especially hybrid TTS methods, introduces substantial computational redundancy. To illustrate this issue, we use Tree-of-Thoughts [ 36 ] as a representative example. As shown in Figure 2(a), ToT organizes reasoning as a branching search process: starting from the input, the LLM expands multiple intermediate states, evaluates them, and continues explor-ing selected branches until reaching the final output. Here, green states indicate accepted branches retained for contin-ued exploration, whereas red states indicate branches that are pruned during search. In Figure 2(b), we zoom in on the detailed expansion pro-cess of State 4 . Starting from the full context of State 4 , one branch is first decoded into State 7 and State 8 . Obviously, 
+
+State 7 and State 8 share the entire prefix context, and such redundancy can be largely eliminated by existing techniques such as prefix caching[ 9 , 40 ], which reuse the shared prefix computation across branches. However, prefix sharing alone is insufficient to fully cap-ture the redundancy in hybrid TTS, since substantial re-peated computation still arises beyond the shared context during subsequent decoding. Different branches resampled from the same state often generate overlapping output to-kens during decoding, since under similar logits distributions, high-probability tokens remain more likely to be sampled across branches. Nevertheless, each branch still requires a full forward computation at every step to produce these log-its again. This repeated recomputation reveals a deeper form of redundancy that is not addressed by prefix reuse alone. We refer to this phenomenon as Cross-Path Redundancy .Our solution is introducing the Logits Cache , which stores the logits of previous inference during decoding. When the same prefix requests a re-sample, the first few decoding steps can be skipped until the sampler takes a different choice on the same logits distribution. 
+
+3.2 Heterogeneous Runtime Characteristics 
+
+At the task level , multi-agent systems improve end-to-end problem solving by decomposing complex tasks into multi-ple interacting agents, each responsible for a different sub-problem or role. However, this execution model also intro-duces substantially higher request concurrency, more com-plex inter-agent dependencies, and more heterogeneous re-source demands than conventional single-request inference. These characteristics place much stronger pressure on KV cache management, resource allocation, and overall serving throughput. Unfortunately, current inference[ 16 , 40 ] engines remain largely agent-agnostic: they schedule and allocate resources at the granularity of individual requests, without awareness of the higher-level agent structure behind them. In multi-agent systems, different agents are assigned distinct roles and therefore naturally handle different types of workloads[ 18 ]. To formally characterize this diversity, we performed a de-tailed profiling on a representative multi-agent system[ 21 ]with role-specialized agents, including decision , code review ,
+
+error summarization , and other task-specific agents. For each agent, we measured runtime metrics including invocation fre-quency, input/output token volume, and dynamic KV cache footprints. Multi-agent workloads exhibit substantial heterogeneous runtime characteristics across agents, both in invocation frequency and in their impact on end-to-end execution. We choose R 3A[ 21 ], an open-sourced multi-agent system for RTL program repair, as an example. Figure 3 shows its simpli-fied workflow. We observed that agents are not invoked uni-formly: core agents such as Decision , Patcher , and Viewer 
+
+are invoked much more frequently, while Summary and 
+
+Search behave as relatively cold agents. This imbalance im-plies that KV states generated by different agents do not have equal runtime value. Our profiling results in Figure 4 reveal significant heterogeneity in resource consumption across different agent roles. As shown in Figure 4, rather than a uniform distribution, the system’s runtime demand is highly skewed across agent roles, with more than 70% of both total token consumption and invocation frequency concentrated in a subset of agents. Such heterogeneity becomes especially problematic under memory pressure. In this workflow, the main execution path repeatedly traverses ❶ and ❷, making these agents the dominant contributors to runtime progress. When Search is subsequently invoked to retrieve auxiliary information, the resulting memory spike may push the KV cache toward its capacity limits. The system then needs to invoke Summary 
+
+to consolidate the retrieved results, requiring additional KV space. Under a traditional policy, such as LRU, eviction is 
+
+> 4
+
+Hive: A Multi-Agent Infrastructure for Algorithm- and Task-Level Scaling Front End §5         
+
+> Flow Graph Supervisor
+> state 1
+> state 2
+> state 3
+> TST
+> Agent
+> Agent
+> Agent
+> reqs
+> Back End §6-7
+> Server
+> Runtime Pro fi le§7 Resource Allocation §7 Inference §6
+> guide support Contribution
+> HIGH
+> LOW KV Cache
+> agents
+> Logits
+> Cache Sampling
+> Resample requests
+> Prioritized Eviction
+
+Figure 5. Overview of Hive Multi-Agent Infrastructure determined solely by generic access order. As a result, KV cache from frequently reused agents such as Programmer or 
+
+Reviewer may be evicted simply because they are less recent than the newly inserted Search states, even though they are far more likely to be reused in subsequent execution. Such agent-agnostic eviction can significantly degrade overall efficiency in multi-agent workloads. Based on these observations, Hive adopts the Agent-Aware Scheduling policy instead of a request-uniform one. In par-ticular, by estimating the contribution of each agent, the system can dynamically adjust its GPU residency budget for KV cache, prioritizing the retention of high-reuse KV states to reduce offloading overhead and improve overall serving efficiency. 
+
+## 4 Overview 
+
+To address these challenges, we introduce Hive , an inference framework for efficiently supporting both algorithm-level and task-level scaling workloads. Figure 5 illustrates the ar-chitecture of Hive . Hive features a descriptive frontend to define the multi-agents(Section 5). An agent is described as a coroutine generator, which is internally composed of a flow graph to define the basic behavior and a supervisor to enhance it with test-time scaling algorithms. Then, Hive pro-poses a backend to support algorithm- and task-level scaling. First, the server receives per-agent inference requests. Then, the Runtime Profiling determines the contributions of each agent. This information guides Resource Allocation for task-level scaling, together forming the agent-aware scheduling technique(Section 7), which prioritizes cache eviction by agent contribution. Afterwards, during the inference pro-cess, Hive introduces the Logits Cache mechanism (Section 6) to handle resample requests during test-time scaling, which reduces cross-path redundancy at the algorithm level. 
+
+## 5 Front End 
+
+5.1 Agent description and Flow Graph 
+
+Hive describes the multi-agent system using an abstraction similar to coroutines in Python, to capture their asynchro-nous nature and simplify programming efforts. The workload of an agent can be described as a coroutine, which is a con-tinuation of control flow while being suspendable to interact with other agents. An example of a program repair agent is shown in Figure 6. An agent is described as a function @hive .agent ()                    
+
+> def context_gather ():
+> update = None
+> while True :
+> code = collect_code (update)
+> hive .yield_ (code)
+> update = hive .await () @hive .agent (supervisor= TreeOfThoughts )
+> def bug_repair ():
+> cr_agent = hive .spawn (context_gather ())
+> while not fixed():
+> code = hive .next (cr_agent)
+> patch = make_patch (code)
+> hive .resume (cr_agent, patch)
+> simulation ()
+> Agent Description
+> init
+> wait
+> patch
+> send
+> sim
+> Flow Graph
+> class TreeOfThoughts (Supervisor )
+> def init (self, states):
+> # set initial states
+> def fire (self) -> State |None :
+> # select one state to fire
+> def commit (self, state, sleep):
+> # get a state back after running
+> def wake (self, state):
+> # wake up one sleeping state
+> Supervisor
+> Running Agents
+> Running States
+> Noti fi cation List
+> Runtime
+
+fi re commit wake 
+
+Figure 6. Hive Front End: the Python-based pseudo-code to describe agents and supervisors, the generated flow graph, and the runtime system. with the decorator agent . The bug_repair agent cooperates with the context_gather agent to help gather the related code snippets and fix the bug. The bug_repair agent first spawns 
+
+the context_gather agent. Then, in each loop, it receives the gathered code from the context_gather agent by calling next ,makes a patch by observing the code, and synchronizes the patch to the context_gather agent by calling resume . The loop continues until the patch passes verification methods like simulation. The context_gather agent is simpler. It keeps gathering code, yields the code to the bug_repair agent, and 
+
+awaits the update. Instead of directly executing the functions, Hive compiles them into flow graphs. As shown in Figure 6, the flow graph of the bug_repair agent is a finite state machine, exactly describing the behavior of the coroutine. In the graph, a 
+
+state represents the continuation, transits to another state during one execution step, while inheriting the data and 
+
+5Zizhang Luo, Yuhao Luo, Youwei Xiao, Yansong Xu, Runlin Guo, and Yun Liang 
+
+dialogue states for LLMs. This process is similar to what Python interpreters do to a Python async function. 
+
+5.1.1 Supervisor and Asynchronous Runtime. Hive or-ganizes test-time scaling algorithms in the form of super-visors to adapt to asynchronous execution. Each agent is equipped with one supervisor (as a parameter in the agent 
+
+decorator). Instead of a single function, a test-time scaling algorithm needs to be implemented as an object with four callbacks. As shown in Figure 6, these callbacks are tightly in-tegrated with the runtime system. When an agent is spawned, the init function provides the initial states of the flow graph for the algorithm. Then, the runtime will keep querying the supervisor of a running agent whether to fire a state. If a state is fired, then the runtime will put it into the running states set and launch a real Python coroutine to transit the state in its underlying flow graph. When the transition finishes, the new state will be committed to the supervisor. Certain mechanisms are implemented so the runtime can determine whether the transitioned state is sleeping, e.g., waiting for the result from another agent. If the transitioned state would yield data or finish the whole agent, the runtime will look up a notification list to inform the supervisors that some states should wake up, and can be fired if necessary. Such an asynchronous runtime allows running multiple agents in parallel, while allowing agent behavior to be orthogonal to test-time scaling algorithms, enhancing code reuse. 
+
+## 6 Logits Cache 
+
+To reduce the cross-path redundancy in hybrid test-time scal-ing, we introduce Logits Cache , a new caching paradigm that reuses intermediate logits across redundant sampling paths. In TTS, the algorithm may repeatedly resample from the same intermediate state. Although these repeated ex-pansions are treated as independent executions, they often traverse highly similar decode trajectories and produce over-lapping output tokens. This observation suggests that the next-step logits at a revisited state are not only expensive to regenerate, but also sufficiently informative to be reused for subsequent resampling. Logits Cache exploits this property by making such intermediate logits reusable across repeated expansions from the same state. Formally, at decode step 𝑡 , the transformer-based model[ 32 ]maps the current decoding state to a next-token logits vec-tor with Eq 1, where 𝑥 𝑡 denotes the current input token at step 𝑡 , KV <𝑡 denotes the cached key-value states of the pre-fix context, ℎ𝑡 is the hidden representation produced at the current step, and 𝑧 𝑡 is the logits vector over the vocabulary. Although KV cache avoids recomputing the shared prefix needed to reach the current state, producing 𝑧 𝑡 still requires a full decode computation at that step, and this cost remains substantial. Taking DeepSeek-V3.2[ 19 ] as an example, the model comprises 62 layers, so each decode step still incurs a 
+
+Algorithm 1: Resampling Using Logits Cache 
+
+Input: Input request 𝑟 , Sampling configuration 𝜙 ,Replay policy 𝜋  
+
+> 1
+
+𝑠 ← GetState (𝑟 ); 
+
+> 2
+
+Z𝑛𝑒𝑤 ← ∅ ; 
+
+> 3
+
+if HasCachedLogits (𝑠 ) then  
+
+> 4
+
+Z𝑐𝑎𝑐ℎ𝑒 ← GetCachedLogits (𝑠 ); 
+
+> 5
+
+Y𝑐𝑎𝑐ℎ𝑒 ← GetCachedTokens (𝑠 ); 
+
+> 6
+
+if 𝜋 = StepwiseSampling then  
+
+> 7
+
+foreach 𝑧 in Z𝑐𝑎𝑐ℎ𝑒 do  
+
+> 8
+
+𝑦 ← Sample (𝑧, 𝜙 ); 
+
+> 9
+
+𝑟 ← AppendToken (𝑟, 𝑦 ); 
+
+> 10
+
+if 𝑦 diverges from cached continuation 
+
+then  
+
+> 11
+
+break ; 
+
+> 12
+
+else if 𝜋 = HotspotSampling then  
+
+> 13
+
+H ← IdentifyHotspots (Z 𝑐𝑎𝑐ℎ𝑒 ); 
+
+> 14
+
+foreach position 𝑖 in Z𝑐𝑎𝑐ℎ𝑒 do  
+
+> 15
+
+if 𝑖 ∈ H then  
+
+> 16
+
+𝑦 ← Sample (Z 𝑐𝑎𝑐ℎ𝑒 [𝑖 ], 𝜙 ); 
+
+> 17
+
+else  
+
+> 18
+
+𝑦 ← Y 𝑐𝑎𝑐ℎ𝑒 [𝑖 ]; 
+
+> 19
+
+𝑟 ← AppendToken (𝑟, 𝑦 ); 
+
+> 20
+
+if 𝑦 diverges from cached continuation 
+
+then  
+
+> 21
+
+break ; 
+
+> 22
+
+if NotFinished (𝑟 ) then  
+
+> 23
+
+𝑧 ← Prefill (𝑟 ); 
+
+> 24
+
+else  
+
+> 25
+
+return 𝑟 ; 
+
+> 26
+
+while NotFinished (𝑟 ) do  
+
+> 27
+
+append 𝑧 to Z𝑛𝑒𝑤 ; 
+
+> 28
+
+𝑦 ← Sample (𝑧, 𝜙 ); 
+
+> 29
+
+𝑟 ← AppendToken (𝑟, 𝑦 ); 
+
+> 30
+
+if NotFinished (𝑟 ) then  
+
+> 31
+
+𝑧 ← Decode (𝑟 ); 
+
+> 32
+
+UpdateCachedLogits (𝑠, Z𝑛𝑒𝑤 ); 
+
+> 33
+
+return 𝑟 ;full pass through the model stack to produce the next-token logits. During TTS resampling, the requests are executed inde-pendently, yet often yield overlapping output tokens due to repeated sampling of high-probability continuations. Hive re-moves this redundancy by caching logits from finished re-quests and reusing them when the same intermediate state is revisited. Specifically, Hive supports two resampling policies:       
+
+> 6Hive: A Multi-Agent Infrastructure for Algorithm- and Task-Level Scaling 0.6 0.7 0.8 0.9 1.0 1.1 1.2
+> Temperature
+> 30
+> 35
+> 40
+> 45
+> Avg. Overlapped Tokens
+
+(a) Average token overlap with step-wise sampling un-der different temperatures. 0 20 40 60 80 100               
+
+> Decode Step
+> Entropy (1) Normalized Entropy
+> 020 40 60 80 100
+> Decode Step
+> Importance
+> (2) Normalized Importance
+> 020 40 60 80 100
+> Decode Step
+> 0
+> 1
+> Variability
+> (3) Step-Level Variability
+> Low
+> Mid
+> High
+> Norm.
+> Low
+> Mid
+> High
+> Norm.
+> Entropy
+> Top-1 Prob
+> Scaled Importance
+> Spot Step
+
+(b) Step-level logit uncertainty on a 100-token decoding trace generated at tempera-ture 0.6.
+
+Figure 7. Profiles for logit cache on R3A [ 21 ]. For token overlap, we fix top-p =1 and leave top-k unconstrained, thereby excluding additional sampling truncation effects from the analysis. For logit uncertainty: (1) Normalized entropy of the token distribution at each decode step. (2) Normalized importance score used by hotspot selection. (3) Step-level variability statistics, including entropy, top-1 probability, scaled importance, and the selected hotspot steps. 
+
+Step-wise Sampling and Hotspot Sampling . We describe these two policies next, followed by the overall Logits Cache work-flow in Algorithm 1. 
+
+ℎ𝑡 = 𝑓 𝜃 (𝑥 𝑡 , KV <𝑡 ), 𝑧 𝑡 = 𝑊 𝑜 ℎ𝑡 , (1) 
+
+6.1 Step-wise Sampling 
+
+Upon a Logits Cache hit, Hive traverses the cached output logits sequentially and samples along the cached trajectory under the sampling configuration. Each sampled token is appended to the request, after which replay advances to the next logits position. This process continues until the cached logits sequence is exhausted or the sampled token diverges from the cached continuation. This procedure is illustrated in Figure 2(c), where the re-played branch directly loads the cached logits from a pre-viously explored state and then performs token-by-token resampling along the cached trajectory. Once the replay di-verges from the cached continuation, the tokens sampled so far are concatenated with the original input prefix, after which the system resumes normal prefill and decode. Step-wise Sampling preserves the original autoregressive execution order and introduces no approximation beyond logits reuse. It therefore retains the full information carried by the cached logits sequence and preserves the original resampling semantics, making it a simple and robust policy for replaying previously explored expansions. In practice, strict token-by-token replay often recovers only a limited reusable output prefix, as shown in Figure 7a, which in turn constrains the achievable reduction in branch-expansion latency. 
+
+6.2 Hotspot Sampling 
+
+To overcome the limited reusable prefix recovered by Step-wise Sampling, Hive further supports Hotspot Sampling . Rather than traversing the cached logits sequence strictly token by token, Hotspot Sampling selectively resamples only a subset of positions that are most likely to alter the downstream decode trajectory. This design is motivated by an empirical observation: un-der different temperatures, uncertainty is typically concen-trated in only a small fraction of decode steps, rather than being uniformly distributed across the entire sequence. As shown in Figure 7b(1), only a limited number of positions exhibit pronounced entropy peaks, while most steps remain relatively stable. This suggests that only a small subset of decode steps is responsible for most downstream divergence. To identify hotspot positions, Hive computes an impor-tance score for each decode step 𝑡 from its cached logits z𝑡 .Let p𝑡 = softmax (z𝑡 ) be the token distribution at step 𝑡 . We first compute its entropy as in Eq 2 and its maximum token probability as in Eq 3, which corresponds to the model’s top-1 confidence at step 𝑡 . Then we define the hotspot score as in Eq 4, where the 𝜆 is a time-decay factor. This score favors positions that are both uncertain and weakly peaked, while slightly biasing selection toward earlier positions, whose perturbation is more likely to affect a longer downstream suffix. Hive selects the top-𝑘 steps with the highest scores as hotspot positions and performs explicit resampling only at those steps. Figure 7b(2) shows the normalized importance score de-rived from this formulation, and Figure 7b(3) overlays the selected hotspot steps with step-level variability statistics. The selected positions align well with regions of high en-tropy, low top-1 probability, and high importance, indicating 
+
+> 7Zizhang Luo, Yuhao Luo, Youwei Xiao, Yansong Xu, Runlin Guo, and Yun Liang
+
+that the score effectively captures the subset of steps most likely to affect downstream decoding. Based on this, Hive restricts explicit resampling to these hotspot positions, while directly preserving the original sam-pled tokens at stable positions. This selective policy avoids unnecessary token-by-token replay over regions that are already effectively determined by the logits distribution. As a result, Hotspot Sampling recovers a longer reusable output prefix and further reduces the amount of decode computa-tion required after a cache hit. 
+
+𝐻 𝑡 = −∑︁ 
+
+> 𝑣
+
+𝑝 𝑡 (𝑣 ) log 𝑝 𝑡 (𝑣 ) (2) 
+
+𝑝 max  
+
+> 𝑡
+
+= max  
+
+> 𝑣
+
+𝑝 𝑡 (𝑣 ) (3) 
+
+𝑠 𝑡 = 𝐻 𝑡 (1 − 𝑝 max  
+
+> 𝑡
+
+) 11 + 𝜆𝑡 (4) 
+
+6.3 Algorithm 
+
+Algorithm 1 describes how Hive serves a request with Logits Cache . The algorithm takes as input an incoming request 𝑟 ,the sampling configuration 𝜙 , and a replay policy 𝜋 . Upon receiving 𝑟 , Hive first derives its current intermediate state 
+
+𝑠 (line 1) and initializes an empty buffer Z𝑛𝑒𝑤 to record the logits newly generated in this execution (line 2). The engine then checks whether cached logits exist for state 𝑠 
+
+(line 3). If so, it loads both the cached logits sequence and the corresponding cached continuation (lines 4–5). 
+
+Hive supports two replay policies on a cache hit. Under 
+
+Step-wise Sampling , the engine traverses the cached logits sequence in order, samples one token from each logits posi-tion, appends it to the request, and stops once the sampled token diverges from the cached continuation (lines 6–11). Under Hotspot Sampling , Hive first identifies a set of hotspot positions from the cached logits sequence (line 13). It then resamples only these hotspot positions, while directly pre-serving the cached token at non-hotspot positions (lines 14–21). Replay again terminates once divergence from the cached continuation is observed. In this way, Hotspot Sam-pling avoids unnecessary token-by-token replay over stable regions while still allowing the request to explore alternative continuations at uncertain positions. After cache replay completes, if the current expansion is still unfinished, Hive first performs a prefill pass over the replayed tokens to materialize their KV states and obtain the next-step logits (lines 22–23), followed by normal decoding until the current expansion finishes (lines 26–31). Once the expansion completes, Hive writes the logits sequence gener-ated in this execution back to Logits Cache (line 32). Overall, Algorithm 1 transforms repeated expansions from the same intermediate state into cache lookup followed by replay and resampling to reduce redundant forward computation. The Logits Cache is stored in the main memory instead of the GPU. In practice, to maximize execution efficiency, 
+
+Hive executes prefetch sampling asynchronously (lines 3–21). Once Logits Cache is updated for the current request (line 32), the runtime immediately triggers a background prefetch task for the same state, overlapping cache update with replay preparation for future revisits. In this way, the latency spent waiting on subsequent sampling is further reduced, thereby shortening the blocking time. 
+
+## 7 Agent-Aware Scheduling 
+
+To address agent-agnostic resource management in multi-agent workloads, we design Agent-Aware Scheduling , a run-time scheduling mechanism that allocates KV cache residency according to the contribution of each agent. Un-like traditional inference engines that treat requests as inde-pendent and uniform entities, Hive recognizes that requests in multi-agent systems are generated by agents with dis-tinct functional roles and heterogeneous runtime behaviors. Therefore, the scheduler elevates resource management to the agent level, enabling cache residency to be guided by the actual utility each agent brings to the workflow. In the following, we first introduce our Shapley-based contribu-tion modeling to quantify the importance of each agent. We then detail how the scheduler leverages these contribution scores to perform dynamic KV cache eviction, improving the overall efficiency of the multi-agent execution. 
+
+7.1 Agent Contribution Modeling 
+
+A key limitation of existing inference systems is their agent-agnostic resource allocation. In complex multi-agent work-flows, requests are generated by agents with highly heteroge-neous roles, execution patterns, and cache-sharing potential. Consequently, a naive request-uniform policy fails to ac-count for the disproportionate impact certain agents have on the overall system efficiency and task progress. To bridge this gap, Hive models each agent’s marginal contribution by drawing on the contribution calculation principle of the Shapley value from game theory [30]. Specifically, for a set of active agents A, Hive assigns each agent 𝑎 ∈ A a holistic contribution score. This score integrates two dimensions of agent behavior: 
+
+• Intrinsic Utility ( b𝑈 𝑎 ): Quantifies the standalone impor-tance of an agent’s individual task progress. 
+
+• Collaborative Utility ( b𝐶 𝑎 ): Captures the systemic benefit derived from shared-cache reuse that the agent facilitates for other members in the coalition. The final contribution score for agent 𝑎 is defined as in Eq 5, where b𝑈 𝑎 and b𝐶 𝑎 denote the normalized intrinsic and col-laborative scores. In our implementation, we empirically set 
+
+𝛼 = 0.4, prioritizing collaborative reuse to maximize the throughput gains from shared KV cache states across the agentic workflow. 
+
+Intrinsic Utility. The intrinsic utility of an agent captures its standalone runtime importance. Intuitively, an agent should           
+
+> 8Hive: A Multi-Agent Infrastructure for Algorithm- and Task-Level Scaling 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> Temperature
+> 40
+> 60
+> 80
+> tokens/s
+> (a) Mean TPS
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> Temperature
+> 40
+> 60
+> tokens/s
+> (b) P50 TPS
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> Temperature
+> 1.0
+> 1.2
+> 1.4
+> (c) Speedup
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> Temperature
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> (d) Logits Cache Hit Rate
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> Temperature
+> 100
+> 200
+> tokens/s
+> (e) Mean TPS
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> Temperature
+> 50
+> 75
+> tokens/s
+> (f) P50 TPS
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> Temperature
+> 1
+> 2
+> 3
+> (g) Speedup
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> Temperature
+> 0.0
+> 0.2
+> 0.4
+> (h) Logits Cache Hit Rate
+> Stepwise Spot
+> Baseline Hive Median
+
+Figure 8. Performance of Logits Cache under different temperatures for two replay policies. (a)–(d) show the results for 
+
+step-wise sampling , and (e)–(h) show the results for hotspot sampling . The reported metrics include mean TPS, P50 TPS, speedup, and logits-cache hit rate. receive a higher score if it is invoked more frequently, achieves better cache efficiency, exhibits stronger concurrency. Hive mod-els this utility as the product of four normalized factors as in Eq 6. In this formulation, the activity term ( 𝐴 𝑎 ) and workload term ( 𝑊 𝑎 ) together capture the inference momentum of an agent, with 𝐴 𝑎 scaling with invocation frequency and 𝑊 𝑎 
+
+measuring the aggregate input and output token volume. The efficiency term ( 𝐸 𝑎 ) captures resource productivity through KV cache reuse, favoring agents with stronger temporal local-ity. The concurrency term ( 𝑄 𝑎 ) summarizes parallel demand using both average and peak concurrency, thereby priori-tizing agents that place greater sustained pressure on GPU execution resources. 
+
+Collaborative Utility. Beyond intrinsic utility, an agent’s marginal contribution also depends on the additional ben-efit it induces for the rest of the workflow. In Hive , a key source of such marginal gain is shared-cache reuse across agents. Agents that create more reusable cache state for others should therefore receive higher collaborative utility scores. To capture this effect, Hive measures collaborative utility from the bidirectional shared-cache interaction graph in-duced at runtime. For each pair of agents (𝑎, 𝑏 ), Hive tracks the amount of shared-cache reuse between them and con-verts it into an edge weight defined as in Eq 8, where S𝑎,𝑏 
+
+denotes the total shared-token count and Event 𝑎,𝑏 represents the reuse events between the pair. The square-root term pre-vents large token volumes from dominating the score, while the logarithmic factor rewards repeated collaboration. The aggregate collaborative utility of agent 𝑎 is then de-fined as in Eq 7. By summing both the reusable state con-tributed to others and the reusable state received from others, this formulation provides a computationally efficient approx-imation of the collaborative component of the Shapley value Score (𝑎 ) = 𝛼 · b𝑈 𝑎 + ( 1 − 𝛼 ) · b𝐶 𝑎 (5) 
+
+𝑈 𝑎 = 𝐴 𝑎 · 𝑊 𝑎 · 𝐸 𝑎 · 𝑄 𝑎 (6) 
+
+𝐶 𝑎 =∑︁ 
+
+> 𝑏 ≠𝑎
+
+𝑤 (𝑎, 𝑏 ) + ∑︁ 
+
+> 𝑏 ≠𝑎
+
+𝑤 (𝑏, 𝑎 ) (7) 
+
+𝑤 (𝑎, 𝑏 ) =√︁ S𝑎,𝑏 · log (1 + Event 𝑎,𝑏 ) (8) 
+
+7.2 Agent-Aware KV Cache Scheduling 
+
+To address the limitation of heterogeneous runtime char-acteristics, Hive leverages the agent contribution scores to guide KV cache scheduling at runtime. Rather than relying on generic eviction policies, Hive prioritizes KV cache ac-cording to the contribution of the agent that owns them. KV cache associated with higher-contribution agents is retained on GPU whenever possible, since evicting them is more likely to hurt overall execution efficiency. Under memory pressure, eviction is therefore biased toward KV cache belonging to lower-contribution agents. The contribution score is calcu-lated during run-time profiling, which is updated in each round of requests. The front-end registers the existence of each agent and sends their IDs along with the requests, so the backend can track down each agent. A sliding window is applied to prevent a breaking change in agents’ behaviors. In this way, Hive aligns KV cache residency with the structural importance of agents in the workflow, improving memory utilization and preserving the states that matter most for efficient multi-agent execution. 
+
+## 8 Evaluation 
+
+We evaluate Hive from two perspectives, corresponding to the two scaling dimensions that it targets. For algorithm-level scaling , we evaluate Logits Cache on Tree-of-Thoughts     
+
+> 9Zizhang Luo, Yuhao Luo, Youwei Xiao, Yansong Xu, Runlin Guo, and Yun Liang 0510 15 20
+> Rounds
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Agent Priority Score
+> Decision
+> Patcher
+> Viewer
+> Summary
+> Searcher
+
+Figure 9. Trajectory of agent priority scores over 21 rounds. For each round, scores are normalized across all agents. workloads to measure how effectively it reduces replay over-head during repeated resampling. For task-level scaling , we evaluate the Multi-Agent Scheduler on multi-agent workloads to study whether agent-aware resource allocation improves execution efficiency over existing scheduling policies. To-gether, these experiments demonstrate how Hive provides unified runtime support for both replay-efficient reasoning and scalable multi-agent execution. 
+
+8.1 Experimental Setup Platform. The experiments are conducted on a server with 8×NVIDIA A100 GPUs. It is equipped with an Intel Xeon Gold 6348 CPU @ 2.60 GHz. The software stack includes CUDA Toolkit 11.5, PyTorch 2.9.1, Python 3.12.13, and SGLang 0.5.6. We implement Hive on top of SGLang and evaluate it under the same runtime environment throughout. All exper-iments are run on a single GPU. 
+
+Model. We use Qwen3-8B[ 35 ] as the base model throughout the evaluation. We choose this model because it provides a practical open-weight setting for controlled replay, resam-pling, and multi-agent serving experiments. While large-scale experiments are absent due to practical reasons, our technique is theoretically expected to become more effective at larger scales, as the cost saved by a cache hit grows with the model scale. 
+
+8.2 Logits Cache Evaluation Workload. We evaluate Logits Cache on repeated resam-pling workloads induced by hybrid test-time scaling using the Tree-of-Thoughts dataset[ 36 ]. Specifically, a request first completes normal decoding and records its logits sequence, after which later requests that revisit the same intermedi-ate state perform replay-based resampling from cached log-its, which directly matches the target scenario of Logits Cache . The workload is constructed from the Hugging Face 24 Game dataset[ 24 ], which contains 1.36k instances of four-number arithmetic puzzles with annotated solutions. From this dataset, we sample 100 instances as the evaluation work-load, whose average prompt length is 64.52 tokens. 
+
+Baseline. Our baseline disables Logits Cache and recom-putes the full logits sequence for every replayed request. To ensure a fair comparison, the baseline and Hive use the same KV cache configuration and retain identical prefix-state reuse behavior; the only difference is whether the replayed request can reuse cached logits or must regenerate them through normal decoding. 
+
+Decoding Configuration. Unless otherwise specified, the baseline and Hive use identical decoding configuration, in-cluding temperature, top-𝑝 , top-𝑘 , and max_tokens , for a fair comparison. We consider two replay settings. Since sam-pling is inherently stochastic, repeated runs may produce outputs of different lengths, making the results harder to reproduce and compare fairly. To reduce this variation, we fix the output length for every request in both settings. Fol-lowing [ 34 ], which reports an average output length of 429 tokens for agentic workloads, we set the fixed output length to 500 tokens. For hotspot sampling , decoding positions with an importance score greater than 0.6 are treated as spot nodes .We vary the temperature to study how the benefit of Logits Cache changes across different replay conditions. 
+
+Metrics. For all reported metrics, we exclude requests with a 100% Logits Cache hit ratio, since such requests would distort the measurement results. In total, we filter out 30 requests. We then report the following metrics for Logits Cache dur-ing resampling requests: MEAN TPS , the average tokens per second; P50 TPS , the median number of tokens per second; 
+
+Speedup , the average per-request speedup; Logits-cache hit ratio , the fraction of decoding positions in a replayed request whose logits are served from the cache instead of being recomputed by the model. 
+
+Performance. We first evaluate the replay TPS reduction achieved by Logits Cache under different replay policies and sampling temperatures. Figure 8 presents the perfor-mance of Logits Cache under step-wise and hotspot replay across a range of temperatures. Overall, Logits Cache con-sistently improves replay TPS compared with the baseline, with the largest gains appearing at low temperatures. The benefit of Logits Cache is expected to grow with prompt length, since a longer prefill context substantially increases the computational cost of each subsequent decoding step, whereas Logits Cache can bypass these expensive forward computations by directly sampling from cached logits dis-tributions. This advantage is particularly salient in agentic workloads, where context windows are often much longer than those in conventional settings. For instance, DualPath [ 34 ]reports an average input length of 32.7K tokens for agentic requests, a regime in which logits-based reuse is expected to deliver even greater benefits. Under step-wise sampling , both mean and P50 TPS are substantially improved when the temperature is low. As tem-perature increases, replayed branches tend to diverge earlier 
+
+> 10 Hive: A Multi-Agent Infrastructure for Algorithm- and Task-Level Scaling
+
+Table 1. Comparison of KV-cache hit rates and token evic-tion between the baseline scheduler and the agent-aware scheduler. Hotspot and non-hotspot hit rates measure the KV-cache hit rate over hotspot and non-hotspot tokens, re-spectively, while Evicted tokens denotes the total number of tokens whose KV states are evicted during execution. We set page size = 1 by default.                       
+
+> Round Method Hotspot Non-hotspot Evicted hit rate hit rate tokens 7Baseline 0.903 0.311 26557 7HIVE 0.935 0.310 18549 21 Baseline 0.935 0.414 81147 21 HIVE 0.967 0.311 65598
+
+from the cached continuation, which reduces the amount of reusable logits and weakens the gain. Logits Cache provides consistent TPS improvement across all evaluated temper-atures. Under hotspot sampling , the improvement is even more pronounced, yielding much larger speedups in the low-temperature regime. Compared with strict step-wise replay, hotspot replay operates exclusively on high-importance po-sitions, which allows it to validate and accept larger token segments once a cache reuse is successful. The token-acceptance behavior of hotspot replay also ex-plains the statistical pattern observed in Figure 8(g). Since the reuse of a single hotspot node can trigger the acceptance of a cascading sequence of subsequent tokens, the average speedup under this policy exhibits higher variance. As a re-sult, while the mean speedup in Figure 8(g) shows noticeable fluctuations, the median remains relatively stable and aligns with the expected theoretical trends. In conclusion, across all evaluated temperatures, Logits Cache achieves an average speedup of 1.11 × under step-wise replay and 1.76 × under hotspot replay, with corresponding average Logits Cache hit rates of 8.6% and 30 .4% , respectively. 
+
+8.3 Multi-Agent Scheduler Evaluation Workload. To evaluate the scheduler under practical con-ditions, we construct a benchmark multi-agent workflow based on the execution pattern shown in Figure 3. The work-load integrates five specialized agents: Decision , Patcher ,
+
+Viewer , Summary , and Searcher . Specifically, Decision 
+
+acts as the central coordinator that manages workflow tran-sitions. Patcher and Viewer serve as the hotspot agents in the system. In contrast, Summary is responsible for con-text consolidation and state compression, whereas Searcher 
+
+performs external retrieval and can introduce transient yet substantial memory pressure. Together, these heterogeneous agent roles create highly uneven runtime demands, provid-ing a rigorous testbed for evaluating Hive ’s ability to balance competing agent utilities and optimize KV cache residency. To ensure reproducibility, we fix the agent invocation re-lationships as a static workflow during evaluation, so that all compared scheduling policies are tested under the same execution structure. 
+
+Memory Setting. We set mem-fraction-static to 0.23 to emulate a memory-constrained serving environment, thereby amplifying cache contention and making the impact of differ-ent eviction policies more pronounced. This value is chosen based on the model size and the prompt length used in the benchmark. 
+
+Baseline. We compare Hive ’s agent-aware policy against the original LRU-based cache eviction policy in SGLang. 
+
+Performance. As shown in Table 1, the agent-aware sched-uler consistently improves KV cache efficiency over the base-line. At round 7, Hive increases the hotspot hit rate from 0.903 to 0.935, while achieving a 1.43 × reduction in evicted tokens. By round 21, Hive further improves the hotspot hit rate from 0.935 to 0.967, while achieving a 1.24 × reduction in evicted tokens. These results show that the agent-aware policy is able to better preserve KV states associated with critical execution paths under memory pressure. Notably, this improvement mainly comes from prioritizing hotspot tokens, rather than uniformly increasing the hit rate for all tokens, which is consistent with the design goal of favoring high-contribution agents during cache eviction. The runtime score traces of individual agents further con-firm this behavior, shown in Figure 9. We observe that agent scores evolve consistently with their runtime invocation patterns over time, rather than remaining static or uniform across agents. This indicates that our contribution formu-lation can effectively model the relative contribution of dif-ferent agents during execution, enabling the scheduler to capture agent heterogeneity online and adjust scheduling priorities accordingly. Overall, across different rounds, Hive reduces the hotspot miss rate by 33% –51% over the baseline, while reducing evicted KV tokens by 19 .2% –30 .2% , demonstrating the effec-tiveness of agent-aware scheduling under memory pressure. 
+
+## 9 Related Work 
+
+9.1 Task-Level Scaling 
+
+KVFlow [ 27 ] and TokenCake [ 4] study KV-cache manage-ment for multi-agent LLM serving. KVFlow proposes a workflow-aware mechanism that constructs an Agent Step Graph offline from the workflow structure, and assigns each agent a graph-derived timestamp to guide KV eviction and prefetching, thereby improving prefix reuse in structured agentic work-loads. TokenCake [ 4] presents a KV-cache-centric serving framework for multi-agent applications, providing a DSL to describe inter-agent dependencies as a DAG and using this structure to drive a Time Scheduler and a Space Scheduler 
+
+for execution coordination and KV-cache allocation across agents. ThunderAgent [ 14 ] mainly focuses on single-agent 
+
+> 11
+
+Zizhang Luo, Yuhao Luo, Youwei Xiao, Yansong Xu, Runlin Guo, and Yun Liang 
+
+execution. It introduces a program-aware scheduling frame-work that jointly manages KV cache, program state, and tool resources. In contrast, Hive focuses on runtime contribution-aware scheduling for dynamic multi-agent serving, allocat-ing KV-cache resources according to the observed runtime behavior and relative contribution of different agents. 
+
+9.2 Algorithm-Level Scaling 
+
+Recent work has started to improve algorithm-level scal-ing from a systems perspective. For example, FastTTS [ 5]studies execution scheduling and memory management for verifier-guided test-time scaling, aiming to improve serv-ing efficiency under more complex inference workloads. In contrast, Hive focuses on a different source of inefficiency in hybrid TTS settings: redundant re-sampling over shared probability states across reasoning paths. Hive addresses this issue through logits-level reuse, which is complementary to prior system support for TTS. 
+
+## 10 Conclusion 
+
+Current LLM infrastructures mainly scale at the model level and system level. We propose Hive , a multi-agent infras-tructure for algorithm- and task-level scaling. Experiments show that our proposed Logits Cache achieves an average speedup of 1.11 ×–1.76 × for re-sampling, and Agent-Aware Scheduling reduces the hotspot miss rate by 33% –51% .
+
+## References 
+
+[1] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav S. Gulavani, Alexey Tumanov, and Ramachandran Ramjee. 2024. Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve. arXiv:2403.02310 [cs.LG] https://arxiv.org/abs/ 2403.02310 
+
+[2] anomalyco. 2026. anomalyco/opencode: The open source AI coding agent. https://github.com/anomalyco/opencode . GitHub repository, accessed 2026-03-24. [3] Zhenni Bi, Kai Han, Chuanjian Liu, Yehui Tang, and Yunhe Wang. 2024. Forest-of-thought: Scaling test-time compute for enhancing llm reasoning. arXiv preprint arXiv:2412.09078 (2024). [4] Zhuohang Bian, Feiyang Wu, Teng Ma, and Youwei Zhuo. 2025. Token-cake: A KV-Cache-centric Serving Framework for LLM-based Multi-Agent Applications. arXiv preprint arXiv:2510.18586 (2025). [5] Hao Mark Chen, Zhiwen Mo, Guanxi Lu, Shuang Liang, Lingxiao Ma, Wayne Luk, and Hongxiang Fan. 2026. FastTTS: Accelerating Test-Time Scaling for Edge LLM Reasoning. In Proceedings of the 31st ACM International Conference on Architectural Support for Program-ming Languages and Operating Systems, Volume 2 (USA) (ASPLOS ’26) .Association for Computing Machinery, New York, NY, USA, 732–748. 
+
+https://doi.org/10.1145/3779212.3790161 
+
+[6] Mengzhao Chen, Wenqi Shao, Peng Xu, Jiahao Wang, Peng Gao, Kaipeng Zhang, and Ping Luo. 2025. EfficientQAT: Efficient Quantization-Aware Training for Large Language Models. In Proceed-ings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) . Association for Computational Linguistics, Vienna, Austria, 10081–10100. https://doi.org/10.18653/ v1/2025.acl-long.498 
+
+[7] Renze Chen, Zhuofeng Wang, Beiquan Cao, Tong Wu, Size Zheng, Xiuhong Li, Xuechao Wei, Shengen Yan, Meng Li, and Yun Liang. 2024. ArkVale: Efficient Generative LLM Inference with Recallable Key-Value Eviction. In Advances in Neural Information Processing Systems 37 (NeurIPS 2024) . https://doi.org/10.52202/079017-3595 
+
+[8] Yuheng Cheng, Ceyao Zhang, Zhengwen Zhang, Xiangrui Meng, Sirui Hong, Wenhao Li, Zihao Wang, Zekai Wang, Feng Yin, Jun-hua Zhao, and Xiuqiang He. 2024. Exploring Large Language Model based Intelligent Agents: Definitions, Methods, and Prospects. arXiv:2401.03428 [cs.AI] https://arxiv.org/abs/2401.03428 
+
+[9] Bin Gao, Zhuomin He, Puru Sharma, Qingxuan Kang, Djordje Jevdjic, Junbo Deng, Xingkun Yang, Zhou Yu, and Pengfei Zuo. 2024. Cost-Efficient Large Language Model Serving for Multi-turn Conversations with CachedAttention. arXiv:2403.19708 [cs.CL] https://arxiv.org/ abs/2403.19708 
+
+[10] Jordan Hoffmann, Sebastian Borgeaud, Arthur Mensch, Elena Buchatskaya, Trevor Cai, Eliza Rutherford, Diego de Las Casas, Lisa Anne Hendricks, Johannes Welbl, Aidan Clark, Tom Henni-gan, Eric Noland, Katie Millican, George van den Driessche, Bog-dan Damoc, Aurelia Guy, Simon Osindero, Karen Simonyan, Erich Elsen, Jack W. Rae, Oriol Vinyals, and L. Sifre. 2022. Training Compute-Optimal Large Language Models. ArXiv abs/2203.15556 (2022). https://api.semanticscholar.org/CorpusID:247778764 
+
+[11] Junyan Hu, Parijat Bhowmick, Inmo Jang, Farshad Arvin, and Alexan-der Lanzon. 2021. A Decentralized Cluster Formation Containment Framework for Multirobot Systems. IEEE Transactions on Robotics 37, 6 (2021), 1936–1955. https://doi.org/10.1109/TRO.2021.3071615 
+
+[12] Wei Huang, Yi Ge, Shuai Yang, Yicheng Xiao, Huizi Mao, Yujun Lin, Hanrong Ye, Sifei Liu, Ka Chun Cheung, Hongxu Yin, et al . 2025. QeRL: Beyond Efficiency–Quantization-enhanced Reinforcement Learning for LLMs. arXiv preprint arXiv:2510.11696 (2025). [13] Sam Ade Jacobs, Masahiro Tanaka, Chengming Zhang, Minjia Zhang, Shuaiwen Leon Song, Samyam Rajbhandari, and Yuxiong He. 2023. Deepspeed ulysses: System optimizations for enabling train-ing of extreme long sequence transformer models. arXiv preprint arXiv:2309.14509 (2023). [14] Hao Kang, Ziyang Li, Xinyu Yang, Weili Xu, Yinfang Chen, Junxiong Wang, Beidi Chen, Tushar Krishna, Chenfeng Xu, and Simran Arora. 2026. ThunderAgent: A Simple, Fast and Program-Aware Agentic Inference System. arXiv preprint arXiv:2602.13692 (2026). [15] Jared Kaplan, Sam McCandlish, Thomas Henighan, Tom B. Brown, Benjamin Chess, Rewon Child, Scott Gray, Alec Radford, Jeff Wu, and Dario Amodei. 2020. Scaling Laws for Neural Language Models. ArXiv 
+
+abs/2001.08361 (2020). https://api.semanticscholar.org/CorpusID: 210861095 
+
+[16] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient memory management for large language model serving with pagedattention. In Proceedings of the 29th symposium on operating systems principles . 611–626. [17] Chengpeng Li, Mingfeng Xue, Zhenru Zhang, Jiaxi Yang, Beichen Zhang, Bowen Yu, Binyuan Hui, Junyang Lin, Xiang Wang, and Dayi-heng Liu. 2025. Start: Self-taught reasoner with tools. In Proceedings of the 2025 Conference on Empirical Methods in Natural Language Pro-cessing . 13523–13564. [18] Xinyi Li, Sai Wang, Siqi Zeng, Yu Wu, and Yi Yang. 2024. A survey on LLM-based multi-agent systems: workflow, infrastructure, and challenges. Vicinagearth 1, 1 (2024), 9. https://doi.org/10.1007/s44336-024-00009-2 
+
+[19] Aixin Liu, Aoxue Mei, Bangcai Lin, Bing Xue, Bingxuan Wang, Bingzheng Xu, Bochao Wu, Bowei Zhang, Chaofan Lin, Chen Dong, et al . 2025. Deepseek-v3. 2: Pushing the frontier of open large language models. arXiv preprint arXiv:2512.02556 (2025). [20] Hao Liu, Matei Zaharia, and Pieter Abbeel. 2023. Ring attention with blockwise transformers for near-infinite context. arXiv preprint arXiv:2310.01889 (2023). 12 Hive: A Multi-Agent Infrastructure for Algorithm- and Task-Level Scaling 
+
+[21] Zizhang Luo, Fan Cui, Kexing Zhou, Runlin Guo, Mile Xia, Hongyuan Hou, and Yun Liang. 2025. R3A: Reliable RTL Repair Framework with Multi-Agent Fault Localization and Stochastic Tree-of-Thoughts Patch Generation. arXiv:2511.20090 [cs.AR] https://arxiv.org/abs/2511.20090 
+
+[22] Aman Madaan, Niket Tandon, Prakhar Gupta, Skyler Hallinan, Luyu Gao, Sarah Wiegreffe, Uri Alon, Nouha Dziri, Shrimai Prabhumoye, Yiming Yang, Shashank Gupta, Bodhisattwa Prasad Majumder, Kather-ine Hermann, Sean Welleck, Amir Yazdanbakhsh, and Peter Clark. 2023. Self-Refine: Iterative Refinement with Self-Feedback. In Thirty-seventh Conference on Neural Information Processing Systems . https: //openreview.net/forum?id=S37hOerQLB 
+
+[23] Moonshot AI. 2026. Kimi Code: Next-Gen AI Code Agent | Automated Programming & CLI. https://www.kimi.com/code Accessed: 2026-04-15. [24] nlile. 2026. 24-game. https://huggingface.co/datasets/nlile/24-game 
+
+Accessed: 2026-04-11. [25] OpenAI. 2025. Introducing GPT-5.4. https://openai.com/index/ introducing-gpt-5-4/ . Accessed: 2026-04-15. [26] openclaw. 2026. openclaw/openclaw: Your own personal AI assistant. Any OS. Any Platform. The lobster way. https://github.com/openclaw/ openclaw . GitHub repository, accessed 2026-03-24. [27] Zaifeng Pan, Ajjkumar Patel, Zhengding Hu, Yipeng Shen, Yue Guan, Wan-Lu Li, Lianhui Qin, Yida Wang, and Yufei Ding. 2025. KVFlow: Efficient prefix caching for accelerating LLM-based multi-agent work-flows. arXiv preprint arXiv:2507.07400 (2025). [28] Pratyush Patel, Esha Choukse, Chaojie Zhang, Aashaka Shah, Íñigo Goiri, Saeed Maleki, and Ricardo Bianchini. 2024. Splitwise: Efficient generative llm inference using phase splitting. In 2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) .IEEE, 118–132. [29] Qwen Team. [n. d.]. Qwen3-Coder-Next Technical Report . Technical Re-port. https://github.com/QwenLM/Qwen3-Coder/blob/main/qwen3_ coder_next_tech_report.pdf Accessed: 2026-02-03. [30] Benedek Rozemberczki, Lauren Watson, Péter Bayer, Hao-Tsung Yang, Olivér Kiss, Sebastian Nilsson, and Rik Sarkar. 2022. The Shapley Value in Machine Learning. arXiv:2202.05594 [cs.LG] https://arxiv. org/abs/2202.05594 
+
+[31] Kimi Team, Tongtong Bai, Yifan Bai, Yiping Bao, SH Cai, Yuan Cao, Y Charles, HS Che, Cheng Chen, Guanduo Chen, et al . 2026. Kimi K2. 5: Visual Agentic Intelligence. arXiv preprint arXiv:2602.02276 (2026). [32] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. 2017. At-tention Is All You Need. CoRR abs/1706.03762 (2017). arXiv:1706.03762 
+
+http://arxiv.org/abs/1706.03762 
+
+[33] Junlin Wang, Jue WANG, Ben Athiwaratkun, Ce Zhang, and James Zou. 2025. Mixture-of-Agents Enhances Large Language Model Capabilities. In The Thirteenth International Conference on Learning Representations .
+
+https://openreview.net/forum?id=h0ZfDIrj7T 
+
+[34] Yongtong Wu, Shaoyuan Chen, Yinmin Zhong, Rilin Huang, Yixuan Tan, Wentao Zhang, Liyue Zhang, Shangyan Zhou, Yuxuan Liu, Shun-feng Zhou, Mingxing Zhang, Xin Jin, and Panpan Huang. 2026. Du-alPath: Breaking the Storage Bandwidth Bottleneck in Agentic LLM Inference. arXiv:2602.21548 [cs.DC] https://arxiv.org/abs/2602.21548 
+
+[35] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al . 2025. Qwen3 technical report. arXiv preprint arXiv:2505.09388 (2025). [36] Shunyu Yao, Dian Yu, Jeffrey Zhao, Izhak Shafran, Tom Griffiths, Yuan Cao, and Karthik Narasimhan. 2023. Tree of thoughts: Deliberate problem solving with large language models. Advances in neural information processing systems 36 (2023), 11809–11822. [37] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik R Narasimhan, and Yuan Cao. 2022. React: Synergizing reasoning and acting in language models. In The eleventh international conference on learning representations .[38] Jintao Zhang, Jia Wei, Pengle Zhang, Xiaoming Xu, Haofeng Huang, Haoxu Wang, Kai Jiang, Jianfei Chen, and Jun Zhu. 2025. Sageatten-tion3: Microscaling fp4 attention for inference and an exploration of 8-bit training. arXiv preprint arXiv:2505.11594 (2025). [39] Qiyuan Zhang, Fuyuan Lyu, Zexu Sun, Lei Wang, Weixu Zhang, Wenyue Hua, Haolun Wu, Zhihan Guo, Yufei Wang, Niklas Muen-nighoff, et al . 2025. A survey on test-time scaling in large lan-guage models: What, how, where, and how well? arXiv preprint arXiv:2503.24235 (2025). [40] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody H Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E Gonzalez, et al . 2024. Sglang: Efficient execution of structured lan-guage model programs. Advances in neural information processing systems 37 (2024), 62557–62583. [41] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-anzhe Liu, Xin Jin, and Hao Zhang. 2024. {DistServe }: Disaggregating prefill and decoding for goodput-optimized large language model serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . 193–210. 13

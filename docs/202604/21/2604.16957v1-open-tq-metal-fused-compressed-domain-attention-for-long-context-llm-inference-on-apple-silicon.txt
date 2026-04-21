@@ -1,0 +1,368 @@
+Title: Open-TQ-Metal: Fused Compressed-Domain Attention for Long-Context LLM Inference on Apple Silicon
+
+URL Source: https://arxiv.org/pdf/2604.16957v1
+
+Published Time: Tue, 21 Apr 2026 00:41:54 GMT
+
+Number of Pages: 8
+
+Markdown Content:
+# Open-TQ-Metal: Fused Compressed-Domain Attention for Long-Context LLM Inference on Apple Silicon 
+
+# Sai Vegasena 
+
+Ensue 
+
+sai@ensue.dev 
+
+# Abstract 
+
+We present Open-TQ-Metal, the first implemen-tation of fused compressed-domain attention on Apple Silicon, enabling 128K-context inference for Llama 3.1 70B on a single 64GB consumer Mac—a configuration impossible with all existing inference frameworks. Running large language models at their full designed context window on consumer hardware is blocked by KV cache mem-ory: Llama 3.1 70B at 128K context requires 79.1 GB in FP16, exceeding the 64 GB physical limit. Open-TQ-Metal quantizes the KV cache to int4 on the fly and computes attention directly on the compressed representation via custom Metal compute shaders, eliminating all intermediate de-quantization matrices. Across 330 experiments spanning two model families (Gemma 4 31B and Llama 3.1 70B), the fused sdpa int4 kernel achieves 48 × attention speedup at 128K con-text over the dequantize-then-attend baseline, re-duces KV cache memory from 40 GB to 12.5 GB (3.2 × compression), and maintains identical top-1 token predictions to FP16 inference. We fur-ther provide the first cross-architecture analysis of KV cache quantization methods, revealing that the attention scale factor—not model size— determines whether angular quantization schemes like PolarQuant succeed or fail, with Gemma 4’s 
+
+attn scale=1.0 amplifying directional error 25–100 × more than Llama’s standard 1/√d scal-ing. 
+
+. Correspondence to: Sai Vegasena <sai@ensue.dev >.
+
+Preprint. April 21, 2026. 
+
+# 1. Introduction 
+
+Large language models achieve their strongest performance at long context windows (Grattafiori et al., 2024), yet de-ploying these models on consumer hardware is fundamen-tally constrained by KV cache memory (Kwon et al., 2023). The KV cache grows linearly with sequence length and model depth: for a transformer (Vaswani et al., 2017) with 
+
+L layers and Hkv key-value heads (Shazeer, 2019; Ainslie et al., 2023), Llama 3.1 70B (Grattafiori et al., 2024) at 4-bit weights (Frantar et al., 2023) occupies 39.1 GB; its FP16 KV cache at 128K tokens adds 40 GB more—totaling 79.1 GB, which exceeds the 64 GB unified memory of Ap-ple’s highest-capacity consumer chips. Every existing in-ference framework (mlx-lm (Apple Machine Learning Re-search, 2024), llama.cpp (Gerganov & contributors, 2023)) hits this wall. Recent KV cache quantization methods (Liu et al., 2024; Hooper et al., 2024; Kang et al., 2024) compress the cache to 2–4 bits but still dequantize before attention, incurring the full bandwidth cost of materialized temporary matrices. TurboQuant (Zandieh et al., 2025) combines MSE-optimal quantization with QJL residual compression, while Polar-Quant (Han et al., 2025) and QJL (Zandieh et al., 2024) offer complementary approaches to KV cache compression. However, all three methods have only been evaluated on models up to 8B parameters (32 layers), and none have been validated on Apple Silicon’s Metal compute architecture. Their behavior at 70B (80 layers) and across architectures with non-standard attention scaling (Gemma Team et al., 2024) is unknown. We address both gaps with Open-TQ-Metal, a complete inference system that implements fused compressed-domain attention in Metal compute shaders, building on the online softmax technique (Milakov & Gimelshein, 2018) and split-K parallelism from FlashDecoding (Dao et al., 2023). Our contributions: 1        
+
+> arXiv:2604.16957v1 [cs.LG] 18 Apr 2026 Open-TQ-Metal: Fused Compressed-Domain Attention on Apple Silicon
+> (a) Llama 3.1 70B at 128K context: FP16 KV requires 79.1 GB (infeasible on 64 GB). Int4 KV reduces total to 53.6 GB.
+> (b) Fused sdpa int4 kernel speedup on Llama 70B. Scales super-linearly from 3 ×at 1K to 48 ×at 128K.
+> Figure 1. The two core results of Open-TQ-Metal: (a) enabling 128K context on hardware where it was previously impossible, and (b) achieving super-linear attention speedup via fused compressed-domain computation.
+
+• Fused int4 SDPA kernel for Metal. A Metal compute shader that reads packed int4 keys and values directly from device memory, dequantizes per-element in GPU registers via bitwise operations, and computes atten-tion with online softmax—producing zero intermediate matrices. At 128K context, this kernel is 48 × faster than the dequantize-then-attend baseline (Section 3.1). • 128K context on 64 GB hardware. By compressing the KV cache from 40 GB (FP16) to 12.5 GB (int4), Open-TQ-Metal fits Llama 3.1 70B at 128K context in 53.6 GB (including 2 GB runtime overhead)—with 10.4 GB headroom on a 64 GB Mac. Output quality is identical: both paths produce the same top-1 token under greedy decode (Section 5). • Cross-architecture quantization analysis. Across 330 experiments on Gemma 4 31B and Llama 3.1 70B, we demonstrate that the attention scale factor is the critical variable for quantization method selection: Po-larQuant fails on Gemma 4 ( attn scale=1.0 ) but succeeds on Llama ( 1/√d = 0 .0884 ), with KL diver-gence differing by 25–100 × (Section 4). • Split-K parallelism via chained MLX Primitives. 
+
+We solve the Metal dispatch race condition for long-context attention by implementing partial and reduce phases as separate MLX Primitives chained through the computation graph, achieving flat latency scaling from 1K to 128K tokens (Section 3.2). All code, Metal shaders, and benchmarks are open-sourced. Figure 1 summarizes the two core results. 
+
+# 2. Background 
+
+2.1. KV Cache Compression 
+
+Autoregressive inference stores key and value projections from all previous tokens in the KV cache (Vaswani et al., 2017). For a model with L layers, Hkv KV heads (Shazeer, 2019; Ainslie et al., 2023), head dimension d, and sequence length S, the cache occupies 2LH kv Sdb bytes, where b is bytes per element. At FP16 ( b = 2 ), Llama 3.1 70B at 128K context requires: 
+
+2 × 80 × 8 × 128 K × 128 × 2 = 40 GB (1) This single allocation exceeds the total memory of most consumer devices. 
+
+Per-group asymmetric int4 quantization partitions each vector into groups of g consecutive elements and computes per-group scale and zero-point parameters: 
+
+s = max − min 15 , z = − min 
+
+s (2) 
+
+q = clamp 
+
+j xs + z
+
+m
+
+, 0, 15 
+
+
+
+, ˆx = ( q − z) · s (3) Values are packed two per byte (4 bits each). At g = 32 ,the effective compression is 3.2 × including amortized scale and zero-point overhead. 
+
+PolarQuant (Han et al., 2025) transforms KV embeddings into polar coordinates via a recursive algorithm and quan-tizes the resulting angles. After random preconditioning, these angles exhibit a tightly concentrated distribution that eliminates the need for explicit normalization. The authors report over 4.2 × compression. However, quantizing angles introduces structured angular error—a property we analyze in Section 4. 
+
+QJL (Zandieh et al., 2024) projects keys through a random Gaussian matrix and stores only the sign bits of the result, 2Open-TQ-Metal: Fused Compressed-Domain Attention on Apple Silicon 
+
+Algorithm 1 Fused int4 SDPA (single query, decode step) 
+
+Require: q ∈ Rd; packed int4 K, V with scales s, zeros z 
+
+> 1:
+
+q ← q/√d ▷ pre-scale query  
+
+> 2:
+
+m ← −∞ , ℓ ← 0, o ← 0 
+
+> 3:
+
+for i = 1 to S do  
+
+> 4:
+
+ˆki ← dequant4( Ki, sK , zK ) ▷ in register  
+
+> 5:
+
+ai ← q⊤ ˆki ▷ SIMD reduction  
+
+> 6:
+
+m′ ← max( m, a i) 
+
+> 7:
+
+ℓ ← ℓ · em−m′
+
++ eai−m′ 
+
+> 8:
+
+ˆvi ← dequant4( Vi, sV , zV ) 
+
+> 9:
+
+o ← o · em−m′
+
++ eai−m′
+
+· ˆvi 
+
+> 10:
+
+m ← m′ 
+
+> 11:
+
+end for  
+
+> 12:
+
+return o / ℓ 
+
+yielding binary sketches in {− 1, +1 }m. Attention scores are estimated asymmetrically: the query side remains in full precision while only keys are binarized. Compression exceeds 5 ×.
+
+2.2. TurboQuant and Metal Compute 
+
+TurboQuant (Zandieh et al., 2025) proposes an MSE-optimal scalar quantizer based on random rotation and Lloyd-Max codebooks, with a 1-bit QJL transform applied to the residual. The paper reports quality neutrality at 3.5 bits per dimension and marginal degradation at 2.5 bits, evaluated on models up to 8B parameters. Apple Silicon GPUs use 32-wide SIMD groups as the ba-sic execution unit. The MLX framework (Apple Machine Learning Research, 2024) provides a C++ Primitive system for dispatching custom Metal kernels. Critically, multi-ple dispatches within a single eval gpu() call execute without guaranteed ordering—a constraint that shapes our split-K design (Section 3.2). 
+
+# 3. Method 
+
+3.1. Fused int4 Scaled Dot-Product Attention 
+
+Standard int4 attention dequantizes the full key matrix to FP32 before computing QK T , materializing a temporary 
+
+S × d matrix per head—742 MB across 50 layers at 950 tokens for Gemma 4. Our fused kernel (Algorithm 1) elim-inates this entirely, processing the full KV sequence in a single pass: where dequant4 extracts 4-bit nibbles via bitwise masks and applies per-group affine reconstruction (q − z) · s entirely in GPU registers—no intermediate matrix is written to device memory. 
+
+Vectorized nibble extraction. Rather than extract-ing nibbles one at a time (4 shifts and masks per uint32), we adopt MLX’s qdot pattern: reinterpret the packed uint32 array as uint16, pre-divide query val-ues by {1, 16 , 256 , 4096 }, and multiply against masks 
+
+{0x000F , 0x00F0 , 0x0F00 , 0xF000 }. This computes four dot-product terms simultaneously: accum =
+
+> 3
+
+X
+
+> j=0
+
+qpre [j] · (w & mask [j]) (4) where qpre [j] = q[j]/16 j absorbs the nibble shift into the query. 
+
+SIMD and threadgroup organization. For Llama’s d =128 : each SIMD lane handles d/ 32 = 4 elements, one simdgroup (32 lanes) covers the full head dimension. For Gemma’s d = 256 : 32 simdgroups × 32 lanes = 1024 threads per head. GQA is handled by mapping kv head =
+
+head idx /gqa factor .
+
+3.2. Split-K Parallelism 
+
+At 128K context, a single threadgroup processing all KV tokens sequentially takes 480 ms per head. Split-K divides the KV sequence into C = ⌈S/ 512 ⌉ chunks processed in parallel. Multiple dispatches within a single eval gpu() race on Metal. We solve this by implementing partial and reduce phases as separate MLX Primitives chained through the computation graph—Phase 2 takes Phase 1’s outputs as inputs, so lazy evaluation naturally serializes them. Each chunk c produces partial output oc, running max mc,and sum-of-exponentials ℓc. The reduce phase combines them via online softmax correction: 
+
+o =
+
+P 
+
+> c
+
+ℓc · emc−mglobal · oc
+
+P 
+
+> c
+
+ℓc · emc−mglobal (5) This achieves flat latency: 1.6 ms at 1K, 9.9 ms at 128K (6 ×
+
+growth vs. 100 × for the baseline). 
+
+3.3. Hybrid Prefill/Decode Attention 
+
+The fused int4 kernel is optimized for decode ( Sq =1, long Skv ). For prefill ( Sq > 1), MLX’s built-in 
+
+scaled dot product attention batches the multi-query computation more efficiently. Open-TQ-Metal auto-matically selects: • Prefill (Sq > 1): MLX SDPA with FP16 K, V →
+
+quantize to int4 → store in cache • Decode (Sq = 1, cached tokens ≥ 32 ): Fused 
+
+sdpa int4 reads directly from int4 cache 3Open-TQ-Metal: Fused Compressed-Domain Attention on Apple Silicon 
+
+3.4. Wired Memory 
+
+A 39 GB model on 64 GB hardware causes ma-cOS to page weights to SSD. Pinning weights via 
+
+mx::set wired limit() recovers 10 × throughput (0.6 → 6.0 tok/s)—a necessary prerequisite for large-model inference on Apple Silicon. 
+
+# 4. Cross-Architecture Quantization Analysis 
+
+Quantization method viability depends on a single architec-tural parameter: the attention scale α.
+
+4.1. The Attention Scale Problem 
+
+Standard transformers compute score = α · qT k with α =1/√d. Gemma 4 uses α = 1 .0, normalizing Q and K via separate RMS norms instead. PolarQuant introduces angular error δθ , producing score perturbation: 
+
+∆score = α · ∥ q∥ · ∥ k∥ · (1 − cos δθ ) (6) For any fixed angular error δθ , the ratio of score perturba-tions between Gemma 4 and Llama is 1.0/0.0884 ≈ 11 ×.This per-layer amplification compounds through softmax across 60 layers. 
+
+4.2. Empirical Validation 
+
+We validate this prediction by measuring quantization qual-ity across both architectures (Table 1). Table 1 summarizes the key finding. PolarQuant’s angular error is dampened 25–100 × by Llama’s standard attention scale, producing viable output. On Gemma 4, the undamp-ened error compounds through 60 layers into incoherent text. Int4 per-group quantization succeeds on both architec-tures because its per-element affine errors are uncorrelated and cancel in dot products, unlike PolarQuant’s structured angular bias. 
+
+4.3. QJL Fails at Depth 
+
+In our experiments, QJL achieves per-layer score correlation of ρ ≈ 0.85 on both architectures. On 8B models (32 lay-ers), 0.85 32 ≈ 0.006 —marginal but viable. On 70B models (80 layers), 0.85 80 ≈ 2 × 10 −6—the signal is destroyed. The original QJL evaluation on 8B models does not predict this failure. A hybrid (QJL for 10 early layers, int4 for 70) saves only 1.7% memory—insufficient to justify the quality risk. 
+
+# 5. Experimental Results 
+
+All experiments run on an Apple M1 Max with 64 GB uni-fied memory, 32 GPU cores, and macOS 15. We eval-uate on two models: Gemma 4 31B-IT (Gemma Team  
+
+> Figure 2. Gemma 4 31B decode throughput vs. context length. The fused kernel (orange) maintains constant throughput while the baseline (gray) degrades as dequantization bandwidth increases. The shaded region shows the throughput advantage of the fused kernel.
+
+et al., 2024) (4-bit (Frantar et al., 2023), 17.4 GB, 60 layers) and Llama 3.1 70B-Instruct (Grattafiori et al., 2024) (4-bit, 39.1 GB, 80 layers). 
+
+5.1. Kernel Performance 
+
+We first isolate the attention kernel’s contribution by bench-marking it independently of end-to-end inference (Table 2). Table 2 shows kernel-level results on Llama 70B. The fused kernel achieves 48 × speedup at 128K context (Figure 1b), scaling super-linearly because the baseline’s dequantization cost grows with O(S · d) while the fused kernel’s register-based approach grows sublinearly via split-K parallelism. Table 3 shows end-to-end decode throughput on Gemma 4. As shown in Figure 2, the fused kernel maintains constant throughput (10.0 tok/s) regardless of context length, while the baseline degrades from 10.8 to 7.2 tok/s as dequantiza-tion bandwidth increases. 
+
+5.2. Memory Savings 
+
+Open-TQ-Metal extends maximum context from 73K (FP16, 64 GB limit) to 236K tokens (Table 4). At 128K, FP16 requires 79 GB (infeasible); int4 requires 53.6 GB with 10.4 GB headroom. Figure 3 shows the crossover: FP16 KV exceeds 64 GB at 64K context while int4 stays within bounds at 128K. 
+
+5.3. End-to-End Inference 
+
+Table 5 compares Open-TQ-Metal against existing inference frameworks on Llama 70B. Open-TQ-Metal achieves 6.0 tok/s on Llama 70B at 128K context (Table 5). The 18% gap vs. mlx-lm stems from KV cache management overhead (concatenation vs. pre-allocated slices), not the attention kernel. Output quality is 4Open-TQ-Metal: Fused Compressed-Domain Attention on Apple Silicon 
+
+Table 1. Quantization method quality across architectures. PolarQuant produces coherent output on Llama ( α = 0 .0884 ) but degrades to incoherent text on Gemma 4 ( α = 1 .0). Int4 per-group quantization works on both architectures because it preserves vector direction better than angular encoding. 
+
+Method Metric Llama 70B (α = 0 .0884 ) Gemma 31B (α = 1 .0)PolarQuant 4-bit Cosine sim 0.958 0.621 PolarQuant 5-bit Cosine sim 0.989 0.743 PolarQuant 4-bit KL divergence 7.96 × 10 −9 2.1 × 10 −4
+
+PolarQuant 4-bit Output quality Coherent Gibberish Int4 (group=32) Cosine sim 0.998 0.992 Int4 (group=32) KL divergence < 10 −10 < 10 −8
+
+Int4 (group=32) Output quality Identical Excellent QJL 1-bit Score corr/layer 0.85 0.87 QJL 1-bit After 80/60 layers ≈ 0 ≈ 0
+
+QJL 1-bit Output quality Repetition Repetition 
+
+Table 2. Fused sdpa int4 kernel latency vs. dequantize-then-attend baseline on Llama 3.1 70B (80 layers, 64 query heads, 8 KV heads, d = 128 ). Speedup scales super-linearly because the baseline materializes an S × d dequantization matrix while the fused kernel operates in registers. 
+
+KV Length Fused (ms) Baseline (ms) Speedup 
+
+1K 1.6 4.6 3×
+
+16K 2.7 54.6 20 ×
+
+64K 5.7 225.3 39 ×
+
+128K 9.9 480.6 48 ×
+
+Table 3. Fused kernel performance on Gemma 4 31B (60 layers, 
+
+d ∈ { 256 , 512 }). The kernel maintains constant end-to-end de-code throughput as context grows, while the baseline degrades due to increasing dequantization bandwidth. 
+
+Context Fused (tok/s) Baseline (tok/s) Speedup 
+
+33 10.4 9.6 +8% 423 10.0 7.4 +34% 786 10.0 7.3 +37% 950 9.8 7.2 +35% 
+
+identical under greedy decode: both produce the same top-1 token given the same prompt. We also observe that value quantization affects output qual-ity more than key quantization (int4 K + FP32 V: 0.998 cosine similarity vs. FP32 K + int4 V: 0.994), because key errors are filtered through softmax while value errors propa-gate directly to the output. 
+
+# 6. Ablations and Negative Results 
+
+Table 6 summarizes the most informative outcomes from 330 experiments. Three negative results merit emphasis: speculative decoding (Leviathan et al., 2023) with a 2B draft achieves only 25% acceptance for 31B/70B targets (need ∼60%); MoE (4B active) reaches 59 tok/s—4 × faster than dense—suggesting bandwidth reduction outperforms 
+
+Table 4. Memory footprint for Llama 3.1 70B at varying context lengths. Open-TQ-Metal enables 128K context within 64 GB; FP16 KV exceeds hardware limits beyond 64K. 
+
+Context FP16 KV int4 KV Total Fits 64GB 
+
+1K 0.3 GB 0.1 GB 41.2 GB Yes 16K 5.0 GB 1.6 GB 42.7 GB Yes 64K 20.0 GB 6.3 GB 47.4 GB Yes 128K 40.0 GB 12.5 GB 53.6 GB Yes 236K — 23.4 GB 63.4 GB Yes (max) 
+
+Figure 3. Memory breakdown: Open-TQ-Metal (left) vs. mlx-lm (right) at each context length. At 128K, mlx-lm needs 80 GB; Open-TQ-Metal fits in 53.6 GB. 
+
+kernel optimization; and int4 KV has a context ceiling on Gemma 4 ( ∼950 tokens) due to compound error at α = 1 .0,while Llama ( α = 0 .0884 ) works to 128K+. Figure 4 visualizes the memory trade-off across all compres-sion methods at 128K context. 
+
+# 7. Discussion and Limitations 
+
+7.1. The Bandwidth Wall 
+
+On Llama 70B, 39 GB of weights at 400 GB/s bandwidth yields a minimum 98 ms per token—an irreducible bottle-neck. Our attention kernel reduces attention latency from 5Open-TQ-Metal: Fused Compressed-Domain Attention on Apple Silicon                        
+
+> Table 5. End-to-end comparison at 128K context on M1 Max 64 GB. Open-TQ-Metal trades 18% throughput for 3.2 ×context capacity—the only framework that achieves 128K on this hard-ware.
+> Framework tok/s Max ctx KV fmt 128K
+> Open-TQ-Metal 6.0 236K int4 Yes mlx-lm 7.3 73K FP16 No llama.cpp ∼5∼50K Mixed No Ollama ∼5∼40K GGUF No
+> Figure 4. KV cache size at 128K context for Llama 70B. Int4 (12.5 GB) and PolarQuant 5-bit (13 GB) fit in 64 GB; QJL achieves high compression but fails at 70B due to compound noise.
+
+480 ms to 9.9 ms at 128K context, but the weight-loading floor means end-to-end throughput cannot exceed ∼10 tok/s without weight compression or MoE architectures. On Gemma 4, the MoE variant (4B active parameters) achieves 59 tok/s precisely because it reduces the bandwidth require-ment. 
+
+7.2. Quality at Extreme Context 
+
+Int4 KV produces identical top-1 tokens at moderate context lengths, but we have not evaluated perplexity degradation at 128K+ tokens on long-context benchmarks (RULER, Needle-in-a-Haystack). The compound error analysis in Section 4 predicts that models with α = 1 .0 will degrade earlier than those with standard scaling, but precise quality boundaries require further study. 
+
+7.3. Hardware Specificity and Engineering Gaps 
+
+Our Metal kernels target Apple Silicon’s 32-wide SIMD groups and unified memory. The algorithmic insights— fused int4 dequantization, split-K via computation graph chaining, attn scale sensitivity—transfer to other hardware, but the kernels require reimplementation for CUDA. The 18% end-to-end gap vs. mlx-lm stems from per-step KV cache concatenation rather than pre-allocated buffers. Attempts to use slice update for in-place assignment caused graph dependency issues in MLX’s C++ API. Re-solving this would close most of the throughput gap. 
+
+# 8. Conclusion 
+
+Open-TQ-Metal demonstrates that fused compressed-domain attention is practical on Apple Silicon, enabling long-context LLM inference configurations previously im-possible on consumer hardware. The fused int4 SDPA kernel achieves 48 × attention speedup at 128K context, compresses the KV cache by 3.2 ×, and produces output identical to FP16 inference under greedy decode. Our cross-architecture analysis of 330 experiments reveals that the attention scale factor—a single architectural parameter— determines whether angular quantization methods succeed or fail, a finding with implications for both quantization method design and model architecture choices. We release all code, Metal shaders, and benchmarks to enable further research on efficient inference for consumer hardware. 
+
+# Acknowledgements 
+
+This work was developed with AI assistance. The Metal kernel implementations, C++ inference engines, and ex-perimental benchmarks were co-developed using Claude Code (Anthropic, Claude Opus 4.6). Manuscript drafting and revision were assisted by the HERMES agent (Nous Research) using the research-paper-writing skill with Claude Opus 4.6 (1M context). The 330-experiment sweep was coordinated via the Ensue distributed memory network. All claims, experimental results, and scientific conclusions were verified by the author against source code and benchmark outputs. 
+
+# A. Metal Kernel Configuration 
+
+Table 7 summarizes the threadgroup configuration for each model variant. All configurations use Metal’s 32-wide SIMD groups as the fundamental execution unit. The grid is dispatched as (Hq × Sq × C, B, 1) where C is the number of split-K chunks. Gemma 4’s sliding-attention layers ( w = 1024 ) are handled by a conditional skip in the inner loop, avoiding allocation of a windowed KV view while maintaining correctness. 
+
+# B. PolarQuant Quality Metrics 
+
+Table 8 reports PolarQuant reconstruction quality on Llama 3.1 70B. The standard attention scale ( α = 0 .0884 )dampens angular errors by 25–107 × vs. Gemma 4’s α =1.0.
+
+# C. Ensue-Coordinated Experiment Orchestration 
+
+The 330-experiment sweep was coordinated via the En-sue distributed memory network (Vegasena, 2026), a multi-6Open-TQ-Metal: Fused Compressed-Domain Attention on Apple Silicon 
+
+Table 6. Selected results from 330 experiments across Gemma 4 31B (312) and Llama 3.1 70B (18). 
+
+Shipped Result Abandoned Why 
+
+Fused sdpa int4 ✓ 37–48 × speedup PolarQuant (Gemma) × attn scale=1.0 Split-K parallelism ✓ Flat latency to 128K QJL 1-bit (both) × 0.85 80 ≈ 0
+
+Hybrid prefill/decode ✓ 66% faster prefill Speculative decode × 25% acceptance Wired memory pinning ✓ 10 × recovery int4 KV >950t (Gemma) × Compound error int4 KV cache ✓ 3.2–6.4 × compr. 2-bit weights × 0.67 × slower PolarQuant (Llama) ✓ 0.989 cosine sim async eval pipeline × Mutable cache 
+
+Table 7. Metal kernel threadgroup configuration across model variants. Larger head dimensions require more simdgroups and shared memory for cross-group softmax reduction. 
+
+Llama 70B Gemma sliding Gemma global 
+
+Head dim d 128 256 512 Simdgroups 1 32 16 Threads/head 32 1024 512 Elems/lane 4 8 16 Shared mem 0 KB 12 KB 24 KB GQA factor 8 16 32 
+
+Table 8. PolarQuant quality on Llama 3.1 70B at 4096-token context. 
+
+Metric 4-bit 5-bit 
+
+K/V cosine similarity 0.958 0.989 Attention output MSE 7.98 × 10 −9 1.2 × 10 −10 
+
+Max absolute error 3.68 × 10 −4 8.1 × 10 −5
+
+KL divergence 7.96 × 10 −9 < 10 −10 
+
+Compression 12.8 × 3.07 ×
+
+agent orchestration system with persistent semantic mem-ory. Each project maintained an independent namespace; an 8-agent loop (orchestrator, hardware profiler, diagnos-tician, model builder, experiment runner, plateau analyst, validator, reflector) autonomously claimed experiment slots, published structured results, and posted cross-referencing insights. Key ensue-mediated discoveries: the attention scale factor as the critical quantization variable (surfaced by the reflector agent after plateau detection on Gemma 4 PolarQuant experiments) and QJL’s depth-scaling failure (identified by cross-namespace search comparing 8B and 70B correlation metrics). 
+
+# D. Supplementary Benchmarks 
+
+Figures 5 to 7 provide additional benchmarks on memory scaling and kernel latency. 
+
+# References 
+
+Ainslie, J., Lee-Thorp, J., de Jong, M., Zemlyanskiy, Y., Lebron, F., and Sanghai, S. GQA: Training general-ized multi-query transformer models from multi-head 
+
+Figure 5. Total memory vs. context length for Llama 70B. FP16 KV (red) crosses the 64 GB limit at ∼73K tokens; int4 KV (orange) enables 236K. 
+
+Figure 6. Gemma 4 31B at 256K context. Only int4 KV fits within the 64 GB M1 Max limit. 
+
+checkpoints. In Empirical Methods in Natural Language Processing (EMNLP) , 2023. arXiv:2305.13245. Apple Machine Learning Research. MLX: An array frame-work for apple silicon. https://github.com/ ml-explore/mlx , 2024. Dao, T. et al. Flash-Decoding for long-context in-ference. https://crfm.stanford.edu/2023/ 10/12/flashdecoding.html , 2023. Frantar, E., Ashkboos, S., Hoefler, T., and Alistarh, D. GPTQ: Accurate post-training quantization for gener-ative pre-trained transformers. In International Con-ference on Learning Representations (ICLR) , 2023. arXiv:2210.17323. Gemma Team, Riviere, M., Pathak, S., et al. Gemma 2: 7Open-TQ-Metal: Fused Compressed-Domain Attention on Apple Silicon  
+
+> Figure 7. Standalone kernel latency on Gemma 4 31B. Fused kernel (orange) vs. MLX baseline (teal).
+
+Improving open language models at a practical size. arXiv preprint arXiv:2408.00118 , 2024. Gerganov, G. and contributors. llama.cpp: LLM inference in C/C++. https://github.com/ggerganov/ llama.cpp , 2023. Grattafiori, A. et al. The Llama 3 herd of models. arXiv preprint arXiv:2407.21783 , 2024. Han, I., Kacham, P., Karbasi, A., Mirrokni, V., and Zandieh, A. PolarQuant: Quantizing KV caches with polar trans-formation. arXiv preprint arXiv:2502.02617 , 2025. Hooper, C., Kim, S., Mohammadzadeh, H., Mahoney, M. W., Shao, Y. S., Keutzer, K., and Gholami, A. KVQuant: Towards 10 million context length LLM infer-ence with KV cache quantization. In Advances in Neural Information Processing Systems (NeurIPS) , 2024. Kang, H., Zhang, Q., Kundu, S., Jeong, G., Liu, Z., Krishna, T., and Zhao, T. GEAR: An efficient KV cache com-pression recipe for near-lossless generative inference of LLM. In International Conference on Machine Learning (ICML) , 2024. arXiv:2403.05527. Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C. H., Gonzalez, J. E., Zhang, H., and Stoica, I. Efficient memory management for large language model serving with PagedAttention. In ACM Symposium on Operating Systems Principles (SOSP) , 2023. arXiv:2309.06180. Leviathan, Y., Kalman, M., and Matias, Y. Fast inference from transformers via speculative decoding. In Interna-tional Conference on Machine Learning (ICML) , 2023. arXiv:2211.17192. Liu, Z., Yuan, J., Jin, H., Zhong, S., Xu, Z., Braverman, V., Chen, B., and Hu, X. KIVI: A tuning-free asym-metric 2bit quantization for KV cache. In International Conference on Machine Learning (ICML) , 2024. Milakov, M. and Gimelshein, N. Online normalizer cal-culation for softmax. arXiv preprint arXiv:1805.02867 ,2018. Shazeer, N. Fast transformer decoding: One write-head is all you need. arXiv preprint arXiv:1911.02150 , 2019. Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., Kaiser, L., and Polosukhin, I. Atten-tion is all you need. In Advances in Neural Information Processing Systems (NeurIPS) , 2017. Vegasena, S. Ensue: A distributed memory network for multi-agent research orchestration. HERMES AGENT, 2026. Zandieh, A., Daliri, M., and Han, I. QJL: 1-bit quantized JL transform for KV cache quantization with zero overhead. 
+
+arXiv preprint arXiv:2406.03482 , 2024. Zandieh, A., Daliri, M., Hadian, M., and Mirrokni, V. Tur-boQuant: Online vector quantization with near-optimal distortion rate. arXiv preprint arXiv:2504.19874 , 2025. 8

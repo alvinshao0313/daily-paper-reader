@@ -1,0 +1,1482 @@
+Title: Latent-Condensed Transformer for Efficient Long Context Modeling
+
+URL Source: https://arxiv.org/pdf/2604.12452v2
+
+Published Time: Fri, 17 Apr 2026 00:34:52 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+# Latent-Condensed Transformer for Efficient Long Context Modeling 
+
+Zeng You 1,2*, Yaofo Chen 1*, Qiuwu Chen 3*, Ying Sun 3*,Shuhai Zhang 1, Yingjian Li 2, Yaowei Wang 2,4†, Mingkui Tan 1,5†
+
+> 1
+
+South China University of Technology 
+
+> 2
+
+Pengcheng Laboratory 
+
+> 3
+
+AIGCode 
+
+> 4
+
+Harbin Institute of Technology 
+
+> 5
+
+Pazhou Laboratory 
+
+Abstract 
+
+Large language models (LLMs) face significant challenges in processing long contexts due to the linear growth of the key-value (KV) cache and quadratic complexity of self-attention. Ex-isting approaches address these bottlenecks sep-arately: Multi-head Latent Attention (MLA) reduces the KV cache by projecting tokens into a low-dimensional latent space, while sparse at-tention reduces computation. However, sparse methods cannot operate natively on MLA’s compressed latent structure, missing opportu-nities for joint optimization. In this paper, we propose Latent-Condensed Attention (LCA), which directly condenses context within MLA’s latent space, where the representation is dis-entangled into semantic latent vectors and po-sitional keys. LCA separately aggregates se-mantic vectors via query-aware pooling and preserves positional keys via anchor selection. This approach jointly reduces both computa-tional cost and KV cache without adding pa-rameters. Beyond MLA, LCA’s design is architecture-agnostic and readily extends to other attention mechanisms such as GQA. The-oretically, we prove a length-independent error bound. Experiments show LCA achieves up to 2.5 × prefilling speedup and 90% KV cache reduction at 128K context while maintaining competitive performance. 
+
+1 Introduction 
+
+Efficient long-context modeling in large language models (LLMs) is essential for applications span-ning full-document comprehension and extended multi-turn dialogues (OpenAI, 2023; Grattafiori et al., 2024; Guo et al., 2025). However, transformer-based LLMs face two challenges: 1) the linear growth of key-value (KV) cache dur-ing decoding and 2) the quadratic computational complexity of self-attention (Vaswani et al., 2017), together hindering long-context deployment. 
+
+> *Equal Contribution.
+> †Corresponding Authors
+
+To alleviate the memory overhead (challenge 1), Multi-head Latent Attention (MLA) (DeepSeek-AI et al., 2024) projects tokens into a shared low-dimensional latent space, significantly reducing the per-token KV cache size. During inference, MLA caches only the compressed latent vectors CKV 
+
+and the positional keys KR, where KR encodes precise positional information via Rotary Position Embedding (RoPE) (Su et al., 2024). Owing to its favorable trade-off between memory efficiency and model capacity, MLA has been widely adopted in recent long-context models (DeepSeek-AI et al., 2024; Liu et al., 2024; Guo et al., 2025; Kimi et al., 2025a,b). Nevertheless, MLA still retains all L
+
+latent vectors and performs dense attention, pre-serving the quadratic computational bottleneck. Separately, efficient attention methods mitigate quadratic computation (challenge 2) via sparsifi-cation. Early approaches used fixed sparse pat-terns (Beltagy et al., 2020; Zaheer et al., 2020), which lack adaptability and risk discarding impor-tant information. Recent dynamic sparse meth-ods (Jiang et al., 2024; Lai et al., 2025; Xu et al., 2025) selectively skip computation blocks or evict less relevant tokens to reduce computation. How-ever, these approaches remain susceptible to poten-tially important information loss. Crucially, these two lines of work cannot be directly combined to address both challenges si-multaneously. Most existing sparse methods op-erate on the computation of attention scores be-tween original queries and keys, which require full-dimensional representations. When applied to MLA, these methods must first reconstruct full-dimensional KV matrices before performing sparsi-fication. Consequently, these methods fail to lever-age the compressed latent structure for further effi-ciency gains, particularly in reducing the KV cache beyond what MLA already achieves. This reveals a significant yet overlooked gap: existing methods lack a mechanism to perform efficient computation 1
+
+> arXiv:2604.12452v2 [cs.CL] 16 Apr 2026
+
+reduction natively within MLA’s latent space. In this paper, we bridge this gap by directly con-densing redundant context within the MLA’s la-tent space into a compact set of representatives, thereby reducing the number of vectors participat-ing in attention computation and stored in the KV cache. However, MLA’s disentangled represen-tation presents a unique challenge: the semantic 
+
+component CKV and the positional component 
+
+KR have distinct functional properties due to their different encodings. Semantic information, which captures the continuous and often smooth content representations, can be aggregated across tokens without significant loss of fidelity (Bolya et al., 2023; Feng and Zhang, 2023); while positional en-coding requires careful preservation to maintain accurate relative positional relationships. Thus, an effective condensation strategy must treat these two components differently. Based on the above insights, we propose Latent-Condensed Attention (LCA ), an efficient atten-tion mechanism that performs structured context condensation natively within latent space. LCA partitions context into groups and compresses each group into a representative latent vector via weighted pooling for the semantic component 
+
+CKV , while preserving positional information by selecting the token with the highest relevance within each group for KR. In this way, LCA re-duces both the KV cache size and the attention complexity, without introducing additional param-eters. We further provide a theoretical guarantee that the approximation error is uniformly bounded, independent of context length. Crucially, the de-coupled condensation strategy is not specific to MLA; it generalizes to other attention mechanisms such as GQA, as we validate in Section 5.4. We summarize our contributions as follows: • We propose Latent-Condensed Attention (LCA), an efficient attention mechanism that performs structured context condensation directly in MLA’s latent space, reducing both KV cache and attention computations, instead of sparsification only on reconstructed KV. • We design a latent-space condensation strategy that decouples semantic and positional process-ing: semantic information is adaptively aggre-gated via query-aware weighted pooling, while positional fidelity is preserved through hard an-chor selection. This design avoids the signal-blending issue in conventional approaches. • LCA can be easily integrated into pretrained mod-els via lightweight fine-tuning, requiring no ad-ditional parameters. Experiments demonstrate that LCA delivers up to 2.5 × prefill speedup and 
+
+90% KV cache reduction at 128K context length while maintaining comparable performance. 
+
+2 Related Works 
+
+Efficient Attention . To reduce the memory foot-print of the KV cache, several attention vari-ants have been proposed. Multi-Query Atten-tion (MQA) (Shazeer, 2019) shares a single key and value head across all query heads, while Grouped-Query Attention (GQA) (Ainslie et al., 2023) groups query heads to share key-value heads, improving efficiency while maintaining quality. More recently, Multi-head Latent At-tention (MLA) (DeepSeek-AI et al., 2024) com-presses KV states into a low-dimensional latent space, significantly reducing per-token cache size. It has been widely adopted in state-of-the-art long-context models (DeepSeek-AI et al., 2024; Liu et al., 2024; Guo et al., 2025; Kimi et al., 2025a,b). However, these methods retain the quadratic com-putational complexity of standard attention. Besides, sparse attention methods (Zaheer et al., 2020; Beltagy et al., 2020; Zhang et al., 2025; Chen et al., 2025) reduce the computational cost by skip-ping some tokens or computation blocks. Early methods employ fixed sparse patterns (Zaheer et al., 2020; Ding et al., 2023; Beltagy et al., 2020; Xiao et al., 2024), which lack adaptability. To intro-duce adaptability, DuoAttention (Xiao et al., 2025) learns head-specific static sparse patterns during an additional offline training phase. However, static patterns cannot adjust to the varying importance of tokens across different contexts. Recent dynamic sparse attention methods (Lai et al., 2025; Jiang et al., 2024; Xiao et al., 2025) selectively compute only a subset of attention blocks. Unlike prior work that treats KV cache reduc-tion and attention sparsity separately, LCA operates directly on MLA’s compressed latent codes. By condensing information in the low-rank space, it avoids the overhead of full-dimensional reconstruc-tion while simultaneously reducing both memory footprint and computational complexity. 
+
+System-Level Optimizations for Long-Context Inference . Another line of work focuses on kernel-level optimizations and cache management for long-context inference. FlashAttention (Dao et al., 22022) and its successors speed up attention by optimizing memory access patterns. PagedAtten-tion (Kwon et al., 2023) manages the KV cache more efficiently by allowing non-contiguous stor-age, reducing memory fragmentation. Token-level eviction policies (Li et al., 2024; Hao et al., 2025; Liu et al., 2025) retain only the most salient tokens based on attention scores, while query-aware cache selection methods (Tang et al., 2024) learn to select a compact set of KV pairs for each query. These techniques are largely orthogonal to our approach. 
+
+3 Preliminaries 
+
+Multi-head Latent Attention (MLA) (DeepSeek-AI et al., 2024) is a core breakthrough for long-context large language models. It projects tokens into a low-dimensional latent space, drastically re-ducing per -token KV -cache memory while preserv-ing modeling capability. Given an input sequence 
+
+X ∈ RL×d, MLA computes compressed latents:       
+
+> CQ=XWDQ ,CKV =XWDKV ,(1)
+
+where W DQ , W DKV ∈Rd×dc are down-projection matrices and dc≪d. For each head h, queries, keys, and values are reconstructed from these latents: 
+
+Qh=[ CQW U Q h , QRh ] ∈ RL×dk , (2) 
+
+Kh=[ CKV W U K h , KR] ∈ RL×dk , (3) 
+
+Vh=CKV W U V h ∈ RL×dv , (4) where QRh , KR ∈ RL×dr are Rotary Position Embedding (RoPE) (Su et al., 2024) augmented components that encode positional information. 
+
+W U Q h , W U K h ∈ Rdc×d′ 
+
+> k
+
+and W U V h ∈ Rdc×dv
+
+are the up-projection matrices for head h, with 
+
+d′ 
+
+> k
+
++ dr = dk. The attention is computed as: MLA h = softmax 
+
+ Qh(Kh)⊤
+
+√dk
+
+
+
+Vh. (5) The outputs of all heads are then combined via con-catenation. During inference, MLA caches only 
+
+CKV and KR, reducing per-token memory. Ow-ing to its favorable efficiency - accuracy trade -off, MLA has been widely adopted as a core component in state -of - the - art long - context LLMs (Liu et al., 2024; DeepSeek-AI, 2025; Kimi et al., 2025a,b). 
+
+Limitations of MLA . While MLA substantially reduces per-token KV-cache memory by project-ing tokens into a low-dimensional latent space, it still requires all L tokens to participate in atten-tion computation, resulting in significant redundant computation and memory access and leaving the quadratic dependence on context length unchanged. Existing efficient attention methods (Xiao et al., 2024, 2025; Lai et al., 2025) can alleviate computa-tional cost by sparsifying attention, but they operate on reconstructed full-dimensional key–value states. When applying these methods to MLA, this recon-struction step negates the efficiency benefits of its low-dimensional latent representation. As a result, current approaches fail to exploit MLA’s latent structure to jointly reduce attention computa-tion and KV-cache growth .
+
+4 Latent-Condensed Attention 
+
+4.1 Motivations and Method Overview 
+
+Long context sequences often exhibit substantial redundancy: only a small subset of tokens is typi-cally relevant for the task (Chen et al., 2025; Zhang et al., 2025; Xiao et al., 2024). This suggests that computing attention over all L tokens incurs unnec-essary computational overhead. While Multi-head Latent Attention (MLA) effectively compresses the KV cache into a low-dimensional latent space, it still performs quadratic attention over all L tokens. We propose to address this bottleneck by condens-ing redundant context before attention computation. Crucially, unlike methods that sparsify attention on reconstructed full-dimensional states, we operate natively within compressed latent space, leveraging its latent structure for further efficiency gains .Unfortunately, MLA’s latent representation is naturally disentangled : each token is encoded by a compressed semantic latent CKV and a residual positional key KR with precise positional infor-mation via RoPE (Su et al., 2024). The semantic and positional components differ functionally due to their distinct encodings: semantic information can often be aggregated (Feng and Zhang, 2023; Bolya et al., 2023), whereas positional encoding is highly nonlinear and should not be arbitrarily blended. Hence, an effective condensation strategy must treat these two components differently. Motivated by these insights, we propose Latent-Condensed Attention (LCA) , which employs a dual-path group-wise condensation strategy: se-mantic vectors are aggregated via query-aware pooling, while positional fidelity is preserved by selecting a positional anchor per group. By operat-ing natively in MLA’s latent space, LCA reduces both the number of cached vectors and the attention complexity, without introducing additional parame-3…
+
+…
+
+> Concatenation
+
+… 
+
+> Input Query Sequence 𝐐
+> Split into Non-overlapping Blocks
+
+Dynamic Global Token Selection Local Token Preservation 
+
+> Sliding  Local Tokens
+> 𝐊 𝑳 , 𝐕 𝑳
+> Importance
+> Measuring ( Eq.4 )
+> Redundancy
+> Approximation ( Eq.5 )
+> Token
+> Selection
+> Global Tokens
+> 𝐊 𝑮 , 𝐕 𝑮
+> Token
+> Blocks
+
+Output 𝐀𝐭𝐭𝐧 = 𝐬𝐨𝐟𝐭𝐦𝐚𝐱 𝐐 𝐊 𝑮 ;𝐊 𝑳 ఻
+
+> 𝒅 𝒉
+
+𝐕 𝑮 ; 𝐕 𝑳 
+
+# …
+
+> Sort
+
+# …… ……𝒃 𝒃 𝒃 
+
+> 𝒘
+
+# … …Latent 𝐂 𝑲𝑽 
+
+Context 𝐗 
+
+𝐊 𝑹 
+
+Apply RoPE 
+
+Latent-Space Condensation 
+
+> Importance
+> Measuring
+> (Eq.6 )
+> Weighted Pooling
+> (Eq.7 )
+> Maximal Selection
+> (Eq.8 )
+> 𝐂 𝒓𝒆𝒑 , 𝐊 𝐑 𝐫𝐞𝐩
+
+History Context Recent Context   
+
+> Token Groups
+> 𝑮 𝒋 𝒋 ୀ𝟏
+> 𝒎
+> 𝑔
+> Local Window
+> 𝑤
+> 𝑤
+> Local Window 𝐂 𝒍𝒐𝒄 , 𝐊 𝐑 𝒍𝒐𝒄
+
+Queries 𝐐 Fused KV 𝐊 ஸ𝒕 
+
+> 𝒇𝒖𝒔𝒆𝒅
+
+, 𝐕 ஸ𝒕  
+
+> 𝒇𝒖𝒔𝒆𝒅
+
+# …
+
+> Eq.9
+> Eq.9
+
+Attention Computation ( Eq.10 )
+
+Output 𝐀𝐭𝐭𝐧 = 𝐬𝐨 
+
+Cached tokens during inference 
+
+> 𝑔
+> 𝑤
+
+# …Figure 1: An overview of Latent-Condensed Attention (LCA). The history context is condensed into a compact set of representatives via group-wise condensation in the latent space: semantic information is aggregated through weighted pooling of CKV , while positional information is preserved via anchor selection from KR. The recent context is retained in full fidelity without condensation. 
+
+ters. The framework of LCA is illustrated in Figure 1, with its algorithm in Algorithm 1. 
+
+4.2 Latent-Space Condensation 
+
+We perform latent-space token condensation by explicitly distinguishing semantic and positional information, and applying different reduction op-erators to each. This enables effective reduction of long-range context while preserving sufficient information required for attention computation. Given the latent matrix CKV ∈ RL×dc and the positional keys KR ∈ RL×dr , we partition the his-tory context into m =
+
+j L−wg
+
+k
+
+contiguous groups 
+
+{Gj }mj=1 of size g, where w denotes a local win-dow size that preserves fine-grained local context (detailed later). To assess token relevance within each group, we adopt a query-aware scoring mecha-nism that reflects the current decoding focus rather than relying on static heuristics. Following Lai et al. (2025), we compute a summary query by averag-ing the last g queries, i.e. , ¯q = Average (Q[−g:] ).For each token i ∈ Gj , we compute an importance score si = ¯ q⊤ki/√dh, followed by a group-wise softmax normalization: 
+
+α(j) 
+
+> i
+
+= exp( si)
+
+P 
+
+> k∈Gj
+
+exp( sk) , ∀i ∈ Gj . (6) We treat semantic and positional components differ-ently based on their distinct functional properties. 
+
+Semantic condensation via weighted pooling .For the semantic latent vectors cKV i within each group, we compute a representative latent via weighted pooling: 
+
+crep  
+
+> j
+
+= X
+
+> i∈Gj
+
+α(j) 
+
+> i
+
+cKV i ∈ Rdc , (7) where cKV i denotes the i-th row of CKV . Un-like sparse attention methods that discard tokens or computation blocks, weighted pooling preserves information from all tokens in the group while em-phasizing those most relevant to the current query. This design admits a simple yet principled inter-pretation. The following proposition shows that weighted pooling yields the optimal representative under an expected reconstruction criterion. 
+
+Proposition 1. (Optimal Condensation via Weighted Pooling ) Let {ci ∈ Rdc }gi=1 be a set of latent vectors and α ∈ ∆g−1 a probability dis-tribution over them, with αi ≥ 0 and P 
+
+> i
+
+αi = 1 .Consider the expected squared reconstruction error 
+
+L(crep ) = Ei∼α
+
+∥ci−crep ∥22
+
+ =
+
+> g
+
+X
+
+> i=1
+
+αi∥ci−crep ∥22.
+
+4The vector crep that minimizes L is uniquely given by the convex combination crep = Pgi=1 αici.
+
+Applying Proposition 1 with αi = α(j) 
+
+> i
+
+shows that our weighted pooling minimizes the expected error in representing each group’s semantic content. The full proof is provided in Appendix A.1. 
+
+Positional anchoring via max-selection . The residual positional keys kRi are encoded using Ro-tary Position Embedding (RoPE) (Su et al., 2024), which is a nonlinear function of absolute position. Direct pooling over kRi would blend distinct posi-tional signals and distort relative positional relation-ships. To preserve accurate positional information, we select the token with the highest importance score within each group as the positional anchor: 
+
+Ij = arg max 
+
+> i∈Gj
+
+α(j) 
+
+> i
+
+, kRrep  
+
+> j
+
+= kRIj . (8) This strategy ensures that each representative’s po-sitional information corresponds to a concrete to-ken position, preserving valid attention geometry. In contrast to semantic aggregation, positional in-formation is preserved through hard selection to avoid blending incompatible positional signals. 
+
+Preserving Fine-Grained Local Context . While latent condensation effectively reduces redundancy in long-range context, fine-grained local informa-tion remains critical for accurate next-token predic-tion (Manakul and Gales, 2021; Yang et al., 2021). Accordingly, we retain a local window of the most recent w latent vectors in full fidelity. Any resid-ual tokens that do not form a complete group are also included in this window. Specifically, the local window consists of the preceding k = w + r latent vectors, where r = ( L − w) mod g, ensuring that every token is accounted for. 
+
+4.3 Attention with Condensed Context Representative Key–Value Construction . For each group Gj , the final representative key and value matrices are constructed using MLA’s origi-nal up-projection matrices: 
+
+krep  
+
+> j
+
+=
+
+h
+
+crep  
+
+> j
+
+W U K , kRrep 
+
+> j
+
+i
+
+, vrep  
+
+> j
+
+=crep  
+
+> j
+
+W U V .
+
+Collecting all representatives, we obtain condensed key and value matrices: 
+
+Krep =[ krep  
+
+> 1
+
+; . . . ; krep  
+
+> m
+
+], Vrep =[ vrep  
+
+> 1
+
+; . . . ; vrep  
+
+> m
+
+].
+
+We preserve the corresponding keys and values of the local context without condensation:         
+
+> Kloc =[ kL−k+1 ;. . . ;kL],Vloc =[ vL−k+1 ;. . . ;vL],(9)
+
+Algorithm 1 Latent-Condensed Attention 
+
+Require: Sequence length L, latents 
+
+CKV =[ cKV  
+
+> 1
+
+; . . . ; cKV L ], residual keys 
+
+KR=[ kR 
+
+> 1
+
+; . . . ; kRL ], queries Q=[ q1; . . . ; qL],window size w, group size g. 
+
+> 1:
+
+¯q←Avg ([ qL−g+1 ; · · · ; qL]) , m←⌊ (L−w)/g ⌋ 
+
+> 2:
+
+for j = 1 to m do  
+
+> 3:
+
+Gj ={(j−1) g+1 , (j−1) g+2 , . . . , jg } 
+
+> 4:
+
+α(j) 
+
+> i
+
+← softmax i(¯ q⊤ki/√dh) for i ∈ Gj 
+
+> 5:
+
+crep  
+
+> j
+
+← P 
+
+> i∈Gj
+
+α(j) 
+
+> i
+
+cKV i 
+
+> 6:
+
+Ij ← arg max i∈Gj α(j) 
+
+> i
+> 7:
+
+krep  
+
+> j
+
+← [crep  
+
+> j
+
+W U K , kRIj ], vrep  
+
+> j
+
+← crep  
+
+> j
+
+W U V  
+
+> 8:
+
+end for  
+
+> 9:
+
+Krep ←[krep  
+
+> 1
+
+; . . . ; krep  
+
+> m
+
+], Vrep ←[vrep  
+
+> 1
+
+; . . . ; vrep  
+
+> m
+
+] 
+
+> 10:
+
+k ← max ( w, w + (( L − w) mod g)))  
+
+> 11:
+
+Kloc =[ kL−k; . . . ; kL], Vloc =[ vL−k; . . . ; vL] 
+
+> 12:
+
+Kfused ←[Krep ; Kloc ], Vfused ←[Vrep ; Vloc ] 
+
+> 13:
+
+Attn ← softmax  Q(Kfused )⊤/√dh
+
+Vfused 
+
+Ensure: Attention output Attn t
+
+where each kj = [cKV j W U K , kRj ] and vj =
+
+cKV j W U V . This ensures that the most recent and relevant tokens are always attended to with full fidelity, seamlessly integrating condensed long-range context with detailed local information. 
+
+Prefilling with Fused Context . During prefilling, the condensed key and value matrices Krep and 
+
+Vrep are combined with the full-fidelity local keys and values Kl and Vl to form the fused context: 
+
+Kfused = Krep ; Kloc , Vfused = Vrep ; Vloc .
+
+We then compute attention over this fused set: 
+
+Attn = softmax 
+
+ Q(Kfused )⊤
+
+√dh
+
+
+
+Vfused . (10) Notably, when the total sequence length L is smaller than w + g, the long-range condensation provides negligible efficiency benefits. In such cases, we revert to standard MLA computation, en-suring that the model always operates in the most efficient regime without sacrificing accuracy. 
+
+Decoding and Online Cache Update. During autoregressive decoding, we only cache only the 
+
+m representative latent vectors {crep  
+
+> j
+
+}mj=1 and their positional anchors {kRrep  
+
+> j
+
+}mj=1 , together with the 
+
+w most recent latent vectors in full fidelity. Once the number of newly generated tokens reaches the group size g, we use the average query of the last g
+
+5tokens to compute importance scores (as in Eq. (6) )for the earliest g tokens in the buffer. These g to-kens are then condensed into a single representative via Eqs. (7) and (8) . This new representative is ap-pended to the cache. This on - the - fly way ensures that the cache size remains O(m+w) during decod-ing, and each decoding step attends to only m + w
+
+keys and values, thereby reducing both memory footprint and per-token decoding latency. 
+
+4.4 Further Analysis of LCA Theoretical Analysis . We provide a formal guar-antee on the approximation quality of LCA. The following theorem bounds the error between the output of LCA and MLA attention. 
+
+Theorem 1 (Uniform Error Bound ). Fix a query 
+
+qt with ∥qt∥2 ≤ Q and assume ∥vi∥2 ≤ V for all values. For each distant-history group Gj , let 
+
+krep  
+
+> j
+
+, vrep  
+
+> j
+
+be the representative key and value that LCA uses for every token i ∈ Gj , and let δk, δ v
+
+be uniform bounds on the per-token key and value deviations: ∥ki − krep  
+
+> j
+
+∥2 ≤ δk, ∥vi − vrep  
+
+> j
+
+∥2 ≤ δv.
+
+Then the ℓ2 error between the full MLA attention and LCA satisfies 
+
+Attn t−Attn LCA   
+
+> t2
+
+≤ V  e2Qδ k /√dh −1 + δv.
+
+Theorem 1 shows that the approximation error depends only on the per - token deviations δk, δ v,the query/value norms Q, V , and the model di-mension dh, but not on the context length L. The deviations δk, δ v are controlled by our condensa-tion design: groups consist of contiguous, seman-tically similar tokens, and the representative vec-tors are constructed via weighted pooling to pre-serve salient information. Moreover, the local win-dow ensures the most recent tokens are never com-pressed ( δk = δv = 0 for those tokens). The full proof is provided in Appendix A.2. Experimen-tally, with practical group sizes, this approximation maintains performance comparable to full MLA while delivering significant efficiency gains. To empirically validate the tightness of the bound, we measure the per-token deviations δk
+
+and δv across various context lengths and tasks. As detailed in Appendix A.3, the average relative devi-ation remains consistently below 5% for keys and 4% for values, confirming the practical soundness of our grouping assumption. 
+
+Complexity Analysis . Our method achieves sub-stantial reductions in both computational and mem-ory complexity compared to standard MLA. By                  
+
+> Table 1: Comparison of efficient attention methods.
+> Methods Computation Memory No Extra Params Minference <O(L2)O(L)✓
+> FlexPrefill <O(L2)O(L)✓
+> KDA <O(L2)O(L)
+> Ours O(Lm )O(m)✓
+
+compressing the long-range context into m rep-resentative key–value pairs and retaining only w
+
+recent tokens, LCA reduces the attention compu-tation from O(L2) to O(L(m + w)) = O(Lm ),where m ≪ L and w is a small constant. Cor-respondingly, the KV cache memory footprint is reduced from O(L) to O(m + w) = O(m), en-abling efficient handling of long contexts with sub-stantially lower computational and memory costs. We provide a detailed derivation in Appendix B. 
+
+5 Experiments 
+
+5.1 Experimental Setup Evaluation Benchmarks . We evaluate our method on both long-context and short-context tasks to comprehensively assess its performance. For long-context evaluation, we adopt LongBench-E (Bai et al., 2023) and RULER (Hsieh et al., 2024), which comprehensively test retrieval, reasoning, and aggregation over sequences up to 128K tokens. To ensure no degradation on standard tasks, we further evaluate on three established short-context benchmarks: MMLU (Hendrycks et al., 2021), 
+
+GSM8K (Cobbe et al., 2021), and MBPP (Austin et al., 2021). We put more details in Appendix C.1. 
+
+Implementation Details . We replace the MLA layers of DeepSeek-V2-Lite (16B) (DeepSeek-AI et al., 2024) with our LCA, adopting it as the first publicly released MLA-based model in our study. This choice is motivated by its moderate model size, which enables comprehensive experimentation un-der limited GPU resources. We develop a highly optimized kernel of our LCA using Triton (Tillet et al., 2019) for high efficiency. We fine-tune the model for 1,000 steps on the SlimPajama dataset (32K length) (Fu et al., 2024). The group size g
+
+and the window size w are set to 16 and 1024, respectively. All experiments are conducted on 8×H200 GPUs. Further implementation specifics are detailed in Appendix C.2. 
+
+Compared Methods . We evaluate LCA against three representative efficient attention meth-ods: two dynamic sparse attention approaches (FlexPrefill (Lai et al., 2025) and MInfer-
+
+6Table 2: Comparisons on LongBench-E (Bai et al., 2023). We report the latency of DeepSeek V2-Lite within contexts of 64K on H200 GPUs. 
+
+Methods S. QA M. QA Sum. F. S. Syn. Code Avg. ↑ FTL (s) ↓
+
+DeepSeek V2-Lite (MLA) 23.92 11.15 17.52 63.19 3.09 58.17 29.51 3.20 
+
+• MInference (Jiang et al., 2024) 14.54 5.61 13.80 41.15 2.17 41.01 19.71 2.99 (1.1 ×)
+
+• FlexPrefill (Lai et al., 2025) 14.35 5.94 14.10 48.00 2.22 41.72 21.05 2.51 (1.3 ×)
+
+• KDA (Kimi et al., 2025b) 18.81 11.68 14.22 56.97 3.25 57.97 27.15 2.47 (1.3 ×)
+
+• LCA (Ours) 22.61 8.90 23.74 58.27 2.33 58.67 29.09 1.80 (1.8 ×)
+
+Table 3: Comparisons on RULER (Hsieh et al., 2024) across 4-128K context. We report the latency of DeepSeek V2-Lite within contexts of 128K on H200 GPUs. 
+
+Methods 4K 8K 16K 32K 64K 128K Avg. ↑ FTL (s) ↓
+
+DeepSeek V2-Lite ( MLA ) 79.51 78.82 62.28 58.33 47.57 23.96 58.91 10.78 
+
+• MInference (Jiang et al., 2024) 76.88 69.69 44.06 20.31 10.31 4.34 37.60 5.66 (1.9 ×)
+
+• FlexPrefill (Lai et al., 2025) 72.81 70.00 56.25 19.06 9.38 7.19 39.11 5.38 (2.0 ×)
+
+• KDA (Kimi et al., 2025b) 72.22 73.61 64.24 51.39 44.10 22.22 54.63 4.96 (2.2 ×)
+
+• LCA (Ours) 77.19 77.19 63.75 59.69 50.63 24.38 58.80 4.40 (2.5 ×)4K 8K 16K 32K 64K 128K               
+
+> Context Length
+> 0
+> 2
+> 4
+> 6
+> 8
+> 10
+> Latency (s)
+> (a) First-token Latency
+> 4K 8K 16K 32K 64K 128K
+> Context Length
+> 80
+> 100
+> 120
+> 140
+> Latency (ms)
+> (b) Interval-token Latency
+> 4K 8K 16K 32K 64K 128K
+> Context Length
+> 0
+> 2
+> 4
+> 6
+> 8
+> 10
+> Memory Footprint (GB)
+> (c) KV Cache Memory Footprint
+> MLA MInference FlexPrefill KDA LCA (Ours)
+
+Figure 2: Efficiency comparison of different context lengths. (a) presents the first-token generation latency. (b) shows the per-token (interval) latency during decoding. (c) illustrates the GPU memory footprint of KV cache. 
+
+ence (Jiang et al., 2024)) and a gated linear at-tention variant ( KDA (Kimi et al., 2025b)). Since FlexPrefill and MInference are designed for stan-dard self-attention, we adapt them to operate on re-constructed KV matrices from MLA’s latents. For KDA, which requires integration during training from scratch, we implement a controlled adapta-tion: we augment the pretrained model with ad-ditional modules required by KDA and fine-tune it under the same conditions as LCA. Details are provided in Appendix C.3. We summarize the dif-ferences from existing methods in Table 1. 
+
+5.2 Performance Comparisons Comparisons on Long Context Modeling . In Ta-ble 2, our LCA achieves an average score of 29.09 on LongBench-E, nearly matching the 29.51 of the original MLA while achieving a 1.8 × speedup at 64K context. Notably, LCA outperforms MLA on the code generation (58.67 vs. 58.17), demonstrat-ing its capability to preserve critical information. In contrast, existing sparse attention methods suffer significant performance degradation, with Minfer-ence and FlexPrefill dropping to 19.71 and 21.05, respectively, due to their sparsification strategy that may discard essential information. In Table 3, LCA maintains strong performance across all lengths on RULER, achieving the high-est scores at 32K, 64K, and 128K contexts. At 128K, LCA attains 24.38, surpassing MLA’s 23.96 while reducing latency by 2.5 ×. This demonstrates that our latent-space condensation effectively pre-serves long-range dependencies even at extreme lengths. Notably, while other methods show se-vere performance degradation at longer contexts (e.g. , Minference dropping to 4.34 at 128K), LCA maintains stable performance, highlighting the ad-vantage of direct latent-space condensation over reconstruction-based sparsification. 
+
+Comparisons on Short - Context Tasks . To ver-ify the gains do not compromise performance on standard tasks, we evaluate LCA on three widely-used short-context benchmarks. In Table 4, LCA achieves nearly identical performance to the origi-7Table 4: Comparisons on short-context tasks.                     
+
+> Methods MMLU GSM-8K MBPP DeepSeek V2-Lite ( MLA )57.12 41.47 54.09
+> •FlexPrefill (Lai et al., 2025) 53.85 33.74 52.14
+> •MInference (Jiang et al., 2024) 51.01 32.90 46.69
+> •KDA (Kimi et al., 2025b) 56.31 37.45 50.97
+> •LCA (Ours) 57.04 41.17 53.31
+
+Table 5: Ablation study on the pooling strategies for 
+
+crep and kRrep . “MaxSel” denotes max selection.                    
+
+> crep \kRrep MaxPool MeanPool WeightedPool MaxSel MaxPool 27.44 27.01 27.43 28.89 MeanPool 27.38 26.39 27.67 28.84 WeightedPool 27.93 27.04 27.83 29.09
+> MaxSel 26.94 27.65 27.79 28.93
+
+Table 6: Performance on the LongBench-E and effi-ciency at 128K context with MiniCPM3-4B.             
+
+> Methods Avg. ↑FTL (s) ↓KV cache (GB) ↓
+> MiniCPM3-4B ( MLA ) 43.28 8.05 4.36
+> •LCA (Ours) 42.05 3.61 (2.2 ×)0.30 (93% ↓)
+
+Table 7: Performance on the OlympiadBenchMath and efficiency at 128K context with Distill-Qwen-7B.             
+
+> Methods Acc. ↑FTL (s) ↓KV cache (GB) ↓
+> Distill-Qwen-7B ( GQA ) 50.85 9.87 7.00
+> •LCA (Ours) 50.13 3.04 (3.25 ×)0.49 (93% ↓)
+
+nal MLA across all three benchmarks. This demon-strates that the latent-space condensation intro-duced by LCA does not harm the model’s capa-bility on short-context tasks. 
+
+5.3 Comparisons on Computational Efficiency 
+
+In Figure 2, LCA achieves consistent and scal-able efficiency gains across various context lengths. It reduces prefilling latency from short to long contexts, achieving 2.5 × speedup over MLA at 128K, while Minference and FlexPrefill only ac-celerate prefilling beyond 64K. During decoding, LCA maintains low per-token latency (reducing by 1.8 × at 128K) and reduces KV cache by 90% 
+
+(from 10.13 GB to 0.71 GB), whereas Minference and FlexPrefill cannot reduce the KV cache. KDA suffers severe performance degradation (Tables 2 and 3) despite maintaining a small cache, LCA preserves competitive performance alongside its efficiency gains. In Figures 3, we compare the latency of our cus-tom Triton kernel with the PyTorch implementa-tion. Our kernel achieves consistently lower la-tency across all context lengths, with up to 24.4 ×
+
+speedup at 64K. While the PyTorch implemen-tation encounters OOM beyond 64K, our kernel scales efficiently to 1M tokens with feasible la-tency and linear memory growth. This optimiza-tion ensures that the efficiency advantages of LCA are fully realized in practice. 
+
+5.4 Scalability and Generalization 
+
+We evaluate LCA’s broader applicability across different model scales and attention variants. 
+
+Generalization to Other Model Scales . We apply LCA to MiniCPM3-4B (Hu et al., 2024), an-other publicly available MLA-based model. As shown in Table 6, LCA achieves a 2.2× prefilling speedup and 93% KV cache reduction at 128K con-text, while retaining competitive performance on LongBench - E. These results demonstrate that LCA remains effective across different model scales. The consistent behavior across two models of differ-ent sizes suggests that the condensation mechanism primarily depends on latent sequence redundancy. 
+
+Extension to Other Attention Variants . LCA is fundamentally architecture-agnostic. We adapt its dual-path condensation strategy to standard grouped-query attention (GQA) by applying max selection to keys (preserving RoPE positional in-formation) and weighted pooling to values. We evaluate this adaptation on DeepSeek-R1-Distill-Qwen-7B (Guo et al., 2025), a representative think-ing model that employs GQA, on the Olympiad-BenchMath benchmark. As shown in Table 7, LCA delivers comparable accuracy while achieving a 3.25× inference speedup and 93% KV cache re-duction at 128K context. This confirms that LCA extends effectively to other attention variants. 
+
+5.5 Ablations 
+
+All ablations are evaluated on the LongBench-E benchmark, reporting both the average score and the first-token latency at 128K context length. 
+
+Effect on Pooling Strategies . We investigate the pooling strategies for generating the representative latent crep and positional anchor kRrep . In Table 5, the combination of attention-weighted pooling 
+
+for crep and max selection for kRrep achieves the highest score. This validates our design: weighted pooling preserves semantic information from all tokens in the group, while max selection avoids distorting the nonlinear positional encoding. 
+
+Effect on Group Size. We investigate the impact of the group size g on model performance and effi-ciency by varying g in {4, 8, 16 , 32 } while keeping the local window size fixed at w = 1024 . As shown in Figure 4, smaller group sizes yield higher aver-84K 8K 16K 32K 64K 128K 256K 512K 1M    
+
+> Sequence Length
+> 10 0
+> 10 2
+> 10 4
+> 10 6
+> Latency (ms)  OOM OOM OOM OOM PyTorch
+> Triton (Ours)
+
+Figure 3: Latency comparison between our Tri-ton kernel and the PyTorch implementation. 4 8 16 32 
+
+> Group Size
+> 10
+> 15
+> 20
+> 25
+> 30
+> 35
+> Average Score
+> 0
+> 2
+> 4
+> 6
+> 8
+> 10
+> Latency (s)
+
+Figure 4: Ablations on g.512 1024 2048 4096  
+
+> Window Size
+> 10
+> 15
+> 20
+> 25
+> 30
+> 35
+> Average Score
+> 0
+> 1
+> 2
+> 3
+> 4
+> 5
+> 6
+> Latency (s)
+
+Figure 5: Ablations on w.Table 8: Ablation on the number of queries used to compute importance scores. Default setting is 16.                             
+
+> #Queries S. QA M. QA Sum. F. S. Syn. Code Avg. 32 23.01 8.82 23.87 58.33 2.41 59.09 29.26 16 (default) 22.61 8.90 23.74 58.27 2.33 58.67 29.09 822.34 8.37 23.17 56.22 2.09 58.41 28.43
+
+age scores on LongBench-E. This improvement stems from finer-grained condensation, which pre-serves more detailed semantic information within each group. However, this comes at the cost of increased computational latency. To balance ef-ficiency and performance, we choose g = 16 as the default setting for all subsequent experiments, which provides a favorable trade-off. 
+
+Effect on Window Size. We evaluate the influence of the local window size w by varying it across 
+
+{512 , 1024 , 2048 , 4096 }, with the group size fixed at g = 16 . Larger windows preserve more local context and improve accuracy, yet also increase latency, as shown in Figure 5. We select w = 1024 
+
+as the default, offering a good compromise be-tween preserving fine-grained local dependencies and maintaining inference efficiency. 
+
+Effect on the Number of Summary Queries. 
+
+We ablate the number of queries used to compute the summary query ¯q (Eq. (6)) while fixing g = 16 
+
+(Table 8). Using 32 queries slightly improves the average score from 29.09 to 29.26, whereas using 8 queries degrades it to 28.43. The default choice of g = 16 thus offers a robust trade-off, as the last 
+
+g tokens already capture the immediate decoding focus with little gain from a larger window. 
+
+6 Conclusion 
+
+In this paper, we propose LCA, an efficient atten-tion mechanism that performs structured context condensation directly within MLA’s latent space. LCA explicitly handles the disentangled semantic and positional components in MLA: aggregating semantic latents via query-aware pooling while pre-serving precise positional information through an-chor selection. This approach jointly reduces KV cache size and attention complexity without intro-ducing additional parameters. Theoretically, we prove that the approximation error of our method is uniformly bounded, independent of context length. Extensive experiments validate the effectiveness of LCA, demonstrating significant efficiency gains (up to 2.5 × prefilling speedup and 90% KV cache reduction at 128K context) while maintaining com-petitive model performance. 
+
+Limitations 
+
+While LCA provides a general design, its imple-mentation requires a custom kernel to achieve promising efficiency, which may involve additional engineering effort for deployment in new frame-works. The current implementation of LCA is opti-mized for common bfloat16/float16 precision set-tings, and its kernel-level optimizations have not been extensively explored for lower-precision for-mats ( e.g. , int8 quantization). These are typical engineering and evaluation scoping considerations that do not affect the core algorithmic contribu-tion, and they point to straightforward extensions in future work. Beyond engineering considerations, LCA ex-hibits a modest accuracy degradation in tasks demanding precise token-level retrieval under aggressive condensation. As analyzed in Ap-pendix D.1, multi-document question answering scenarios where attention concentrates sharply on few tokens can attenuate critical signals. This trade-off is inherent to condensation-based methods and highlights the importance of matching the compres-sion strength to the deployment context. 9Information About Use Of AI Assistants 
+
+During the preparation of this work, we used large language models (LLMs) only for text polishing and grammar correction. All central research ideas, methodological designs, experimental implemen-tations, and result interpretations are the original contributions of the authors. The AI assistants were not involved in any core intellectual content. 
+
+Acknowledgments 
+
+This work was supported in part by the Joint Funds of the National Natural Science Foun-dation of China under Grant No.U24A20327, the Guangdong S&T Program under Grant No.2026B0101110001, the GuangDong Basic and Applied Basic Research Foundation under Grant No.2026A1515010388, the Postdoctoral Fellow-ship Program of CPSF under Grant GZC20251043, and the project of 62536003, PCL2025A14. 
+
+References 
+
+Joshua Ainslie, James Lee-Thorp, Michiel de Jong, Yury Zemlyanskiy, Federico Lebron, and Sumit Sanghai. 2023. GQA: Training generalized multi-query trans-former models from multi-head checkpoints. In Pro-ceedings of the 2023 Conference on Empirical Meth-ods in Natural Language Processing , pages 4895– 4901, Singapore. Association for Computational Lin-guistics. Jacob Austin, Augustus Odena, Maxwell Nye, Maarten Bosma, Henryk Michalewski, David Dohan, Ellen Jiang, Carrie Cai, Michael Terry, Quoc Le, and 1 others. 2021. Program synthesis with large language models. arXiv preprint arXiv:2108.07732 .Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. 2023. Longbench: A bilingual, mul-titask benchmark for long context understanding. 
+
+arXiv preprint arXiv:2308.14508 .Iz Beltagy, Matthew E Peters, and Arman Cohan. 2020. Longformer: The long-document transformer. arXiv preprint arXiv:2004.05150 .Daniel Bolya, Cheng-Yang Fu, Xiaoliang Dai, Peizhao Zhang, Christoph Feichtenhofer, and Judy Hoffman. 2023. Token merging: Your vit but faster. In Interna-tional Conference on Learning Representations .Yaofo Chen, Zeng You, Shuhai Zhang, Haokun Li, Yirui Li, Yaowei Wang, and Mingkui Tan. 2025. Core context aware transformers for long context language modeling. In International Conference on Machine Learning .Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. 2021. Training verifiers to solve math word prob-lems. arXiv preprint arXiv:2110.14168 .Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. 2022. Flashattention: Fast and memory-efficient exact attention with io-awareness. In Advances in Neural Information Processing Sys-tems .DeepSeek-AI. 2025. Deepseek-v3.2: Pushing the frontier of open large language models. Preprint ,arXiv:2512.02556. DeepSeek-AI, Aixin Liu, Bei Feng, and et.al. 2024. Deepseek-v2: A strong, economical, and effi-cient mixture-of-experts language model. Preprint ,arXiv:2405.04434. Jiayu Ding, Shuming Ma, Li Dong, Xingxing Zhang, Shaohan Huang, Wenhui Wang, Nanning Zheng, and Furu Wei. 2023. Longnet: Scaling trans-formers to 1,000,000,000 tokens. arXiv preprint arXiv:2307.02486 .Zhanzhou Feng and Shiliang Zhang. 2023. Efficient vision transformer via token merger. IEEE Transac-tions on Image Processing , 32:4156–4169. Yao Fu, Rameswar Panda, Xinyao Niu, Xiang Yue, Han-naneh Hajishirzi, Yoon Kim, and Hao Peng. 2024. Data engineering for scaling language models to 128k context. arXiv preprint arXiv:2402.10171 .Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, and 1 others. 2024. The llama 3 herd of models. arXiv preprint arXiv:2407.21783 .Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Ruoyu Zhang, Runxin Xu, Qihao Zhu, Shirong Ma, Peiyi Wang, Xiao Bi, and 1 others. 2025. Deepseek-r1: Incentivizing reasoning capability in llms via reinforcement learning. arXiv preprint .Jitai Hao, Yuke Zhu, Tian Wang, Jun Yu, Xin Xin, Bo Zheng, Zhaochun Ren, and Sheng Guo. 2025. Omnikv: Dynamic context selection for efficient long-context llms. In International Conference on Learning Representations .Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. 2021. Measuring massive multitask language under-standing. In International Conference on Learning Representations .Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shan-tanu Acharya, Dima Rekesh, Fei Jia, Yang Zhang, and Boris Ginsburg. 2024. Ruler: What’s the real context size of your long-context language models? 
+
+arXiv preprint arXiv:2404.06654 .
+
+10 Shengding Hu, Yuge Tu, Xu Han, Chaoqun He, Ganqu Cui, Xiang Long, Zhi Zheng, Yewei Fang, Yuxiang Huang, Weilin Zhao, and 1 others. 2024. Minicpm: Unveiling the potential of small language models with scalable training strategies. arXiv preprint arXiv:2404.06395 .Huiqiang Jiang, YUCHENG LI, Chengruidong Zhang, Qianhui Wu, Xufang Luo, Surin Ahn, Zhenhua Han, Amir H. Abdi, Dongsheng Li, Chin-Yew Lin, Yuqing Yang, and Lili Qiu. 2024. MInference 1.0: Acceler-ating pre-filling for long-context LLMs via dynamic sparse attention. In Advances in Neural Information Processing Systems .Kimi, Yifan Bai, Yiping Bao, and et.al. 2025a. Kimi k2: Open agentic intelligence. arXiv .Kimi, Yu Zhang, Zongyu Lin, and et.al. 2025b. Kimi linear: An expressive, efficient attention architecture. 
+
+Preprint , arXiv:2510.26692. Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gon-zalez, Hao Zhang, and Ion Stoica. 2023. Efficient memory management for large language model serv-ing with pagedattention. In Proceedings of the 29th Symposium on Operating Systems Principles , pages 611–626. Xunhao Lai, Jianqiao Lu, Yao Luo, Yiyuan Ma, and Xun Zhou. 2025. Flexprefill: A context-aware sparse attention mechanism for efficient long-sequence in-ference. In International Conference on Learning Representations .Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024. Snapkv: Llm knows what you are looking for before gener-ation. Advances in Neural Information Processing Systems , 37:22947–22970. Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao Wu, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenyu Zhang, Chong Ruan, and 1 others. 2024. Deepseek-v3 technical report. arXiv preprint arXiv:2412.19437 .Xiang Liu, Zhenheng Tang, Peijie Dong, Zeyu Li, Yue Liu, Bo Li, Xuming Hu, and Xiaowen Chu. 2025. Chunkkv: Semantic-preserving kv cache compres-sion for efficient long-context llm inference. In Ad-vances in Neural Information Processing Systems .Potsawee Manakul and Mark J. F. Gales. 2021. Long-span summarization via local attention and content selection. In Association for Computational Linguis-tics , pages 6026–6041. OpenAI. 2023. GPT-4 technical report. arXiv preprint .Noam Shazeer. 2019. Fast transformer decoding: One write-head is all you need. CoRR , abs/1911.02150. Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen Bo, and Yunfeng Liu. 2024. Roformer: En-hanced transformer with rotary position embedding. 
+
+Neurocomputing , 568:127063. Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao, Baris Kasikci, and Song Han. 2024. QUEST: Query-aware sparsity for efficient long-context LLM infer-ence. In International Conference on Machine Learn-ing .Philippe Tillet, Hsiang-Tsung Kung, and David D. Cox. 2019. Triton: an intermediate language and com-piler for tiled neural network computations. In Pro-ceedings of the International Workshop on Machine Learning and Programming Languages , pages 10– 19. Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. 2017. Attention is all you need. In Advances in Neural Information Pro-cessing Systems , pages 5998–6008. Guangxuan Xiao, Jiaming Tang, Jingwei Zuo, Shang Yang, Haotian Tang, Yao Fu, Song Han, and 1 oth-ers. 2025. Duoattention: Efficient long-context llm inference with retrieval and streaming heads. In In-ternational Conference on Learning Representations .Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient streaming lan-guage models with attention sinks. In International Conference on Learning Representations .Ruyi Xu, Guangxuan Xiao, Haofeng Huang, Junxian Guo, and Song Han. 2025. Xattention: Block sparse attention with antidiagonal scoring. In International Conference on Machine Learning .Baosong Yang, Longyue Wang, Derek F Wong, Shum-ing Shi, and Zhaopeng Tu. 2021. Context-aware self-attention networks for natural language processing. 
+
+Neurocomputing , 458:157–169. Manzil Zaheer, Guru Guruganesh, Kumar Avinava Dubey, Joshua Ainslie, Chris Alberti, Santiago On-tanon, Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang, and 1 others. 2020. Big bird: Transformers for longer sequences. Advances in Neural Informa-tion Processing Systems , 33:17283–17297. Shuhai Zhang, Zeng You, Yaofo Chen, Zhiquan Wen, Qianyue Wang, Zhijie Qiu, Yuanqing Li, and Mingkui Tan. 2025. Curse of high dimensionality issue in transformer for long context modeling. In 
+
+International Conference on Machine Learning .
+
+11 In the supplementary, we provide a detailed proof, more details on the LCA method. We orga-nize our supplementary as follows. In Section A, we provide the detailed proof for Proposition 1 and Theorem 1. In Section B, we analysis the computation and memory complexity of LCA in detail. In Section C, we provide more experimental de-tails of LCA. 
+
+A Theoretical Analysis 
+
+A.1 Proof of Proposition 1 
+
+We provide a complete and self-contained proof of Proposition 1, which establishes the optimal-ity of attention-weighted pooling for latent-space condensation. 
+
+Proposition 1 (Optimal Condensation via Weighted Pooling ) Let {ci ∈ Rdc }gi=1 be a set of latent vectors and α ∈ Rg a probability dis-tribution over them, with αi ≥ 0 and P 
+
+> i
+
+αi = 1 .Consider the expected squared reconstruction error 
+
+L(crep ) = Ei∼α
+
+∥ci−crep ∥22
+
+ =
+
+> g
+
+X
+
+> i=1
+
+αi∥ci−crep ∥22.
+
+The vector crep that minimizes L is uniquely given by the convex combination crep = Pgi=1 αici.
+
+Proof. First, expand the squared Euclidean norm: 
+
+∥ci − crep ∥22 = ( ci − crep )⊤(ci − crep )= c⊤ 
+
+> i
+
+ci − 2c⊤ 
+
+> i
+
+crep + crep ⊤crep .
+
+Substituting into the loss function yields 
+
+L(crep )= 
+
+> g
+
+X
+
+> i=1
+
+αic⊤ 
+
+> i
+
+ci−2 gX
+
+> i=1
+
+αici
+
+> ⊤
+
+crep 
+
++ gX
+
+> i=1
+
+αi
+
+> 
+
+crep ⊤crep .
+
+Since P 
+
+> i
+
+αi = 1, the last term simplifies to 
+
+crep ⊤crep . Define the weighted mean ¯c =Pgi=1 αici. Then, we have 
+
+L(crep ) = 
+
+> g
+
+X
+
+> i=1
+
+αic⊤ 
+
+> i
+
+ci − 2¯ c⊤crep + crep ⊤crep .
+
+To find the minimizer, we compute the gradient with respect to crep :
+
+∇crep L = −2¯ c + 2 crep .
+
+Setting the gradient to zero gives the necessary condition: 
+
+crep = ¯ c =
+
+> g
+
+X
+
+> i=1
+
+αici.
+
+To confirm that this stationary point is indeed a minimum, we examine the Hessian matrix: 
+
+∇2 
+
+> crep
+
+L = 2 Idc ,
+
+where Idc is the dc × dc identity matrix. This Hes-sian is positive definite for all crep , implying that the function L is strictly convex. Thus, the point 
+
+crep = P 
+
+> i
+
+αici is the unique global minimizer. 
+
+Remark 1. In LCA, for a group Gj of size g,we treat the normalized attention scores α(j)
+
+> i
+
+(Eq. (6) ) as the probability distribution α. The vectors cKV i are the latent representations of the tokens in the group. Applying Proposition 1 demonstrates that the weighted pooling operation 
+
+crep  
+
+> j
+
+= P 
+
+> i∈Gj
+
+α(j) 
+
+> i
+
+cKV i is the optimal choice for minimizing the expected reconstruction error of the group’s latent contributions. This theoretical guarantee ensures that our condensation procedure maximally preserves the semantic information of the group, as measured by mean squared error. 
+
+Comparison with Alternative Pooling Strategies. 
+
+Other common pooling strategies include mean pooling (crep = 1
+
+> g
+
+P 
+
+> i
+
+ci) and max pooling (select-ing the vector with the highest norm or a heuris-tic score). Mean pooling is a special case of our weighted pooling where αi = 1 /g for all i, which implicitly assumes all tokens are equally impor-tant—an assumption that rarely holds in natural language. Max pooling, while preserving the most salient single vector, discards information from other tokens entirely and can be unstable. Our attention-weighted pooling generalizes mean pool-ing by incorporating token - specific importance, and it avoids the information - discarding drawback of max pooling. Proposition 1 shows that when the importance scores αi accurately reflect rele-vance, weighted pooling is objectively optimal in the least-squares sense. 
+
+A.2 Proof of Theorem 1 
+
+We theoretically analyze the uniform error bound for LCA in Theorem 1. The argument closely fol-lows the structure of the original theorem but em-ploys the notation introduced in Section A that 12 reflects the actual grouping and condensation per-formed by LCA. 
+
+Notations. For a query at position t, parti-tion the preceding tokens into the recent window 
+
+R = {t − w + 1 , . . . , t } and the distant history 
+
+H = {1, . . . , t − w}. The distant history is further divided into m contiguous groups G1, . . . , G m,each of size g (except possibly the last). For a group Gj , LCA computes a representative key krep 
+
+> j
+
+and a representative value vrep  
+
+> j
+
+via the condensa-tion procedure described in Section 4.3. For a token 
+
+i ∈ H, we denote by G(i) the index of the group containing i.The original MLA attention at position t is 
+
+Attn t =
+
+> t
+
+X
+
+> i=1
+
+pivi, pi = eai
+
+Z ,
+
+where ai = q⊤ 
+
+> tki
+> √dh
+
+, Z = Ptj=1 eaj .
+
+In LCA, the same query is compared with the representative keys for distant tokens and with the original keys for recent tokens. Hence the attention weights are defined by 
+
+Attn LCA  
+
+> t
+
+= X
+
+> i∈R
+
+p′
+
+> i
+
+vi +
+
+> m
+
+X
+
+> j=1
+
+βj vrep  
+
+> j
+
+,
+
+where the logits for recent tokens are unchanged, 
+
+i.e. , bi = ai (i ∈ R), and for a distant group Gj we use the single representative logit brep  
+
+> j
+
+= q⊤ 
+
+> tkrep
+> j
+> √dh
+
+.The corresponding weights are 
+
+p′ 
+
+> i
+
+= ebi
+
+Z′ (i ∈ R), βj = ebrep 
+
+> j
+
+Z′
+
+Z′ = X
+
+> i∈R
+
+ebi +
+
+> m
+
+X
+
+> j=1
+
+ebrep  
+
+> j
+
+.
+
+To compare the two outputs directly, it is conve-nient to introduce for every distant token i ∈ H via the group-assigned key and value: 
+
+˜ki = krep 
+
+> G(i)
+
+, ˜vi = vrep 
+
+> G(i)
+
+.
+
+For recent tokens i ∈ R we simply set ˜ki = ki,
+
+˜vi = vi. With this convention we can write the LCA output compactly as 
+
+Attn LCA  
+
+> t
+
+=
+
+> t
+
+X
+
+> i=1
+
+p′ 
+
+> i
+
+˜vi,
+
+where p′ 
+
+> i
+
+for i ∈ H is defined as p′ 
+
+> i
+
+= βG(i)/|G(i)|
+
+(so that P 
+
+> i∈Gj
+
+p′ 
+
+> i
+
+= βj ). The deviation hypotheses of the theorem are then 
+
+∥ki − ˜ki∥2 ≤ δk, ∥vi − ˜vi∥2 ≤ δv, (i = 1 , . . . , t ).
+
+Theorem 1 (Uniform Error Bound ) Fix a query 
+
+qt with ∥qt∥2 ≤ Q and assume ∥vi∥2 ≤ V for all values. For each distant-history group Gj , let 
+
+krep  
+
+> j
+
+, vrep  
+
+> j
+
+be the representative key and value that LCA uses for every token i ∈ Gj , and let δk, δ v
+
+be uniform bounds on the per-token key and value deviations: ∥ki − krep  
+
+> j
+
+∥2 ≤ δk, ∥vi − vrep  
+
+> j
+
+∥2 ≤ δv.
+
+Then the ℓ2 error between the full MLA attention and LCA satisfies 
+
+Attn t−Attn LCA   
+
+> t2
+
+≤ V  e2Qδ k /√dh −1 + δv.
+
+Proof. Define the total error E := Attn t −
+
+Attn LCA  
+
+> t
+
+. A straightforward algebraic manipu-lation gives the decomposition: 
+
+E =
+
+> t
+
+X
+
+> i=1
+
+(pi − p′
+
+> i
+
+)vi
+
+| {z }
+
+> (I)
+
++
+
+> t
+
+X
+
+> i=1
+
+p′
+
+> i
+
+(vi − ˜vi)
+
+| {z }
+
+> (II)
+
+.
+
+We next bound the norms of (I) and (II) separately. 1) We start by bounding the first term. First, we bound the logit perturbations. Using the Cauchy–Schwarz inequality and the given bounds on the query norm and key approximations, 
+
+|ai − bi| = |q⊤ 
+
+> t
+
+(ki − ˜ki)|√dh
+
+≤ ∥qt∥2∥ki − ˜ki∥2
+
+√dh
+
+≤ Qδ k
+
+√dh
+
+=: ε, 
+
+where bi denotes the logit used by LCA for token i
+
+(i.e., bi = ai for i ∈ R and bi = brep  
+
+> G(i)
+
+for i ∈ H). Hence each logit changes by at most ε.Thus, we have e−εebi ≤ eai ≤ eεebi for every i.Summing these inequalities over all i yields 
+
+e−εtX
+
+> j=1
+
+ebj ≤
+
+> t
+
+X
+
+> j=1
+
+eaj ≤ eεtX
+
+> j=1
+
+ebj .
+
+Denote Z = P 
+
+> j
+
+eaj and Z′ = P 
+
+> j
+
+ebj . The previ-ous chain implies e−εZ′ ≤ Z ≤ eεZ′. Combining this with the pointwise bound e−εebi ≤ eai gives 
+
+pi = eai
+
+Z ≥ e−εebi
+
+eεZ′ = e−2εp′
+
+> i
+
+.
+
+Similarly, pi ≤ e2εp′
+
+> i
+
+. Therefore, 
+
+e−2εp′ 
+
+> i
+
+≤ pi ≤ e2εp′ 
+
+> i
+
+for all i. (11) From Eqn. (11), we obtain |pi − p′
+
+> i
+
+| ≤ (e2ε − 1) p′
+
+> i
+
+.Summing this inequality over i provides a bound on the ℓ1 distance between the two weight vectors: 
+
+> t
+
+X
+
+> i=1
+
+|pi − p′
+
+> i
+
+| ≤ (e2ε − 1) 
+
+> t
+
+X
+
+> i=1
+
+p′ 
+
+> i
+
+= e2ε − 1. (12) 13 Table 9: Statistics across different context lengths.                        
+
+> Context Length 4K 32K 128K
+> ∥ki∥220.00 22.13 21.39
+> δk0.43 0.64 0.77
+> δk/∥ki∥22.15% 2.89% 3.60%
+> ∥vi∥220.87 21.38 21.23
+> δv0.68 0.73 0.77
+> δv/∥vi∥23.26% 3.41% 3.63%
+
+Using the uniform bound ∥vi∥2 ≤ V together with Eqn. (12), 
+
+> t
+
+X
+
+> i=1
+
+(pi − p′
+
+> i
+
+)vi 2 ≤
+
+> t
+
+X
+
+> i=1
+
+|pi − p′
+
+> i
+
+| · ∥ vi∥2
+
+≤V
+
+> t
+
+X
+
+> i=1
+
+|pi − p′
+
+> i
+
+| ≤ V  e2ε − 1. (13) 2) We bound the second error component. Given 
+
+∥vi − ˜vi∥2 ≤ δv and the fact that p′ 
+
+> i
+
+form a proba-bility distribution, we have 
+
+> t
+
+X
+
+> i=1
+
+p′
+
+> i
+
+(vi − ˜vi) 2 ≤
+
+> t
+
+X
+
+> i=1
+
+p′
+
+> i
+
+∥vi − ˜vi∥2
+
+≤δvtX
+
+> i=1
+
+p′ 
+
+> i
+
+= δv. (14) 3) Combing Eqn. (13) and (14) gives 
+
+∥E∥2 ≤ V  e2ε − 1 + δv,
+
+where ε = Qδ k/√dh.
+
+A.3 Empirical Validation of Key and Value Deviations 
+
+we empirically measure the per-token key and value deviations δk and δv across different con-text lengths and tasks. For each setting, we ran-domly sample 128 sequences and compute the ra-tio of the L2 norm of the deviation between orig-inal keys/values and their condensed group repre-sentatives to the L2 norm of the original vectors. The results in Tables 9 and 10 show that across all lengths and tasks, the average relative deviation remains below 5% for keys and 4% for values, con-firming that contiguous tokens within a group are indeed semantically similar and that our condensa-tion introduces only small per-token errors. This empirical evidence validates the key assumption in Theorem 1 and demonstrates that the theoretical bound is reasonably tight in practice. 
+
+Table 10: Statistics across different task types.                        
+
+> Metric Multi-Doc. QA Summarization Code
+> ∥ki∥222.76 21.42 20.07
+> δk0.67 0.98 0.89
+> δk/∥ki∥22.94% 4.58% 4.43%
+> ∥vi∥219.09 24.78 29.78
+> δv0.56 0.51 0.98
+> δv/∥vi∥22.93% 2.06% 3.29%
+
+B Complexity Analysis 
+
+We analyze the computational and memory com-plexity of LCA against standard MLA. Recall that 
+
+L is the sequence length, w is the short - range win-dow size, and m is the number of long - range repre-sentatives. 
+
+Computational complexity. The overall com-putation consists of three main steps. First, impor-tance scores are computed between a group - aware query ¯q and all L keys, requiring O(L) opera-tions. Second, for each of the m groups, we com-pute normalized attention weights (softmax over 
+
+g scores) and perform weighted pooling of g la-tent vectors, which together cost O(L). Finally, attention is computed over the condensed context of size m + w for each of the L queries, resulting in O L(m + w) operations. Since w is a constant, the dominant term becomes O(Lm ), lower than the O(L2) complexity of standard MLA. 
+
+Memory complexity of the KV cache. In LCA, we cache only the m representative latent vectors 
+
+{crep  
+
+> j
+
+}mj=1 and their positional anchors {kRrep  
+
+> j
+
+}mj=1 ,along with the w recent tokens stored in full. Hence the total cache size scales as O(m + w) = O(m).The reduction in both computation and mem-ory enables LCA to handle long contexts with sig-nificantly lower hardware requirements while pre-serving essential information through structured latent-space condensation. 
+
+C More Experimental Details 
+
+C.1 More Details about Evaluation Benchmarks 
+
+We evaluate our method on both long-context and short-context tasks to comprehensively assess its performance and efficiency. For long-context un-derstanding, we use two established benchmarks: 
+
+LongBench-E (Bai et al., 2023), a bilingual suite with uniformly distributed context lengths that mea-sures overall context understanding across 21 di-verse tasks; and RULER (Hsieh et al., 2024), a syn-thetic benchmark with 13 subtasks (e.g., retrieval, 14 multi-hop reasoning) designed for fine-grained as-sessment of long-context capabilities. Furthermore, to verify that our efficiency gains do not compromise performance on standard tasks, we evaluate on three short-context benchmarks: 
+
+MMLU (Hendrycks et al., 2021), which assesses knowledge breadth and reasoning across 57 aca-demic subjects; GSM8K (Cobbe et al., 2021), a dataset of grade-school math problems requiring multi-step reasoning; and MBPP (Austin et al., 2021), which evaluates code generation ability through crowd-sourced programming tasks. 
+
+C.2 More Implementation Details 
+
+We implement and evaluate our proposed LCA on the DeepSeek-V2-Lite model (16B parame-ters) (DeepSeek-AI et al., 2024). We choose this model for two primary reasons: 1) it is the first pub-licly released model that adopts MLA, providing an ideal foundation for our method which specif-ically targets MLA’s efficiency bottlenecks; 2) its moderate size makes it feasible to conduct exten-sive experiments and latency measurements within constrained GPU resources. We replace the orig-inal MLA layers in DeepSeek-V2-Lite with our LCA. To ensure high efficiency, we develop a opti-mized kernel using Triton (Tillet et al., 2019). This custom implementation minimizes memory move-ment and maximizes hardware utilization during both training and inference. To allow the model to adapt to our dynamic condensation mechanism, we perform continued fine-tuning for only 1,000 steps with 2.0B tokens on the per-source-length upsam-pled SlimPajama dataset (Fu et al., 2024). Each training sample has a sequence length of 64K to-kens. We use a total batch size of 64, implemented with a micro-batch size of 1 and gradient accumu-lation steps of 8. Training is conducted using the Deepspeed Zero-3 strategy for efficient memory management. The learning rate is set to 5 × 10 −6.We set the group size g = 16 and the window size 
+
+w = 1024 , respectively. These settings are kept fixed when inference across all experiments. All ex-periments and latency measurements are performed on a server equipped with 8 ×H200 GPUs. 
+
+C.3 More Details of Compared Methods 
+
+To evaluate the effectiveness and efficiency of LCA, we compare it against several SoTA efficient attention methods. We benchmark against two recent published methods that perform dynamic sparsification: FlexPrefill (Lai et al., 2025) and 
+
+MInference (Jiang et al., 2024). Note that these methods were originally designed for and evaluated on vanilla self-attention. They cannot be directly applied to MLA’s low-rank latent space. For a fair comparison, we adapt these methods to work on the reconstructed key and value matrices derived from MLA’s latents. This ensures functional equiv-alence but forfeits the opportunity to exploit the compressed latent structure for further gains. Flex-Prefill dynamically selects between a Query-Aware pattern and a Vertical-Slash pattern per attention head, adaptively determining which key-value in-dices are necessary for computation. We use the official implementation and adhere to the recom-mended hyperparameters: a score ratio γ = 0 .9, a threshold τ = 0 .1, a minimum retained budget of 1,024 tokens, and a block size of 128. MInference 
+
+determines optimal static sparse patterns per atten-tion head offline, combined with online dynamic adjustment of computation regions. Following the original paper, we perform offline calibration on the DeepSeek-V2-Lite model to obtain a sparse configuration and use it for online inference. We also compare against the recently proposed 
+
+Kimi Delta Attention (KDA) (Kimi et al., 2025b), a gated linear attention variant that introduces a fine-grained diagonalized gate for controlling mem-ory decay and positional awareness. A critical dis-tinction lies in the training requirements: the origi-nal KDA is designed to be integrated into the model during pre - training from scratch, requiring substan-tial computational resources and large - scale data to achieve promsing performance. In contrast, our LCA requires only minimal continued fine - tuning to recover full performance on a pre -trained base. To establish a controlled comparison under con-strained resources, we apply the same adaptation protocol to KDA as we do for our method. Specifi-cally, we take the base DeepSeek -V2 - Lite model, augment it with the additional parameters required by KDA, apply KDA to the reconstructed KV matrices, and fine - tune it for 1000 steps on the same per - source - length upsampled SlimPajama dataset (Fu et al., 2024) used for LCA. 
+
+D More Discussions 
+
+D.1 Failure Case Analysis 
+
+To understand when LCA’s condensation may un-derperform, we analysis per-task performance on LongBench in Table 2. On summarization tasks, 15 Table 11: Effect of group size g with fixed window size w = 1024 .                            
+
+> gLongBench Avg. RULER Avg. (4K–128K) RULER@128K 32 28.32 58.18 23.96 16 29.09 58.80 24.38 829.38 59.42 24.63
+> Table 12: Effect of window size wwith fixed group size g= 16 .
+> wLongBench Avg. RULER Avg. (4K–128K) RULER@128K 512 28.84 57.14 23.68 1024 29.09 58.80 24.38 2048 29.14 59.52 25.53
+
+LCA achieves 23.74, substantially outperform-ing the MLA baseline (17.52), confirming that weighted pooling effectively aggregates diffuse se-mantic content for gist-based comprehension. In contrast, on multi-document QA, which demands precise retrieval of specific facts across documents, LCA scores 8.90 compared to MLA’s 11.15, a mod-est gap that reflects the inherent challenge of pre-serving concentrated token-level signals under ag-gressive condensation. The gap narrows on single-document QA (22.61 vs. 23.92), where positional anchoring via max selection helps retain critical in-formation within a coherent document. Notably, on the more challenging RULER benchmark at 128K context, LCA achieves 24.38, marginally exceed-ing MLA’s 23.96, demonstrating that the combined effect of weighted pooling, max selection, and the local window preserves retrieval accuracy even un-der extreme long-context demands. Taken together, these results indicate that LCA excels when in-formation is diffusely distributed and incurs only minor degradation in retrieval-heavy scenarios. 
+
+D.2 Sensitivity Analysis of Group Size and Window Size 
+
+To better understand how the hyperparameters g
+
+(group size) and w (window size) influence perfor-mance across context lengths and task types, we conduct additional experiments on LongBench and RULER with varying configurations at inference. Tables 11 and 12 report the results. Smaller g consistently improves accuracy, par-ticularly on retrieval-heavy tasks (RULER@128K improves from 23 .96 to 24 .63 ). This gain comes at increased computational cost, as analyzed in Fig-ure 4. Larger w yields the most pronounced ben-efits on very long contexts (RULER@128K rises from 23 .68 to 25 .53 ), whereas improvements on shorter sequences are marginal. These results confirm that optimal hyperparame-ter choices depend on both context length and task characteristics. Notably, g and w serve as explicit, interpretable control knobs that allow practition-ers to adjust the performance, efficiency trade-off according to deployment constraints. The default configuration ( g = 16 , w = 1024 ) offers a prac-tical balance between strong efficiency gains and competitive accuracy. A fully adaptive mechanism conditioned on context statistics remains a promis-ing direction for future investigation. 
+
+D.3 Compatibility with Training from Scratch 
+
+To verify that LCA does not rely on pretrained MLA initialization, we conduct a controlled from-scratch experiment on LLaMA2-7B. Both vanilla self-attention and LCA are trained for 1,000 steps under identical optimization settings. LCA achieves consistently lower training loss through-out, reaching 6.34 after 1,000 steps compared to 6.98 for the vanilla baseline. This indicates that LCA is compatible with training from scratch, im-poses no optimization instability, and can even ac-celerate early-stage convergence without architec-tural modification beyond attention replacement. 16

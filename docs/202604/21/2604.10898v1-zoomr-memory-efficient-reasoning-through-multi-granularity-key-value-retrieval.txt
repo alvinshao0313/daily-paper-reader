@@ -1,0 +1,551 @@
+Title: ZoomR: Memory Efficient Reasoning through Multi-Granularity Key Value Retrieval
+
+URL Source: https://arxiv.org/pdf/2604.10898v1
+
+Published Time: Tue, 14 Apr 2026 01:57:16 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# ZoomR: Memory Efficient Reasoning through Multi-Granularity Key Value Retrieval 
+
+## David H. Yang 1, Yuxuan Zhu 1, Mohammad Mohammadi Amiri 1,Keerthiram Murugesan 2, Tejaswini Pedapati 2 , Subhajit Chaudhury 2, Pin-Yu Chen 2
+
+> 1
+
+## Rensselaer Polytechnic Institute 2IBM Research 
+
+## {yangd13, zhuy27, mamiri}@rpi.edu tejaswinip@us.ibm.com {keerthiram.murugesan, subhajit, pin-yu.chen}@ibm.com 
+
+## Abstract 
+
+Large language models (LLMs) have shown great performance on complex reasoning tasks but often require generating long intermediate thoughts before reaching a final answer. Dur-ing generation, LLMs rely on a key-value (KV) cache for autoregressive decoding. However, the memory footprint of the KV cache grows with output length. Prior work on KV cache optimization mostly focus on compressing the long input context, while retaining the full KV cache for decoding. For tasks requiring long output generation, this leads to increased com-putational and memory costs. In this paper, we introduce ZoomR, a novel approach that en-ables LLMs to adaptively compress verbose reasoning thoughts into summaries and uses a dynamic KV cache selection policy that lever-ages these summaries while also strategically “zooming in” on fine-grained details. By using summary keys as a coarse-grained index during decoding, ZoomR uses the query to retrieve de-tails for only the most important thoughts. This hierarchical strategy significantly reduces mem-ory usage by avoiding full-cache attention at each step. Experiments across math and reason-ing tasks show that our approach achieves com-petitive performance compared to baselines, while reducing inference memory requirements by more than 4×. These results demonstrate that a multi-granularity KV selection enables more memory efficient decoding, especially for long output generation. 
+
+## 1 Introduction 
+
+Large language models (LLMs) have demonstrated remarkable proficiency in complex reasoning tasks such as mathematics and coding (OpenAI et al., 2024a; DeepSeek-AI et al., 2025). This success can be attributed to their ability to generate long chain of thoughts before arriving at a final solu-tion. However, this verbosity introduces a signifi-cant computational and memory bottleneck. The autoregressive decoding process relies on a key-value (KV) cache that stores hidden states from previously generated tokens to enable efficient self-attention, and this cache grows linearly with the sequence length. This presents two critical chal-lenges for long-output generation. First, the KV cache consumes a large amount of GPU memory, and second, the computational cost of attending to the ever-growing cache makes each subsequent to-ken progressively slower to generate. For instance, generating a 16K-token response with a Llama-3.1-8B (Grattafiori et al., 2024) model for a batch size of 8 requires over 16GB of GPU memory for the KV cache, making deployment more challenging on consumer GPUs with less memory. To address these challenges, several efficient rea-soning strategies have been proposed (Sui et al., 2025). One line of work focuses on enabling the LLM to generate fewer tokens using techniques like prompt engineering (Han et al., 2025; Aytes et al., 2025), specialized training algorithms (Team et al., 2025; Xia et al., 2025), and latent space rea-soning (Hao et al., 2024a; Shen et al., 2025a). For these works, the primary objective is to speed up inference, and may implicitly reduce GPU memory consumption. Another direction, which we follow in this paper, aims to optimize the KV cache it-self. While several methods for cache eviction or compression exist, most are optimized for long input contexts during the prefill stage, when the model processes the prompt, (Li et al., 2024; Tang et al., 2024; Sun et al., 2025; Zhu et al., 2025a), rather than addressing the unqiue memory chal-lenges of long-output generation during decoding. Existing dynamic KV cache methods lose critical long-range information in long-output generation, resulting in poor performance on complex reason-ing tasks (Xiao et al., 2024; Zhang et al., 2023; Chen et al., 2025). This leaves a crucial gap for an efficient cache management strategy tailored specifically for lengthy, generated reasoning chains, 
+
+> arXiv:2604.10898v1 [cs.AI] 13 Apr 2026
+
+while maintaining high performance. To address this gap, we propose ZoomR, a method inspired by established principles of hu-man memory and attention. When solving complex problems, humans leverage hierarchical memory representations, maintaining schematic overviews of past information while selectively retrieving de-tailed specifics only when contextually relevant (Bartlett, 1932). ZoomR applies this strategy to LLMs by maintaining both compressed summaries (coarse-grained representations) of the generation history and the original detailed text, accessing fine-grained information only when the current con-text demands higher fidelity. We first fine-tune rea-soning models to generate summaries of thoughts after each paragraph. During inference, ZoomR uses the current query and summary keys across all attention heads to identify the most important segments of the past thoughts. Then, a consensus is performed to retrieve the most important full-resolution details. By doing so, ZoomR only se-lects a small number of KVs to keep on GPU for attention computation, while offloading the full KV cache to CPU. Our implementation involves a one-time fine-tuning step to teach the model to summarize its own history, followed by a training-free dynamic cache selection policy at inference time. Our contributions are three-fold. First, we in-troduce ZoomR, a dynamic, multi-granularity KV cache management technique designed to enable memory efficient long-output reasoning. Second, we present a practical framework that combines lightweight fine-tuning for summary generation with an efficient, approximate attention score-based retrieval mechanism for inference. Third, we empir-ically validate ZoomR on reasoning models, Qwen and Llama (Qwen et al., 2025; Grattafiori et al., 2024), across challenging reasoning benchmarks, AIME2025 and MATH500. Our results demon-strate that ZoomR achieves performance compara-ble to a standard full KV cache while saving more than 4× the GPU memory usage during inference. 
+
+## 2 Background 
+
+We investigate the efficiency of autoregressive infer-ence for LLMs in long-generation reasoning tasks. In this setting, the model is given a prompt X of length Np and is tasked with generating a lengthy response Y of length Ng, Ng ≫ Np. Modern reasoning models trained using chain-of-thought prompting significantly improve performance over standard instruction-tuned models. However, this improvement comes at the cost of generating much longer sequences. The output Y is often struc-tured into a detailed reasoning or “thought” sec-tion, followed by a final “solution” section, where the length of the thought process is typically much greater than that of the final answer. With recent advancements, models are capable of generating outputs that extend to tens of thousands of tokens. At the core of the Transformer architecture is the self-attention mechanism, which is central to the decoding process. During autoregressive gener-ation, a token is produced at each timestep t. The model has NL layers and H attention heads. Let 
+
+xt ∈ Rdemb be the input embedding for the token. For a given position t, layer l, and head h, the input 
+
+xt is projected into query, key, and value vectors 
+
+qt, kt, and vt, of dimension d:
+
+qt = xtWq, kt = xtWk, vt = xtWv,
+
+where Wq, Wk, Wv ∈ Rdemb ×d are learned pro-jection matrices. For ease of notation, we have dropped the index for layers and heads. To main-tain context from all previous tokens, both from the prompt and the ongoing generation, the keys and values from all past steps are stored in a KV cache. At each step t, the newly computed key kt
+
+and value vt are appended to the cached matrices 
+
+Kt−1 and Vt−1:
+
+Kt = [ Kt−1; kt], Vt = [ Vt−1; vt],
+
+where Kt, Vt ∈ R(Np+t)×d. The attention output 
+
+A is then computed as the scaled dot product be-tween the query and cached keys, followed, by a softmax operation to obtain attention weights, and using them to aggregate the corresponding values: 
+
+A(qt, Kt, Vt) = softmax 
+
+ qtK⊤
+
+> t
+
+√d
+
+
+
+Vt ∈ Rd.
+
+This standard decoding process presents two ma-jor efficiency challenges, particularly as the gener-ation length grows. First, the computational cost of generating each new token scales with the se-quence length. The matrix-vector multiplication 
+
+qtK⊤ 
+
+> t
+
+scales linearly with the length of the KV cache, resulting in quadratic complexity with re-spect to the total generation length. As the gener-ation proceeds and the cache grows, each subse-quent token becomes progressively more expensive to compute, making the overall inference process slow for long outputs. The second challenge is in GPU memory requirements. The primary mem-ory bottleneck during LLM inference is the KV cache. The size of the cache matrices, Kt and 
+
+Vt, grows linearly with the sequence length. For a model with multiple layers and attention heads, this memory footprint can become prohibitively large, limiting the maximum sequence length that can be processed on available hardware. 
+
+## 3 Methodology 
+
+In this section, we present ZoomR, a method that enables memory-efficient reasoning through multi-granularity KV retrieval. We begin by motivating our approach followed by its two main components: (1) fine-tuning an LLM to learn how to generate summaries on the fly, and (2) a dynamic KV cache selection policy for memory efficient decoding. 
+
+3.1 Motivation 
+
+As LLM generation length increases, the KV cache creates practical limitations for extended reason-ing tasks. Existing approaches attempt to address this challenge through various strategies, but often introduce significant limitations that compromise reasoning quality. Streaming-based approaches like StreamingLLM (Xiao et al., 2024), retain attention sinks and a sliding window of recent KV cache en-tries, but suffer from the “lost-in-the-middle” prob-lem, where critical intermediate reasoning steps are permenantly discarded. Dynamic token selection methods like H2O (Zhang et al., 2023) preserve important tokens through attention-based scoring mechanisms. However, these approaches face two critical limitations. First, computing token-level importance scores at each generation step incurs substantial computational overhead. Second, token-level selection operates at a granularity that may miss semantic coherence, potentially fragmenting coherent reasoning segments. Recent work has also explored using compressed summaries to reduce context size while preserving semantic information (Zhang et al., 2025; Yan et al., 2025). While summarization provides meaningful compression, restricting attention exclusively to summary representations creates an information bottleneck. The key insight driving our approach is that different reasoning steps require access to his-torical context at different levels of granularity (see Figure 1). When tackling a challenging mathemati-
+
+> Figure 1: Fine-grained details are often needed in order to generate the correct reasoning. Attending to only a compressed source of information like summaries can lead to incorrect intermediate steps.
+
+cal problem, the solution can draw on multiple lem-mas and theorems developed throughout the rea-soning process. Since summarization is inherently a lossy compression strategy, there may be steps during generation where high-level summaries fall short. For certain reasoning steps, accessing the full details becomes essential, whether to verify a subtle constraint, apply a specific technique, or build upon a particular intermediate result. 
+
+3.2 Reasoning with Summarization 
+
+By default, LLMs do not explicitly summarize their reasoning after each paragraph. To induce this be-havior in smaller models, we fine-tune them to gen-erate summaries after each reasoning segment. To achieve this, we first augment the Bespoke-17K rea-soning dataset (Labs, 2025) with paragraph-level summaries. Specifically, for each example, we segment the text within the thought token boundaries into para-graphs. Then, we use a larger model, Llama3-70B to summarize each segment into a concise summary. To create distinct, modular summaries and main-tain computational efficiency during data prepara-tion, each summary is generated based only on the prompt instruction and its corresponding paragraph. Summary delimiter tokens <|begin_of_summary|> and <|end_of_summary|> are inserted before a sum-mary begins and after it ends, respectively, to ex-plicitly mark the boundaries of each summary ((see Appendix A.1 for an example). We then fine-tune a base reasoning model with LoRA (Hu et al., 2021) to enable summary generation during inference. While our approach requires an initial training stage, we note that larger models like Llama3-70B, GPT4, etc. (Grattafiori et al., 2024; OpenAI et al., 2024b), if prompted, can generate summaries in a specific format, and the additional fine-tuning step may be unnecessary. Thus, the historical con-text is partitioned into corresponding full-text and summary segments. 
+
+3.3 The ZoomR Algorithm 
+
+Building upon the model’s ability to generate sum-maries, we introduce the core algorithm of ZoomR. The objective is to dynamically construct a multi-granularity KV cache at each reasoning step, focus-ing on the most important parts of the generation context and retaining a compressed view of the rest. This process unfolds in four stages: representation, scoring, aggregation, and context construction (see Figure 2). The output of the fine-tuned model partitions the generation context into two types of segments. The regular segments ( Ri) are sets of token indices corresponding to the original, detailed segments of the reasoning history and each summary segment (Si) is a set of token indices for the compressed summary of a regular segment, where i denotes the summary number and its corresponding regu-lar segment. The ZoomR algorithm operates by dynamically selecting a mix of these two segment types. 
+
+Representing Context with Mean Summary Keys. To efficiently score the importance of his-torical segments, each summary segment Si is first compressed into a single representative vector for each attention head in each layer. This vector, termed the mean summary key, is computed by averaging the key vectors of all tokens within the summary. This is motivated by the observation that keys within a short, coherent text segment exhibit locality (Sun et al., 2025). Formally, for each sum-mary Segment Si, layer l ∈ { 1, . . . , N L}, and head 
+
+h ∈ { 1, . . . , H }, the mean summary key is: 
+
+¯k(l,h ) 
+
+> i
+
+= 1
+
+|S i|
+
+X
+
+> j∈S i
+
+k(l,h ) 
+
+> j
+
+,
+
+where k(l,h ) 
+
+> j
+
+denotes the corresponding key vector for layer l and head h. These mean summary keys are cached on the GPU for rapid access during decoding. 
+
+Per-Head Importance Scoring and Voting. At a given generation step t, the model’s current query vector, q(l,h ) 
+
+> t
+
+, holds information about the context needed to generate the next token. Since query dy-namics change during generation, the notion of importance and KV cache selection is greatly de-pendent on q(l,h ) 
+
+> t
+
+. We use this query to perform a per-head importance assessment. Specifically, for each head, we compute an approximate attention score through an inner product between the query and every mean summary key: 
+
+α(l,h ) 
+
+> i
+
+= ( q(l,h ) 
+
+> t
+
+)⊤ ¯k(l,h ) 
+
+> i
+
+.
+
+Each attention head then “votes” for the summaries it deems most important by selecting the indices of the top-k highest-scoring summaries, 
+
+I(l,h ) 
+
+> top-k
+
+= arg top-k 
+
+> i∈{ 1,...,N t}
+
+(α(l,h ) 
+
+> i
+
+),
+
+where Nt is the number of summaries generated up until time t. This initial filtering identifies a candi-date set of important segments from the perspective of each head. 
+
+Global Aggregation and Consensus. To form a global decision, the individual votes from all heads and layers are aggregated. We first collect the union of all unique summary indices selected across heads and layers, thereby forming a global candidate set: 
+
+Iall =
+
+> NL
+
+[
+
+> l=1
+> H
+
+[
+
+> h=1
+
+I(l,h ) 
+
+> top-k
+
+.
+
+Next, we count the total number of votes each sum-mary in this candidate set received: 
+
+vi =
+
+> NL
+
+X
+
+> l=1
+> H
+
+X
+
+> h=1
+
+I(i ∈ I (l,h ) 
+
+> top-k
+
+),
+
+where I(·) is the indicator function. The c sum-maries with the highest vote counts are designated as the consensus set, Ic. These represent segments identified as highly important by a majority of at-tention heads and layers. 
+
+Constructing the Final Multi-Granularity Con-text. The final KV cache is constructed by com-bining context at different resolutions based on the consensus results. Specifically, for summaries in the consensus set Ic, we “zoom in” by includ-ing their corresponding original, full-text segments (Ri). This ensure that segments consistently iden-tified as important across heads and layers are re-stored to full resolution, preserving fine-grained information critical for accurate intermediate rea-soning while maintaining compression elsewhere. For the remaining summaries in the global candi-date set, defined as Is = Iall \ I c, we retain their compressed summary representations, Si. These segments are deemed relevant by at least one head but lack model-wide consensus. Figure 2: An overview of the ZoomR workflow. Mean summary keys are computed and cached on GPU. When the KV cache selection needs to be updated, approximate attention scores are calculated across all layers. A global top-c
+
+> selection identifies which summaries to zoom into. The final sparse KV cache loaded to GPU is a multi-granularity mix of an attention sink (green), selected detailed segments, summaries, and fixed recent window (blue). The symbolic attention map illustrates the dynamic nature of ZoomR during decoding.
+
+To maintain fundamental coherence, this dynam-ically selected context is augmented with two crit-ical, static components: the initial prompt tokens (Ip), which act as an attention sink, and a sliding window of the most recently generated tokens ( Iw). The final set of token indices, If , for the reduced KV cache is therefore obtained using the union of these components: 
+
+If = Ip ∪ I w ∪ [
+
+> i∈I c
+
+Ri
+
+!
+
+∪ [
+
+> i∈I s
+
+Si
+
+!
+
+.
+
+At the subsequent generation step, the attention mechanism will compute over the keys and values corresponding only to the indices in If . This dy-namic, global selection process allows the model to form a holistic view of context relevance, enabling it to flexibly adjust its attentional focus between high-level summaries and fine-grained details as needed depending on the current query. The full algorithm for ZoomR can be found in Appendix A.2. 
+
+3.4 System Implementation and Inference 
+
+The practical application of ZoomR involves a memory management strategy that dynamically moves KV cache data between high-capacity CPU memory and fast GPU memory. The process is di-vided into a one-time prefill stage and a repeated decoding stage. 
+
+Prefill Stage. During the prefill stage, the input prompt X of length Np is processed to generate the initial KV cache. To conserve GPU memory, we offload these initial KVs to CPU memory. Prompt tokens are crucial to maintain coherent LLM infer-ence (Xiao et al., 2024), and this is accentuated in complex reasoning tasks. Thus, we choose to retain the full KV cache from the prefill stage. In many mathematical reasoning benchmarks, Np ≪ Ng,so the relative cost is minimal. 
+
+Decoding Stage. To optimize for memory effi-ciency, at each generation step, only the subset of the KV cache specified by the index set If is loaded from CPU to GPU. After the attention computation for the current token is complete, the newly gen-erated KV pair is appended to the full cache on the CPU. While this CPU-GPU data transfer intro-duces latency dependent on Peripheral Component Interconnect Express (PCIe) bandwidth, it enables reasoning over contexts far exceeding the available GPU memory. To optimize performance, we introduce two key efficiency improvements. First, recomputing the selection set If at every step is computationally expensive. We only update the selection set at se-mantic boundaries, such as end-of-sentence, amor-tizing the cost of selection over multiple decoding steps (see Appendix A.3 for details). Second, to Table 1: Performance comparison of Llama and Qwen models across GPQA Diamond, AIME2025, and MATH500 benchmarks using various approaches. Results are reported in percent (%).                                              
+
+> Model Approach GPQA Diamond AIME2025 MATH500 Average Llama Vanilla 48.9 26.7 88.9 54.8 StreamingLLM 34.7 13.3 74.7 40.9 H2O 36.8 16.7 76.5 43.3 SumR 37.3 16.7 77.8 43.9
+> ZoomR 43.4 26.7 83.0 51.0
+> Qwen Vanilla 49.0 30.0 92.5 57.2 StreamingLLM 37.9 13.3 77.9 43.0 H2O 39.1 16.7 79.4 45.1 SumR 37.6 13.3 80.1 43.7
+> ZoomR 42.8 23.3 87.8 51.3
+
+minimize peak GPU memory usage and hide data transfer latency, we implement a pipelined, layer-by-layer execution strategy. For each layer of the model, the required KV cache slices are transferred to the GPU. Once the layer’s computation is fin-ished, its KVs are asynchronously transferred back to the CPU while the KVs for the next layer are prefetched. This overlaps data transfer with com-putation, reducing GPU idle time. 
+
+3.5 Theoretical Memory Analysis 
+
+ZoomR’s efficiency comes from only loading a small subset of the KV cache from CPU to GPU at each decoding step. We quantify this by comparing the memory footprint of a full KV cache with that of ZoomR’s active sparse cache on the GPU. The KV cache size selected by ZoomR corre-sponds to the number of tokens in the selection set 
+
+If . Let us consider each component in If . Define the number of prompt tokens as Np, the consensus selected c regular segments of average length ¯LR,
+
+(|I all | − c) summary segments of average length 
+
+¯LS , and size of the recent window as Nw. In the worst case, the number of selected summaries |I all |
+
+is bounded by the total number of summaries gen-erated during decoding. During generation, the full KV cache stores all previously generated tokens, reaching a size of Ng at the final step. Thus, the memory savings (MS) can be computed as: MS = Np + Ng
+
+Np + c · ¯LR + ( |I all | − c) · ¯LS + Nw
+
+For Np = 512 , Ng = 16384 , Nw = 512 , c = 2 ,
+
+¯LR = 250 , ¯LS = 20 , and |I all | = 80 , the memory savings is 5.48 ×.Crucially, the denominator grows sub-linearly with the sequence length as the number of sum-maries increases at a smaller rate. This ensures that memory savings improve as the generation length increases. For instance, doubling Ng to 32K yields savings of approximately 7.11 ×.
+
+## 4 Experiments 
+
+In this section we present the experiment setup and evaluate ZoomR using two reasoning models: Qwen2.5-7B and Llama-3.1-8B. For each model, we perform supervised fine-tuning with a max con-text length of 16K tokens using the augmented Bespoke-17K dataset. We refer to these fine-tuned models as the vanilla baselines. Specifically, we use the distilled reasoning models from R1-Distill, Deepseek-R1-Distill-Qwen2-7B and Deepseek-R1-Distill-Llama3-8b (DeepSeek-AI et al., 2025) as the base models for fine-tuning. We compare ZoomR against three other base-line approaches: StreamingLLM, H2O, and SumR. StreamingLLM uses a static KV cache selection policy based on fixed attention sinks and a recent sliding window, while H2O uses a dynamic ap-proach that selects tokens based on importance scores at each generation step. To ensure a fair comparison between ZoomR, StreamingLLM, and H2O, we first compute the GPU budget used by ZoomR for each task, and then set the equivalent budget for StreamingLLM and H2O. We also in-troduce SumR, a simplified variant of ZoomR that retains only the summary tokens and does not per-form any detailed token retrieval. We evaluate all methods on both math and reasoning tasks, includ-ing MATH500, GPQA Diamond, and AIME2025. All experiments are run on NVIDIA H100 GPUs. 
+
+Results. As shown in Table 1, ZoomR signif-icantly outperforms baseline approaches for all (a) KV cache comparison between ZoomR and full KV cache.     
+
+> (b) Runtime comparison between ZoomR and full KV cache.
+> (c) Impact of con accuracy and number of KVs selected.
+> (d) Aggregate agreeability over time for correct and incorrect answers.
+> (e) Agreeability standard deviation over time for correct and incorrect answers.
+> (f) Impact of kon accuracy and number of KVs selected.
+
+Figure 3: Efficiency, consensus, and ablation studies. Fig. (a,b) shows the GPU memory and throughput during inference, respectively. Fig. (d,e) show consensus dynamics between correct and incorrect answers over time. Fig. (c,f) illustrates the relationships between c and k on performance and KV cache selection size. 
+
+tasks, achieving accuracy close to the full KV cache. For the challenging AIME2025 benchmark, ZoomR is particularly effective, matching the per-formance of the full KV cache with the Llama model while remaining highly competitive using Qwen. Notably, these results demonstrate the ben-efits of dynamically zooming in to detailed con-text. ZoomR sees an 8% average accuracy improve-ment over SumR, indicating that only selecting summaries leads to loss of information, thereby impacting performance. ZoomR is significantly more memory efficient than the vanilla baselines. We compare against both cases of full KV cache on GPU and offloaded to CPU. Figure 3a shows the GPU memory utilization during inference generation in these cases using a 16K generation length and batch size of 16. Note that we exclude the model weights’ contribution to memory. ZoomR saves more than 20 × GPU memory for both Llama and Qwen based models compared to using the full KV cache stored on GPU, and more than 4× when full KV cache is offloaded to CPU. Since both the average summary lengths and consensus count c are fixed, the sav-ings increase significantly with longer sequence length and larger batch sizes. As a tradeoff, due to the CPU-GPU data transfer latency, ZoomR incurs a reduction in throughput (see Figure 3b), which is limited by the PCIe bandwidth. There-fore, ZoomR provides a major memory efficiency boost at the cost of reduced throughput, while main-taining strong performance compared to other KV cache compression methods. 
+
+Consensus Dynamics in Thought Compression. 
+
+Our analysis reveals that consensus patterns be-tween attention heads serve as a useful diagnostic signal for reasoning quality in mathematical tasks. We define an agreeability metric AG , as a measure of consensus among all attention heads regarding the importance of summary segments. Specificially, it quantifies the fraction of total “votes” that are assigned to the most frequently chosen summaries, i.e. the consensus set, AG = P 
+
+> i∈I c
+
+vi/ P 
+
+> j∈I all
+
+vj .We observe a striking early advantage for correct answers, with 5.7% higher agreeability in the first 38 recompute steps compared to incorrect answers (see Figure 3d). This early consensus advantage suggests that correct reasoning converges quickly to a coherent solution path, while incorrect reason-ing exhibits more exploratory behavior. The tempo-ral dynamics show a clear crossover at step 38, after which incorrect answers demonstrate higher agree-ability than correct ones. This pattern indicates that incorrect answers may require more extensive exploration or get stuck on reasoning paths, unable to generate the correct answer. Critically, incorrect answers show significantly higher variability in AG throughout the reasoning process, with a standard deviation of 14.82% com-pared to 7.87% for correct answers (see Figure 3e). This increased variability reflects the inherent instability of incorrect reasoning paths. This differ-ence persists across all time windows, suggesting that consensus stability itself may be a fundamen-tal property distinguishing correct from incorrect mathematical reasoning. These findings support our hypothesis that ZoomR leverages consensus dynamics to guide rea-soning quality through selective KV caching, offer-ing new insights into how models can “self-assess” reasoning quality through internal agreement pat-terns during selective attention mechanisms. 
+
+Ablation Studies. We conduct ablation studies to assess the impact of the hyperparameters consensus count c and top-k, on performance. Specifically, we run the experiments on MATH500 using the Llama model. With c = 1 , only one summary is expanded to fine-details, and the performance drops by 3% compared to c = 2 . However, for c ≥ 2,there is only a minor improvement of 1% , while the number of KVs being selected increases by over 40% , as more summaries are being expanded (see Figure 3c). For k = 1 , the performance is also noticeably worse, seeing close to a 3% drop compared to k = 2 . This suggests that selecting only one top summary per head discards important context, reducing aggregation quality. However, when k ≥ 2, the accuracy plateaus (see Figure 3f). The increase in number of tokens selected is also more gradual since increasing k only increases the number of summaries to select, which contribute much less to the KV cache. 
+
+## 5 Related Work 
+
+A central challenge in efficient reasoning is reduc-ing both memory and compute overhead during inference. One line of work addresses this by re-ducing the number of tokens generated during in-ference (Sui et al., 2025). Latent reasoning and summarization based approaches enable efficient reasoning by summarizing the intermediate think-ing steps. For instance, CODI and Coconut (Shen et al., 2025b; Hao et al., 2024b) train an LLM to compress a natural-language chain-of-thought into a continuous latent trajectory. LightThinker (Zhang et al., 2025) trains an LLM to replace verbose inter-mediate reasoning with concise “gist” tokens and discards the full intermediate thoughts during de-coding. While these methods offer inference-time efficiency, they rely on latent or opaque representa-tions that are difficult to interprety or verify. More-over, memory savings are typically a secondary concern. In contrast, our focus is on memory-centric techniques, specifically those involving KV cache compression. 
+
+KV Cache Compression. KV cache compres-sion reduces both storage and the computational cost of LLM inference. KV cache quantization reduces memory by storing the key and value ten-sors with lower numerical precision (Zirui Liu et al., 2023; Hooper et al., 2025). In addition, KVs can also be compressed with low-rank projections along the model dimension (Saxena et al., 2024; Zhu et al., 2025b). These techniques are comple-mentary to our method, as they operate on the rep-resentation level (e.g., precision or dimensionality). Token selection methods retain or evict to-kens based on learned or heuristic policies. StreamingLLM (Xiao et al., 2024) exploits the attention-sink effect to retain the initial tokens and the most recent context. SnapKV and H2O (Li et al., 2024; Zhang et al., 2023) rank and retain important tokens using scoring mechanisms. Quest, Shad-owKV, and SentenceKV (Tang et al., 2024; Sun et al., 2025; Zhu et al., 2025a) move the KV cache generated during the prefill stage from GPU to CPU memory and retrieve a subset of KVs to attend to during decoding. While there is a growing litera-ture of KV cache selection methods that enable memory efficiency for long context input, most of these approaches assume that the full KV cache is on GPU memory during the decoding stage, and are not designed for long-output reasoning tasks. Our work addresses this overlook scenario. 
+
+## 6 Conclusion 
+
+In this paper, we present ZoomR, a dynamic KV cache selection policy that enables memory effi-cient reasoning. By fine-tuning LLMs to generate summaries, and dynamically selecting summaries to “zoom” into based on a global consensus be-tween attention heads, ZoomR enables efficient reasoning with higher fidelity. Extensive experi-ments show that ZoomR consistently outperforms other baseline approaches, maintaining competitive performance compared to full KV cache. Limitations 
+
+One key factor that can influence performance is quality of summaries used during data augmenta-tion. In this work, we use summaries generated by the Llama-70B model, and do not evaluate the ef-fect of using summaries generated by larger, more powerful models. The granularity of segment se-lection for summarization is fixed at the paragraph level. It remains unclear whether summarizing at finer or coarser granularities would improve or degrade ZoomR’s performance. Finally, ZoomR is primarily evaluated on mathematical reasoning tasks. Future work should explore its applicabil-ity to other domains such as code generation and creative writing, where reasoning structures may differ significantly. 
+
+## References 
+
+Simon A. Aytes, Jinheon Baek, and Sung Ju Hwang. 2025. Sketch-of-thought: Efficient llm reasoning with adaptive cognitive-inspired sketching. Preprint ,arXiv:2503.05179. Frederic Charles Bartlett. 1932. Remembering: A Study in Experimental and Social Psychology . Cambridge University Press, Cambridge. Guoxuan Chen, Han Shi, Jiawei Li, Yihang Gao, Xi-aozhe Ren, Yimeng Chen, Xin Jiang, Zhenguo Li, Weiyang Liu, and Chao Huang. 2025. Sepllm: Accel-erate large language models by compressing one seg-ment into one separator. Preprint , arXiv:2412.12094. DeepSeek-AI, Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Ruoyu Zhang, Runxin Xu, Qihao Zhu, Shirong Ma, Peiyi Wang, Xiao Bi, Xiaokang Zhang, Xingkai Yu, Yu Wu, Z. F. Wu, Zhibin Gou, Zhi-hong Shao, Zhuoshu Li, Ziyi Gao, and 181 others. 2025. Deepseek-r1: Incentivizing reasoning capa-bility in llms via reinforcement learning. Preprint ,arXiv:2501.12948. Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schel-ten, Alex Vaughan, Amy Yang, Angela Fan, Anirudh Goyal, Anthony Hartshorn, Aobo Yang, Archi Mi-tra, Archie Sravankumar, Artem Korenev, Arthur Hinsvark, and 542 others. 2024. The llama 3 herd of models. Preprint , arXiv:2407.21783. Tingxu Han, Zhenting Wang, Chunrong Fang, Shiyu Zhao, Shiqing Ma, and Zhenyu Chen. 2025. Token-budget-aware llm reasoning. Preprint ,arXiv:2412.18547. Shibo Hao, Sainbayar Sukhbaatar, DiJia Su, Xian Li, Zhiting Hu, Jason Weston, and Yuandong Tian. 2024a. Training large language models to reason in a continuous latent space. Preprint , arXiv:2412.06769. Shibo Hao, Sainbayar Sukhbaatar, DiJia Su, Xian Li, Zhiting Hu, Jason Weston, and Yuandong Tian. 2024b. Training large language models to rea-son in a continuous latent space. arXiv preprint arXiv:2412.06769 .Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W. Mahoney, Yakun Sophia Shao, Kurt Keutzer, and Amir Gholami. 2025. Kvquant: To-wards 10 million context length llm inference with kv cache quantization. Preprint , arXiv:2401.18079. Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. 2021. Lora: Low-rank adaptation of large language models. Preprint , arXiv:2106.09685. Bespoke Labs. 2025. Bespoke-stratos: The unrea-sonable effectiveness of reasoning distillation. https://www.bespokelabs.ai/blog/bespoke-stratos-the-unreasonable-effectiveness-of-reasoning-distillation. Accessed: 2025-01-22. Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024. Snapkv: Llm knows what you are looking for before gener-ation. Advances in Neural Information Processing Systems , 37:22947–22970. OpenAI, :, Aaron Jaech, Adam Kalai, Adam Lerer, Adam Richardson, Ahmed El-Kishky, Aiden Low, Alec Helyar, Aleksander Madry, Alex Beutel, Alex Carney, Alex Iftimie, Alex Karpenko, Alex Tachard Passos, Alexander Neitz, Alexander Prokofiev, Alexander Wei, Allison Tam, and 244 others. 2024a. Openai o1 system card. Preprint , arXiv:2412.16720. OpenAI, Josh Achiam, Steven Adler, Sandhini Agarwal, Lama Ahmad, Ilge Akkaya, Florencia Leoni Ale-man, Diogo Almeida, Janko Altenschmidt, Sam Alt-man, Shyamal Anadkat, Red Avila, Igor Babuschkin, Suchir Balaji, Valerie Balcom, Paul Baltescu, Haim-ing Bao, Mohammad Bavarian, Jeff Belgum, and 262 others. 2024b. Gpt-4 technical report. Preprint ,arXiv:2303.08774. Qwen, :, An Yang, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chengyuan Li, Dayiheng Liu, Fei Huang, Haoran Wei, Huan Lin, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jingren Zhou, and 25 oth-ers. 2025. Qwen2.5 technical report. Preprint ,arXiv:2412.15115. Utkarsh Saxena, Gobinda Saha, Sakshi Choudhary, and Kaushik Roy. 2024. Eigen attention: Attention in low-rank space for kv cache compression. arXiv preprint arXiv:2408.05646 .Xuan Shen, Yizhou Wang, Xiangxi Shi, Yanzhi Wang, Pu Zhao, and Jiuxiang Gu. 2025a. Efficient reasoning with hidden thinking. Preprint , arXiv:2501.19201. Zhenyi Shen, Hanqi Yan, Linhai Zhang, Zhanghao Hu, Yali Du, and Yulan He. 2025b. Codi: Compress-ing chain-of-thought into continuous space via self-distillation. arXiv preprint arXiv:2502.21074 .Yang Sui, Yu-Neng Chuang, Guanchu Wang, Jiamu Zhang, Tianyi Zhang, Jiayi Yuan, Hongyi Liu, An-drew Wen, Shaochen Zhong, Na Zou, Hanjie Chen, and Xia Hu. 2025. Stop overthinking: A survey on ef-ficient reasoning for large language models. Preprint ,arXiv:2503.16419. Hanshi Sun, Li-Wen Chang, Wenlei Bao, Size Zheng, Ningxin Zheng, Xin Liu, Harry Dong, Yuejie Chi, and Beidi Chen. 2025. Shadowkv: Kv cache in shad-ows for high-throughput long-context llm inference. 
+
+Preprint , arXiv:2410.21465. Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao, Baris Kasikci, and Song Han. 2024. Quest: Query-aware sparsity for efficient long-context llm inference. 
+
+Preprint , arXiv:2406.10774. Kimi Team, Angang Du, Bofei Gao, Bowei Xing, Changjiu Jiang, Cheng Chen, Cheng Li, Chenjun Xiao, Chenzhuang Du, Chonghua Liao, Chuning Tang, Congcong Wang, Dehao Zhang, Enming Yuan, Enzhe Lu, Fengxiang Tang, Flood Sung, Guangda Wei, Guokun Lai, and 77 others. 2025. Kimi k1.5: Scaling reinforcement learning with llms. Preprint ,arXiv:2501.12599. Heming Xia, Chak Tou Leong, Wenjie Wang, Yongqi Li, and Wenjie Li. 2025. Tokenskip: Controllable chain-of-thought compression in llms. Preprint ,arXiv:2502.12067. Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient streaming language models with attention sinks. Preprint ,arXiv:2309.17453. Yuchen Yan, Yongliang Shen, Yang Liu, Jin Jiang, Mengdi Zhang, Jian Shao, and Yueting Zhuang. 2025. Inftythink: Breaking the length limits of long-context reasoning in large language models. Preprint ,arXiv:2503.06692. Jintian Zhang, Yuqi Zhu, Mengshu Sun, Yujie Luo, Shuofei Qiao, Lun Du, Da Zheng, Huajun Chen, and Ningyu Zhang. 2025. Lightthinker: Thinking step-by-step compression. Preprint , arXiv:2502.15589. Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuan-dong Tian, Christopher Ré, Clark Barrett, Zhangyang Wang, and Beidi Chen. 2023. H 2o: Heavy-hitter ora-cle for efficient generative inference of large language models. Preprint , arXiv:2306.14048. Yuxuan Zhu, Ali Falahati, David H. Yang, and Mo-hammad Mohammadi Amiri. 2025a. Sentencekv: Efficient llm inference via sentence-level semantic kv caching. Preprint , arXiv:2504.00970. Yuxuan Zhu, David H. Yang, Mohammad Mohammadi Amiri, Keerthiram Murugesan, Tejaswini Pedapati, and Pin-Yu Chen. 2025b. Ojakv: Context-aware online low-rank kv cache compression with oja’s rule. Preprint , arXiv:2509.21623. Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. 2023. Kivi : Plug-and-play 2bit kv cache quantization with streaming asymmetric quantiza-tion. A Appendix 
+
+A.1 Summarization 
+
+ZoomR uses a Llama3-70B model to generate summaries and augment the bespoke-17K dataset. Specifically, we use the summarization prompt shown in Figure 4. Since summaries can be gen-erated independently, this process can be greatly accelerated with the use of larger batch sizes and API calls. Once we collect all the summaries, these are then inserted back into the original dataset be-tween special tokens <|begin_of_summary|> and <|end_of_summary|>, as illustrated in Figure 5. Fine-tuning hyperparameters are shown in Table 2. 
+
+> Table 2: LoRA Fine-tuning Hyperparameters
+
+Parameter Value 
+
+LoRA Rank ( r) 16 LoRA Alpha ( α) 32 Number of Epochs 3Learning Rate 1 × 10 −4
+
+Batch Size 1Gradient Accumulation Steps 4Maximum Sequence Length 16,384 
+
+A.2 Algorithm Details 
+
+Algorithm 1 shows the full algorithm for ZoomR. 
+
+A.3 Semantic Boundaries 
+
+In our methodology, the semantic boundaries are determined by a preset list of punctuation tokens. The specific tokens used are ., !, ?, ... , :, \n\n ,and \n\n\n . The average recompute interval occurs after approximately 35 tokens, which matches the expected sentence length. 
+
+A.4 ZoomR Generated Example 
+
+ZoomR generates summaries dynamically during reasoning. Figure 6 shows part of the reasoning thoughts from a challenging AIME2025 problem. Summarization Prompt 
+
+System Prompt: You are a reasoning trace compressor. Your goal is to compress intermediate reasoning steps into minimal but faithful summaries. Instruction: "You are compressing a single paragraph from a chain-of-thought reasoning" "trace into a short summary token sequence.\ Use the prior context to" "understand what the current step is doing, but summarize only the" "current paragraph.\ Context: " + {context} + "\n" "Compress the following paragraph into a single short phrase (10-12 tokens)" "that captures the key logical conclusion or operation performed." "Prioritize preserving: mathematical results, logical deductions, and" "intermediate conclusions.\ You may omit redundant reasoning steps." "Respond in JSON with the compressed summary in 'results '.\n" "Paragraph: \n" + {paragraph} 
+
+Figure 4: Prompt used to generate summaries 
+
+Algorithm 1 ZoomR  
+
+> 1:
+
+Require: Prompt indices Ip, per-head top-k, consensus count c, recent window size w. 
+
+> 2:
+
+Define: Regular segments {R i} and summary segments {S i}.
+
+Prefill: Initialize KV cache using prompt P .
+
+Decoding:  
+
+> 3:
+
+for each step t = 1 , . . . , N g do  
+
+> 4:
+
+for each layer l = 1 , . . . , N L do ▷ Per-head importance scoring and voting  
+
+> 5:
+
+for each head h = 1 , . . . , H do  
+
+> 6:
+
+Append k(l,h ) 
+
+> t
+
+and v(l,h ) 
+
+> t
+
+to KV cache  
+
+> 7:
+
+if a new summary SNt is complete then  
+
+> 8:
+
+¯k(l,h ) 
+
+> Nt
+
+← 1 
+
+> |S Nt|
+
+P
+
+> j∈S Nt
+
+k(l,h ) 
+
+> j
+
+. ▷ Compute mean summary key  
+
+> 9:
+
+end if  
+
+> 10:
+
+α(l,h ) 
+
+> i
+
+← (q(l,h ) 
+
+> t
+
+)⊤ ¯k(l,h ) 
+
+> i
+
+for all i. 
+
+> 11:
+
+I(l,h ) 
+
+> top-k
+
+← arg top-k 
+
+> i
+
+(α(l,h ) 
+
+> i
+
+). 
+
+> 12:
+
+end for  
+
+> 13:
+
+end for  
+
+> 14:
+
+if at a semantic boundary then  
+
+> 15:
+
+Iall ← S 
+
+> l,h
+
+I(l,h ) 
+
+> top-k
+
+. ▷ Global aggregation and consensus  
+
+> 16:
+
+For each i ∈ I all , compute vi = P 
+
+> l,h
+
+I(i ∈ I (l,h ) 
+
+> top-k
+
+). 
+
+> 17:
+
+Ic ← arg top-c 
+
+> i∈I all
+
+(vi). 
+
+> 18:
+
+Is ← I all \ I c. 
+
+> 19:
+
+Iw ← { t − w + 1 , . . . , t − 1}. 
+
+> 20:
+
+If ← I p ∪ I w ∪  S  
+
+> i∈I c
+
+Ri
+
+ ∪  S  
+
+> i∈I s
+
+Si
+
+. ▷ Construct final multi-granularity context  
+
+> 21:
+
+end if  
+
+> 22:
+
+end for Augmented Dataset Example 
+
+Question: Return your final response within \boxed{} . A quadrilateral has vertices at (0,1), (3,4), (4,3) and (3,0). Its perimeter can be expressed in the form a√2 + b√10 with a and b integers. What is the sum of a and b?
+
+Thoughts: <|begin_of_thought|> Okay, so I have this problem where I need to find the perimeter of a quadrilateral with vertices at (0,1), (3,4), (4,3), and (3,0). The perimeter is supposed to be expressed in the form a√2 + b√10 , where a and b are integers, and then I have to find the sum of a and b. Alright, let me start by understanding how to approach this. First, the perimeter is the sum of the lengths of all four sides. I need to find the distance between each pair of consecutive vertices. The distance formula between two points (x1, y 1) and (x2, y 2) is p(x2 − x1)2 + ( y2 − y1)2.Let the vertices be A(0,1), B(3,4), C(4,3), D(3,0). The sides are AB, BC, CD, and DA. <|begin_of_summary|>Perimeter = AB + BC + CD + DA <|end_of_summary|> I’ll calculate each side one by one. Starting with AB: from (0,1) to (3,4). The length AB is p(3 − 0) 2 + (4 − 1) 2 = √32 + 3 2 =√9 + 9 = √18 .This can be simplified: √18 = √9 × 2 = 3 √2. So AB is 3√2.Next, BC: from (3,4) to (4,3). The length BC is p(4 − 3) 2 + (3 − 4) 2 = p12 + ( −1) 2 =√1 + 1 = √2.<|begin_of_summary|> AB = 3 √2, BC = √2<|end_of_summary|> Third side is CD: from (4,3) to (3,0). The length CD is p(3 − 4) 2 + (0 − 3) 2 =p(−1) 2 + ( −3) 2 = √1 + 9 = √10 .Last side is DA: from (3,0) back to (0,1). The length DA is p(0 − 3) 2 + (1 − 0) 2 =p(−3) 2 + 1 2 = √9 + 1 = √10 .Now, let’s add up all these lengths: AB + BC + CD + DA = 3√2 + √2 + √10 + √10 .<|begin_of_summary|> AB = 3 √2, BC = √2, CD = √10 , DA = √10 <|end_of_summary|> Combining like terms: (3 √2 + √2) + ( √10 + √10) = 4 √2 + 2 √10 .So the total perimeter is 4√2 + 2 √10 .
+
+· · · 
+
+> Figure 5: An example of a segment of reasoning process with intermediate summaries.
+
+ZoomR Example 
+
+Question: The 9 members of a baseball team went to an ice cream parlor after their game. Each player had a single-scoop cone of chocolate, vanilla, or strawberry ice cream. At least one player chose each flavor, and the number of players who chose chocolate was greater than the number of players who chose vanilla, which was greater than the number of players who chose strawberry. Let N be the number of different assignments of flavors to players that meet these conditions. Find the remainder when N is divided by 1000. 
+
+Thoughts: <|begin_of_thought|> Okay, so I need to solve this problem about assigning ice cream flavors to a baseball team. Let me read the problem again carefully to make sure I understand all the conditions. There are 9 team members, each getting a single scoop of chocolate, vanilla, or strawberry ice cream. The conditions are: 1. Each flavor is chosen by at least one player. 2. The number of players who chose chocolate is greater than those who chose vanilla, which in turn is greater than those who chose strawberry. So, Ch > V an > Str .We need to find the number of different assignments (flavorings) that meet these conditions, then find N (mod 1000) .Hmm. Let me break this down. So, each player has 3 choices: C, V , or S. But with constraints on the counts. The key constraints are: • All three flavors are used at least once. • The counts satisfy Ch > V an > Str .So, variables: Let C = number of chocolate, V = vanilla, S = strawberry. Given that C > V > S , and C + V + S = 9 . Also, each of C, V, S ≥ 1. <|begin_of_summary|> 
+
+C > V > S , C + V + S = 9 <|end_of_summary|> We need to find the number of ordered triples 
+
+(C, V, S ) that satisfy these conditions, and then multiply by the number of ways to assign these counts to the 9 players, considering the different permutations. Wait, no. Actually, the assignments are different distributions of the flavors to the players. So, for each valid combination (C, V, S ), the number of ways is the multinomial coefficient: 9!   
+
+> C!V!S!
+
+. Then, sum this over all valid triples (C, V, S ) where C > V > S ≥ 1 and C + V + S = 9 .But first, we need to find all possible triples (C, V, S ) that satisfy the inequalities and sum to 9. Let me first figure out all possible triples (C, V, S ) with C > V > S ≥ 1 and C + V + S = 9 .Since S ≥ 1, V ≥ 1, C ≥ 1, and C > V > S .Let me start by considering possible values for S. Since S must be at least 1, and V must be at least S + 1 , and C must be at least V + 1 . So, S can be from 1 up to some maximum value where these inequalities can still hold. Let me try to find the possible values of S. <|begin_of_summary|> S ≥ 1, V ≥ S +1 , C ≥ V +1 
+
+<|end_of_summary|> Let’s denote S = k. Then, V must be at least k + 1 , and C must be at least 
+
+V + 1 = k + 2 . So, C ≥ k + 2 .
+
+· · · 
+
+Thus, the remainder when N is divided by 1000 is 16 .

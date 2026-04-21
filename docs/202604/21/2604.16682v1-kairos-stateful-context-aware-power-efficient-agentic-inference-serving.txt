@@ -1,0 +1,1326 @@
+Title: KAIROS: Stateful, Context-Aware Power-Efficient Agentic Inference Serving
+
+URL Source: https://arxiv.org/pdf/2604.16682v1
+
+Published Time: Tue, 21 Apr 2026 00:18:16 GMT
+
+Number of Pages: 18
+
+Markdown Content:
+# KAIROS : Stateful, Context-Aware Power-Efficient Agentic Inference Serving 
+
+Yichao Yuan 
+
+University of Illinois, Urbana Champaign Urbana, IL, USA 
+
+yichaoy2@illinois.edu 
+
+Mosharaf Chowdhury 
+
+University of Michigan Ann Arbor, MI, USA 
+
+mosharaf@umich.edu 
+
+Nishil Talati 
+
+University of Illinois, Urbana Champaign Urbana, IL, USA 
+
+nishil@illinois.edu 
+
+Abstract 
+
+Power has become a central bottleneck for AI inference. This problem is becoming more urgent as agentic AI emerges as a major workload class, yet prior power-management tech-niques focus almost entirely on single-turn LLM serving. Our analysis shows that agentic serving behaves fundamen-tally differently: each request carries long-lived context that evolves across tool-interleaved turns, and lowering GPU fre-quency can push the system into a thrashing regime where memory pressure sharply worsens both performance and power efficiency. These observations show that power opti-mization for agentic serving requires rethinking. We present KAIROS , a context-aware power optimization system for agentic AI serving. KAIROS uses agent context as a first-class control signal to jointly manage GPU frequency, per-instance concurrency, and multi-instance request place-ment. This enables KAIROS to save power when memory headroom exists while avoiding thrashing and preserving performance targets. At a high level, KAIROS tracks requests at agent granularity, adapts local control to context growth and agent progress, and routes agents across instances to jointly improve power efficiency and memory stability. Eval-uated across diverse software and data engineering agentic tasks, KAIROS achieves an average of 27% (up to 39.8%) power reduction while meeting the performance targets. 
+
+1 Introduction 
+
+Power is a first-order constraint for AI systems because AI data center demand has far outpaced the growth of avail-able energy and grid capacity [ 19 , 20 , 39 ]. Reducing power is therefore critical not only for sustainability, but also for improving throughput within a fixed facility power enve-lope by enabling more usable compute capacity [ 45 , 54 , 55 ]. This urgency is likely to grow because recent trends [ 4, 56 ]show agentic AI as a major emerging inference workload and argue that serving agentic AI requires orders of magni-tude higher power than traditional LLM serving [ 25 ]. This is because agentic AI replaces a single inference with many tool-interleaved, stateful LLM invocations, often requiring dozens of model calls per request and thereby driving much higher computational cost. Therefore, improving the power consumption of agentic AI serving is both urgent and critical. 
+
+A large body of prior work has explored reducing power and energy cost of single-turn LLM serving . One major class of techniques uses dynamic frequency and power control. For example, DVFS-based runtimes that tune GPU frequency online using signals such as workload slack, phase behavior, or workload state [ 5 , 23 , 32 , 45 , 52 , 55 , 57 , 66 ]. A second class improves efficiency through system-level scheduling and resource management, such as hardware-aware placement, heterogeneous scheduling, and power-aware cluster orches-tration [ 30 , 54 , 59 ]. However, these techniques are designed for stateless LLM serving, where requests are short-lived and largely independent. This raises a fundamental question: can power saving techniques designed for single-turn LLM serving be applied directly to agentic AI serving? 
+
+To answer this question, we conduct a detailed charac-terization of agentic AI workloads from the perspective of an LLM serving system. Specifically, we focus on ReAct-style agents [ 63 ] because prior work [ 25 ] shows that they lie near/on the intelligence–cost Pareto frontier. We find that, unlike single-turn serving, agentic workloads maintain long-lived state for each request through a context cache [27 ] that grows across tool-interleaved turns and varies widely across agents. Our study further shows that this context growth is 
+
+highly dynamic : it varies substantially over time within and across agents, and the distributions of agent lifetimes, turn counts, and growth rates all exhibit long tails. This makes memory pressure difficult to predict and control, and cre-ates a fundamental tension for power management: lowering GPU frequency saves power, but also slows execution, and in agentic workloads that slowdown accumulates across turns and can directly hurt per-agent progress. Our analysis also uncovers a new power-management phenomenon: lowering GPU frequency beyond a certain value can drive the system into a thrashing regime , where accumulated context exceeds GPU memory capacity. As a result, the context needs to be recomputed [ 24 , 29 ] or loaded from slower memory tiers [ 8] that degrade throughput, la-tency, and power efficiency. This strong coupling between power and memory stability shows that agentic serving is not merely a scaled-up version of single-turn LLM serving, but a fundamentally different workload whose stateful and dynamic behavior reshapes the power-performance trade-off. As a result, we must rethink the problem of power optimization 
+
+> 1
+> arXiv:2604.16682v1 [cs.DC] 17 Apr 2026 Yichao Yuan, Mosharaf Chowdhury, and Nishil Talati
+
+for agentic AI around context growth, memory stability, and thrashing-aware control. In this paper, we present KAIROS , a context-aware power management system for agentic AI serving that reduces power consumption while maintaining a target performance SLO. Our goal is to minimize system power without signif-icantly sacrificing end-to-end agent progress, despite the highly dynamic and stateful nature of agentic workloads. To achieve this, KAIROS is designed around three key prin-ciples: (1) dynamically adjusting GPU frequency based on context pressure to safely trade performance for power sav-ings, (2) regulating concurrency to prevent excessive context growth that can destabilize the system, and (3) scaling and routing requests across multiple serving instances in a power-aware manner to consolidate load at low demand and spread load under high context pressure. To realize these goals, KAIROS introduces a unified run-time that combines lightweight request tracking, per-instance control, and global routing. First, it tracks requests at the agent granularity , enabling the system to reason about long-lived, multi-turn workflows rather than isolated LLM calls. Each serving instance is then equipped with a context-aware controller that monitors context growth and system load to adapt GPU frequency and admission decisions. This al-lows KAIROS to save power when capacity exists while avoid thrashing and preserving performance. Finally, a global router places agents across serving instances based on con-text and load, consolidating under light demand and spread-ing under high context pressure. Together, these components use agent context as a first-class signal for power-efficient and stable agentic AI serving. We evaluate KAIROS on NVIDIA H100 GPUs that run vLLM [ 27 ] across three datasets, including SWE-bench Ver-ified [ 9 ], DABStep [ 14 ], and Terminal-Bench 2.0 [ 37 ], and two agent types: mini-swe-agent [ 61 ] and Terminus-2 [ 37 ]. Unlike single-turn LLM serving that relies on TTFT/TBT, we adopt a throughput-based SLO since agentic execution is best measured by the rate of task progress (§B.2). KAIROS 
+
+reduces average GPU power by 27% (up to 39.8% ) for a single serving instance and 46.3% for multi-instance serving while maintaining per-agent SLO of P5 throughput 20 tokens/s. 
+
+KAIROS show effectiveness in avoiding thrashing, demon-strating stable operation under dynamic context growth. 
+
+KAIROS is the first work to optimize power for agen-tic inference serving . Our key contributions are: 
+
+• A detailed characterization of agentic inference serving that reveals why power optimization is fundamentally different and harder compared to single-turn LLM serving. 
+
+• A context-aware control mechanism that jointly manages GPU frequency and concurrency using context growth, memory pressure, and agent progress to reduce power while avoiding thrashing and preserving SLO attainment. Agent 1      
+
+> Agent 2
+> Agent N
+> …
+> Execution
+> Environment
+> E.g., Linux terminal
+> LLM
+> LLM Serving
+> System
+> E.g., vLLM
+> …
+> …
+> +
+> +
+> +
+> Concurrent agent
+> loop execution
+> Runs on CPU ßàRuns on GPU
+> Prior per -agent context Context growth
+> New tokens
+> Hosts aggregate
+> context from agents Tool call
+> Agent
+> request
+> batching
+> Agentic inference serving system: focus of this work
+
+Figure 1. Example of ReAct agent workflow: multiple con-current agents perform multi-turn conversations between execution environment and the LLM serving system. 
+
+• KAIROS : an end-to-end system for agentic AI serving that reduces power by 27%, maintaining performance targets. 
+
+2 Background: Agentic Inference Serving and Power/Energy Efficiency 
+
+This section provides brief background on the agentic infer-ence serving workload, how is it different than single-turn LLM inference, and the need for power efficiency. 
+
+2.1 Agentic AI Inference Serving 
+
+Agentic inference differs from single-turn LLM inference in that the model is invoked repeatedly in a closed-loop process 
+
+that alternates between reasoning, acting, and observing feedback, rather than a single prompt-response exchange. A few examples of existing agent designs include ReAct [ 63 ], Reflexion [ 49 ], and LATS [ 69 ], which differ mainly in how they organize control flow around the model. A recent char-acterization study [ 25 ] found that ReAct often lies on or near the accuracy–cost Pareto frontier. Therefore, we focus on 
+
+ReAct-style agents in this paper because they are simple, widely adopted, and effective across diverse tasks including multi-hop question answering [ 50 ], web shopping [ 62 ], data engineering [14], and software engineering [22]. As shown in Figure 1, a ReAct agent repeatedly sends prompts and tool outputs to an LLM server, such as vLLM [ 27 ], executes the returned action in an execution environment, and feeds the resulting observation into the next turn. When many agents run in parallel, the serving system must handle many interleaved prefill and decode phases whose per-agent contexts persist and grows across turns rather than disappear-ing after one response. In systems such as vLLM, previously processed tokens are retained in the prefix/context cache [ 27 ]so later turns can resume from accumulated history instead of recomputing the entire conversation from scratch. Once the agent completes a task, the entire context becomes use-less, freeing up a large GPU memory capacity. This makes agentic inference serving fundamentally stateful , because each new turn depends on prior context. A concrete example of a ReAct agent is SWE-Bench [ 22 ]that resolves GitHub issues, where an agent iteratively in-spects code, runs commands and tests, revises its hypothesis,  
+
+> 2KAIROS : Stateful, Context-Aware Power-Efficient Agentic Inference Serving
+
+edits files, and re-queries the model until it produces a valid patch. Tokens from each turn are retained in a context cache, making serving inherently stateful , while actions in the en-vironment are guided by the language model. 
+
+2.2 An Urgent Need for Power/Energy Efficiency 
+
+AI data centers face severe energy and power pressure, with inference as a major contributor and modern deployments operating at hundreds of megawatts to gigawatts [ 25 , 34 , 55 ]. This paper focuses on power because data centers are increas-ingly constrained by available watts; reducing per-server power can increase deployable compute capacity within a fixed facility power envelope [ 6]. This issue is becoming more urgent as recent work [ 4 , 56 ] points to agentic AI as an emerging workload class, and prior characterization [ 25 ]shows that agentic inference consumes two to three orders of magnitude higher power than single-turn LLM. This gap arises because agentic serving repeatedly alternates prefill, decode, and tool phases over many turns while the serving system retain prior tokens in the context cache, causing GPU memory usage to grow unevenly and intensify both capacity and bandwidth pressure. Although agentic execution uses CPUs for orchestration and tool interaction, the GPU-side LLM serving path remains the dominant power-hungry com-ponent, which is the focus of our work (Figure 1). GPU power can be reduced through static power caps, dy-namic frequency scaling, or broader thermal/power-aware scheduling [ 23 , 45 , 52 , 54 ]. In our workload setting, agent con-text evolves dynamically across turns, making static policies suboptimal fit, motivating DVFS as an online control mecha-nism. Because lowering frequency also slows inference down, any such approach must balance power savings against a performance target SLOs. SLOs in LLM serving are defined using latency metrics: TTFT and TBT, which are designed to capture user-perceived responsiveness in interactive ap-plications [ 1 ]. In contrast, we argue for a throughput-based SLO for agentic serving with more details in §4 and §B.2. 
+
+3 Characterization of Agentic Inference Serving 
+
+3.1 Experimental setup 
+
+While §7 presents a detailed methodology used through-out the paper, this subsection briefly discusses the experi-mental setup used for our characterization study. We run agentic AI inference using the Harbor [ 16 ] framework on a single NVIDIA H100 GPU with context caching enabled [ 27 ]. Unless otherwise specified, the GPU runs a vLLM server that with a Qwen3-Coder-30B model with SWE-bench Ver-ified [ 9] dataset and mini-swe-agent [ 61 ]. We use a fixed input request rate of 0.08 agent jobs per second using a Pois-son distribution to represent real-world traffic patterns [ 38 ]. Therefore, in the steady state, vLLM serves requests from 0 25 50 75 100 125 150 175 200 
+
+> Time From Run Start (minutes)
+> 0
+> 50k
+> 100k
+> 150k
+> 200k
+> 250k
+> 300k
+> 350k
+> 400k
+> Average Context Usage
+> in Window (tokens)
+
+Figure 2. Agent context growth over time for concurrent workloads served by a single vLLM instance; the eight longest contexts are highlighted in distinct colors, with oth-ers in gray. 1 2 5 10 20 50 100 200 500 1k 2k       
+
+> Turns per Job
+> DABStep
+> SWE-bench
+> Verified
+> Terminal-
+> Bench 2.0
+> 50 100 200 500 1k 2k
+> Agent Duration per Job (s)
+> Mini-SWE-Agent Terminus
+
+Figure 3. Conversation turn count (left) and agent duration (right) log distribution across two agent types and three datasets, showing a high degree of variation. multiple agents concurrently. Each agent job will perform multiple conversation turns, resulting in a large batch size. 
+
+3.2 Dynamic Context Growth 
+
+Figure 2 illustrates how the context cache capacity of serv-ing concurrent agents evolves over time. The eight longest contexts are distinguished using different colors, while all remaining contexts are shown in gray to improve the read-ability of the figure. Unlike single-turn LLM serving, where workload variability arises mainly from input/output se-quence lengths [ 1 , 27 , 65 ], agentic serving introduces an additional source of variation: long-lived context capacity evolves dynamically in three unique ways. 
+
+First , the capacity and longevity of each context depends on the number of conversation turns . For example, our setup serves an average of 17 agents in parallel. The number of conversation turns vary from 1 to 2518, with an average of 37 turns, that depends on the complexity of agent task. This makes the length of each agent context and its longevity in the serving system a function of the input task, which cannot be determined statically. To understand this behavior further, Figure 3 shows the distribution of number of conversation turns and total time spent by each agent in the LLM serving system. Due to space 
+
+> 3
+
+Yichao Yuan, Mosharaf Chowdhury, and Nishil Talati 3.5    
+
+> 4.0
+> 4.5
+> Average energy
+> per job (kJ)
+> 400 600 800 1000 1200 1400 1600
+> Frequency (MHz)
+> 0.05
+> 0.06
+> 0.07
+> 0.08
+> Average throughput
+> (jobs/s)
+> 200
+> 300
+> Average power (W)
+> 10
+> 20
+> 30
+> Average time spent
+> per LLM request (s)
+> Avg energy / job Avg power Avg throughput Avg time / LLM request
+
+Figure 4. Effect of reducing GPU frequency on energy and power consumption (top), throughput, and average time per LLM request (bottom) for agentic serving system. limitation, the distribution of maximum context length per agent is shown in Figure 13 (§A.3). Results reveal significant variability in turn counts and agent duration. Specifically, the heavy-tailed distribution highlights that while many jobs conclude quickly, a non-trivial portion of long-running tasks requires thousands of turns. Because agents have different lifetimes, second , context accumulation across all agents running concurrently is highly uneven over time. When an agent completes, its entire con-text cache is released at once, causing an abrupt drop in the total accumulated context footprint. Third , the rate of con-text growth varies largely across multiple agents. This rate is a function of runtime properties including input and output sequence lengths for each conversation, and the amounts of time spent on LLM and tool calls. This analysis clearly shows that agentic serving creating highly dynamic and unpredictable memory demands for the serving system. 
+
+3.3 Effect of GPU Frequency Scaling 
+
+Reducing GPU core frequency is a common way to lower power, but it also creates a trade-off with inference perfor-mance. Prior work has only studied this trade-off in single-turn LLM serving [ 11 , 23 , 32 , 36 , 54 , 55 , 66 ]. Figure 4 shows how GPU frequency affects agentic serving efficiency. Two observations stand out: (1) reducing frequency from 1680 MHz to 900 MHz lowers energy and power by about 30% with little impact on throughput or latency, but (2) below 900 MHz this trend reverses, with sharply higher energy, lower throughput, and longer time for each LLM request. This reversal occurs because lowering frequency slows execution while the request arrival rate remains fixed at 0.08 agents/s (§3.1). As service slows, pending work accumulates and the total context footprint of concurrent agents grows until it exceeds GPU memory capacity, pushing the system into a thrashing regime where cached context is evicted and previously processed tokens must be recomputed . This extra work raises energy consumption, reduces throughput, and increases latency. Although memory pressure can also appear in single-shot LLM serving, agentic workloads am-plify this effect over multi-turn serving. 0 20 40 60 80 100 120 140 160 180 
+
+> Time From Start (minutes)
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> Context Cache Usage (%)
+> thrashing regime max freq. 1680
+> max freq. 1185
+> max freq. 660
+
+Figure 5. Aggregate context cache growth over time for concurrent agents running at three maximum GPU core frequencies: 1680 MHz, 1185 MHz, and 660 MHz. 
+
+3.4 Deep Dive Into Context Thrashing 
+
+Based on these observations, we classify the serving sys-tem into two regimes: non-thrashing , where the aggregate context of concurrent agents fits within available GPU mem-ory, and thrashing , where it exceeds that capacity. Figure 5 shows the transition by plotting aggregate context growth at 1680, 1185, and 660 MHz under a fixed request rate of 0.08 agents/s. At 1185 MHz, execution slows only slightly relative to 1680 MHz, so tasks still complete fast enough to keep memory pressure stable. At 660 MHz, however, com-pute throughput drops enough that accumulated context grows faster than it can be drained, exceeds available mem-ory, pushing the system into a thrashing regime. This result shows that frequency-induced compute bottlenecks are a root cause of both energy and performance instability in agentic serving . Appendix §A.4 further examines thrashing perfor-mance under two common fallbacks: recomputation [ 24 , 29 ]and LMCache-based offloading [8]. 
+
+3.5 Summary of Unique Challenges 
+
+Based on our characterization, we identify three unique 
+
+Challenges for power saving in agentic inference serving. 
+
+• C1: Tension between power saving and performance. 
+
+Lowering GPU frequency reduces power, but also slows agent execution, creating a fundamental trade-off. The unique challenge is that the slowdown is context-dependent and accumulates across turns , making it difficult to reduce power without violating a performance target. 
+
+• C2: Highly dynamic context demand. In agentic serv-ing, both the size and the lifetime of each agent’s context evolve online as a function of task complexity and tool in-teraction, making memory demand challenging to predict or provision statically. 
+
+• C3: Strong coupling between power and memory stability. Reducing GPU frequency can save power, but slower execution prolongs agent lifetime and increases resident context, which can push the system into a thrash-ing regime that sharply degrades throughput, latency, and power efficiency. 
+
+4KAIROS : Stateful, Context-Aware Power-Efficient Agentic Inference Serving 
+
+These challenges differ fundamentally from single-turn LLM serving, motivating a rethinking of power optimization. 
+
+4 Problem Formulation 
+
+We model an agentic serving system S in Figure 1 as a collec-tion of underlying serving instances M. A serving instance 
+
+𝑚 ∈ M is defined as a single unit of an LLM server that ei-ther a single or multiple GPUs, depending on the size of the model. The system processes an incoming stream of agents using a collection of instances. Let A denote the set of agents, where each agent 𝑎 ∈ A generates a sequence of requests: 
+
+𝑎 = (𝑟 1, 𝑟 2, . . . ), 𝑟 𝑖 = (Δ𝑝 𝑖 , Δ𝑑 𝑖 ), 𝑟 𝑖 ∈ R , (1) arriving at a target rate (e.g., agent requests per second), where Δ𝑝 𝑖 is the number of newly appended prefill tokens (e.g., initial prompt or environment observation) and Δ𝑑 𝑖 is the number of generated decode tokens. The context (history) after step 𝑖 is the concatenation of all prior tokens: 
+
+𝐻 𝑖 = (Δ𝑝 1, Δ𝑑 1, Δ𝑝 2, Δ𝑑 2, . . . , Δ𝑝 𝑖 ), 𝐶 𝑖 = |𝐻 𝑖 |. (2) Each request 𝑟 𝑖 is processed with end-to-end latency 𝑡 𝑖 ,which depends on system conditions and the current context size 𝐶 𝑖 . We define the per-agent throughput as: Throughput (𝑎 ) =
+
+Í𝑖 Δ𝑑 𝑖 
+
+Í𝑖 𝑡 𝑖 
+
+, (3) and say that an agent 𝑎 satisfies a throughput-based SLO with target 𝜏 (tokens/s) if Throughput (𝑎 ) ≥ 𝜏 .While prior work uses latency-based SLOs such as TTFT, TBT, or TTLT [ 67 ] (time to last token), we argue that per-agent throughput is a more user-centric metric that better captures end-to-end agent progress over its full lifecycle. TTFT and TBT are designed for fine-grained, human-facing generation, whereas agentic serving operates at the task level with multi-turn, autonomous execution. TTLT is less actionable for online control because it depends on an iso-lated request-specific latency that is not available in online serving at runtime. In contrast, throughput directly reflects runtime agent progress under shared execution, making it a more actionable SLO for agentic serving. Please refer to §B.2 for a more detailed discussion on the choice of this metric. Let A ( 𝑇 ) denote the set of agents that complete within a time interval [0,𝑇 ], and let |A ( 𝑇 )| be its cardinality. We define the SLO attainment rate over [0,𝑇 ] as: SLO-Attainment (𝑇 ) = 1
+
+|A ( 𝑇 )| ∑︁ 𝑎 ∈ A ( 𝑇 )
+
+1Throughput (𝑎 ) ≥ 𝜏  .
+
+(4) We define the total instantaneous system power and the average system power over [0,𝑇 ] as: 
+
+𝑃 (𝑡 ) =∑︁ 
+
+> 𝑚 ∈ M
+
+𝑃 𝑚 (𝑡 ), ¯𝑃 (𝑇 ) = 1
+
+𝑇 
+
+∫ 𝑇 
+
+> 0
+
+𝑃 (𝑡 ) 𝑑𝑡, (5) where 𝑃 𝑚 (𝑡 ) denotes the instantaneous power of instance 𝑚 
+
+at time 𝑡 . Given these definitions, we define an optimization objective as follows. 
+
+Optimization objective: Minimize the power consumption ¯𝑃 (𝑇 ) while maintaining SLO-Attainment (𝑇 ) comparable to a non power-optimized baseline. 
+
+5 Design Goals and Overview 
+
+Motivated by the unique challenges of agentic inference serving (§3.5), this section presents the key design goals and a high-level overview of KAIROS toward achieving the optimization objective above. 
+
+5.1 KAIROS Design Goals 
+
+KAIROS defines three Design Goals. 
+
+• DG1: Context-aware frequency control. Control GPU frequency using context as a first-class signal so the sys-tem can trade speed for power savings when memory headroom exists. The key goal is to reduce frequency only up to the point that the system remains in the non-thrashing regime while maintaining SLO attainment .
+
+• DG2: Context-aware concurrency control. Regulate how many agents are admitted to each serving instance so that aggregate context demand remains within a safe memory envelope. The goal is to avoid overloading any in-stance with excessive long-lived context that would trigger thrashing and hurt both performance and power. 
+
+• DG3: Power-aware multi-instance scaling and rout-ing. For multiple serving instances, scale resources and route requests across them to jointly minimize system power and maintain SLO attainment . The goal is to con-solidate load onto fewer instances under light demand to exploit low idle-power states, while spreading load under higher context pressure to avoid local memory instability. 
+
+5.2 KAIROS Design Overview 
+
+The design goals motivate a unified context-aware runtime that jointly controls frequency, concurrency, and multi-GPU scaling to reduce power while preserving SLO attainment. Figure 6 shows the high-level design of KAIROS . KAIROS 
+
+is designed around the three goals in §5.1 to address the challenges (§3.5), and has the following components. 
+
+• Agent ID Tracker. KAIROS first annotates incoming LLM requests with an agent identifier so that requests belonging to the same multi turn workflow can be tracked across turns. Unlike a semantic variable [ 31 ], which en-code application-level data dependencies and request se-mantics across LLM calls, our tracking is purely identifier-based and carries no information about request content 
+
+> 5Yichao Yuan, Mosharaf Chowdhury, and Nishil Talati KAIROS
+> Per -Instance
+> Controller
+> Agent 1
+> Agent N
+> ID
+> ID
+> …
+> Agent Queue
+> KAIROS
+> Global Router
+> KAIROS
+> Per -Instance
+> Controller
+> vLLM
+> Serving
+> Instance 1
+> vLLM
+> Serving
+> Instance N
+
+… Context -aware frequency control    
+
+> (Section 6.2.2)
+> SLO -based boosting (Section 6.2.3)
+> Thrashing avoidance (Section6.2.4)
+> Context -aware workload balancing,
+> Power -aware instance consolidation
+> (Section 6.3)
+> Each
+> serving
+> instance has
+> a single or
+> multiple
+> GPUs
+> Global router and per -instance
+> controller collectively optimize
+> power consumption while
+> maintaining performance targets
+
+Figure 6. Design overview of KAIROS : it tracks serving requests for each agent, a global router assigns requests to different vLLM serving instances, and per-instance controller that adjusts GPU frequency to optimize power. or relationships. This is necessary because, from the view-point of the LLM serving system, requests from different agents otherwise appear as ordinary LLM requests with-out explicit agent-level structure. 
+
+• Context-Aware Per-Instance Controller. Each serving instance is paired with a local controller that monitors context growth, memory pressure, and agent progress, and then manages the instance accordingly. At a high level, this controller adjusts GPU frequency and regulates per-instance concurrency to save power, avoid thrashing, and preserve SLO attainment, directly supporting DG1 and 
+
+DG2 while addressing C1–C3 . There is a single controller per serving instance that spans either a single or multiple GPUs, depending on the model size. 
+
+• Context-Aware Multi-instance Router. Across multi-ple serving instances, KAIROS employs a global, context-aware router that dynamically adapts instance utilization to workload intensity. Under low load, the router consoli-dates agents onto a subset of instances to keep other GPUs in low-power idle states, while under high load it spreads 
+
+agents to balance context pressure and avoid thrashing. By jointly optimizing placement for both memory stability and power efficiency, the router improves system-wide SLO attainment while reducing unnecessary power over-head, supporting DG3 to address C2 and C3 .Together, these components form a unified runtime that uses context as the central control signal across both local instance management and global request routing. 
+
+6 KAIROS Design Details 
+
+In this section, we present the detailed design of KAIROS .
+
+6.1 Agent ID Tracker 
+
+A key challenge in agentic LLM inference is that serving backends are not agent-aware: requests are issued indepen-dently without agent identifiers, obscuring provenance and preventing agent-level scheduling and control. Modifying agent programs to add such annotations is impractical due to their complexity, heterogeneity, and rapid evolution. To address this, KAIROS introduces a non-intrusive Agent ID Generator that enables agent-level tracking without mod-ifying user programs. A lightweight wrapper launches each agent as a child process, assigns a unique ID, emits lifecy-cle signals ( agent_start /agent_end ), and transparently en-codes the ID into each request (via the API key), ensuring end-to-end propagation. An example interface is shown in Appendix A.6. At the backend, the router extracts agent IDs from re-quests to enable agent-level scheduling, context tracking, and control. This design is fully compatible with existing interfaces, incurs minimal overhead by reusing metadata channels, and provides the abstraction needed for KAIROS 
+
+’s context-aware optimizations. 
+
+6.2 Context-Aware Per-Instance Controller 
+
+The goal of the KAIROS per-instance context controller is to manage each serving instance so that it reduces power while preserving SLO attainment and avoiding the non-ideal thrashing regime. Its key insight is that, in agentic serving, control decisions such as GPU frequency scaling and concur-rency regulation must be driven by context dynamics , since each agent’s state persists across turns and directly shapes future memory pressure and performance. This makes per-instance control fundamentally different from conventional stateless inference, where policies can focus primarily on the latency of the current request. Accordingly, this subsection presents the controller through five components. Control Policy Formulation defines the lo-cal optimization objective. Context-Aware Frequency Control 
+
+addresses DG1 and tackles C1/C3 by trading power for per-formance based on context pressure. SLO-based Frequency Boosting preserves throughput targets under slowdown, di-rectly addressing C1 . Thrashing Avoidance provides the safety mechanism that keeps the instance within a stable non-thrashing region and performs context-aware concurrency control ( DG2 ). Together, these components realize the local control plane of KAIROS , while DG3 is handled globally by the multi-instance router (§6.3). 
+
+6.2.1 Control Policy Formulation. We model the con-troller as a discrete-time policy that operates at control epochs 𝑘 = 0, 1, 2, . . . . At each epoch, agents are divided into two sets: the set of ongoing agents Aon  
+
+> 𝑘
+
+that are cur-rently executing, and the set of pending agents Apend  
+
+> 𝑘
+
+that have arrived but have not yet been admitted. We define the system context usage at epoch 𝑘 as the aggregate context footprint of all ongoing agents: 
+
+𝑈 𝑘 =∑︁ 
+
+> 𝑎 ∈ A on
+> 𝑘
+
+𝐶 𝑎 𝑗 𝑎 (𝑘 ) . (6) At each control epoch, the controller selects a GPU fre-quency setting 𝑓 𝑘 and updates the set of ongoing agents by admitting a subset of Apend  
+
+> 𝑘
+
+into execution. The control  
+
+> 6KAIROS : Stateful, Context-Aware Power-Efficient Agentic Inference Serving
+
+policy is therefore defined as 
+
+𝜋 : 𝑈 𝑘 ↦ → ( 𝑓 𝑘 , Aon  
+
+> 𝑘
+
+). (7) Here, 𝑓 𝑘 governs the power–performance trade-off, while the evolution of Aon  
+
+> 𝑘
+
+regulates concurrency to keep the system within a stable non-thrashing regime. 
+
+6.2.2 Context-Aware Frequency Control. We first de-scribe the frequency control, which addresses DG1 and di-rectly targets C1 and C3 by adapting GPU frequency to the current context pressure of each serving instance. At instance startup, KAIROS obtains two pieces of static information: (i) the set of available GPU frequency levels 
+
+F = {𝑓 (1) , 𝑓 (2) , . . . , 𝑓 (𝐿 ) },
+
+sorted in ascending order, and (ii) the token capacity of the instance, denoted by 𝑈 max .At control epoch 𝑘 , the controller observes the aggregate context usage 𝑈 𝑘 and selects the frequency level as 
+
+𝑓 𝑘 =
+
+(𝑓 (𝐿 ) , 𝑈 𝑘 ≥ 𝛼𝑈 max ,𝑓 (ℓ𝑘 ) , otherwise , (8) where 𝛼 ∈ ( 0, 1] is the context-pressure threshold for enter-ing the protective high-frequency regime, and 
+
+ℓ𝑘 =
+
+ 𝑈 𝑘 
+
+𝛼𝑈 max 
+
+· ( 𝐿 − 1)
+
+
+
++ 1. (9) This policy linearly partitions the safe region [0, 𝛼𝑈 max )
+
+into 𝐿 − 1 intervals and increases the frequency level mono-tonically with context usage. In practice, we set 𝛼 = 0.75 .The design choice is guided by three principles. First ,when context usage is low, the instance has substantial un-used memory capacity. In this regime, reducing frequency slows individual requests but can safely trade excess capacity for lower power, since the additional context residency still fits within the safe region. In other words, the controller exploits available context headroom to reduce power. 
+
+Second , as context usage rises, the same slowdown be-comes increasingly risky. Lower frequency prolongs agent lifetime, increases resident context, and can accelerate con-text accumulation, eventually pushing the instance into the thrashing regime. To address this risk, the controller progres-sively reduces the aggressiveness of frequency downscaling as 𝑈 𝑘 grows, using discrete levels to provide a smooth tran-sition from low-pressure to high-pressure operation. 
+
+Third , low context usage often coincides with low mem-ory pressure and short per-iteration execution time, which means the instance may be operating well above the perfor-mance required to meet the SLO. In this region, the controller can safely exploit available SLO slack for more aggressive power savings. Taken together, this policy uses aggregate context as the key runtime signal for balancing power reduc-tion against performance and memory stability. 
+
+6.2.3 SLO-Aware Frequency Boosting. While the context-aware frequency policy improves power efficiency by ex-ploiting available context headroom, it does not by itself guarantee per-agent performance. To address C1 and further support DG1 , KAIROS adds a lightweight runtime safeguard 
+
+that boosts frequency when observed agent progress falls below the target SLO. Specifically, for each agent 𝑎 , we track its achieved through-put up to epoch 𝑘 :Throughput 𝑘 (𝑎 ) =
+
+Í𝑖 ≤ 𝑗 𝑎 (𝑘 ) Δ𝑑 𝑖 
+
+Í𝑖 ≤ 𝑗 𝑎 (𝑘 ) 𝑡 𝑖 
+
+, (10) where 𝑗 𝑎 (𝑘 ) denotes the latest completed step of agent 𝑎 at epoch 𝑘 .At each control epoch, the controller checks the minimum throughput across all in-process agents: Throughput min  
+
+> 𝑘
+
+= min  
+
+> 𝑎 ∈ A on
+> 𝑘 ∪A pend
+> 𝑘
+
+Throughput 𝑘 (𝑎 ). (11) If Throughput min  
+
+> 𝑘
+
+falls below the SLO target 𝜏 , the con-troller overrides the context-aware policy and sets the fre-quency to the maximum level: 
+
+𝑓 𝑘 ← 𝑓 (𝐿 ) . (12) This mechanism serves as a corrective boost when the system begins to under-perform. It temporarily increases serving capacity to recover throughput. Under normal conditions, the controller continues to benefit from context-aware power savings. Under stress, however, it prioritizes performance targets and reduces the likelihood of SLO violations. 
+
+6.2.4 Thrashing Avoidance via Concurrency Control. 
+
+While frequency control helps manage the power–performance trade-off under changing context pressure, it is not sufficient to keep the system out of the context-thrashing regime. This is challenging because thrashing creates a negative feedback loop: once throughput drops, requests accumulate, resident context grows further, and the resulting memory pressure drives the system even deeper into instability. Consequently, even a short overload can push the instance into a persis-tently inefficient operating region. To address DG2 , C2 and 
+
+C3 , KAIROS employs a concurrency control mechanism that bounds the aggregate context footprint of ongoing agents. Specifically, at each control epoch 𝑘 , the controller en-forces an upper bound on total context usage: 
+
+𝑈 𝑘 ≤ 𝛽𝑈 max , (13) where 𝛽 ∈ ( 0, 1) is a safety margin (e.g., 𝛽 = 0.95 in practice) that reserves headroom for transient decode growth, which is not directly observable before execution. If admitting a new agent would violate this constraint, the agent remains in the pending set. If the constraint is already violated (e.g., due to bursty arrivals), newly arrived agents are deferred to avoid further escalation. To improve utilization without inducing oscillation, the controller uses 
+
+> 7Yichao Yuan, Mosharaf Chowdhury, and Nishil Talati
+
+a second threshold 𝛾 < 𝛽 (e.g., 𝛾 = 0.9) for admission. When pending agents exist and 𝑈 𝑘 < 𝛾𝑈 max , the controller incre-mentally admits agents from Apend  
+
+> 𝑘
+
+in arrival order into Aon 
+
+> 𝑘
+
+until the threshold is approached. This two-threshold de-sign keeps concurrency near the safe capacity boundary, preserves headroom for short-term growth, and maintains operation in the non-thrashing regime while still utilizing available memory efficiently. 
+
+6.2.5 Putting It Altogether. Algorithm 1 in §A.1 sum-marizes the per-instance control loop in KAIROS . At each control epoch, the controller first updates the current context usage, per-agent throughput, and average power, and then selects a baseline frequency using the context-aware policy. It next applies two corrective mechanisms: SLO-based boost-ing to recover performance when throughput falls below target, and thrashing avoidance to regulate admissions and keep context usage within a safe memory region. Together, these steps provide a unified control loop that balances power saving, SLO attainment, and memory stability. 
+
+6.3 KAIROS Context-Aware Multi-Instance Router 
+
+Modern GPUs exhibit a significant difference in power con-sumption between idle and active states, rather than a smooth scaling with workload intensity. In particular, an idle GPU can operate at a very low power state (e.g., 50W on NVIDIA H100), while even a small amount of incoming work can trig-ger a substantial increase in power (e.g., an additional 100W), even under light load and at the lowest frequency setting. This creates a significant gap between idle and lightly-loaded operating regimes, making naive policies like round robin less efficient due to activates all instances. To this end, KAIROS introduces a context-aware router that adapts instance utilization to the input load; its pseudo-code is shown in Algorithm 2 and 3 in §A.2. Under peak demand, the router tends to utilize all available instances, while under lighter load it consolidates agents onto a smaller subset of GPUs and leaves the remaining instances idle to avoid unnecessary power overhead 1. The router achieves this through two components: an assignment policy for ini-tial placement and a reassignment policy for dynamic load balancing. 
+
+Assignment policy. The router uses a threshold-based as-signment policy based on per-instance ongoing agent context usage. When there exist instances whose ongoing context usage remains below a threshold (set to 50% of the maxi-mum context capacity), KAIROS prioritizes consolidation by assigning new agents in increasing instance ID order, effectively filling lower-index instances first. Once all ac-tive instances exceed this threshold, the router switches to 
+
+> 1Even when an instance is idle, it continues running the vLLM server and consumes power close to the GPU’s idle level, which allows it to be brought back into service quickly without incurring a long restart delay [55].
+
+a load-spreading mode and assigns each incoming agent to the instance with the lowest current context usage. 
+
+Reassignment policy. KAIROS maintains, for each agent, a step counter since its last (re)assignment and allows reas-signment only after the counter reaches a fixed threshold (8 conversation turns in our implementation). At that point, the router compares the context usage of the agent’s current instance with that of the active instance having the lowest context usage. If the current instance’s context usage is at least 2 × higher, the agent is reassigned to that lower-usage instance, and its counter is reset. 
+
+7 Evaluation Methodology 
+
+We evaluate KAIROS on an NVIDIA H100 NVL server, where each GPU has a 400 W TDP, paired with an Intel Xeon Plat-inum 8592+ CPU and 2 TB of DRAM. We use vLLM [ 27 ]v0.14.0 to host the LLM serving instance. Our primary model is Qwen3-Coder-30B 2, quantized to FP8, with each vLLM in-stance using a single H100 GPU with 80 GB of memory. We evaluate KAIROS under varying input request arrival rates and SLO targets; Appendices §B.2 and §B.2 provide the ratio-nale behind these choices. We do not use prefill–decode (PD) disaggregated inference, since context pressure and context-driven serving behavior remain fundamental regardless of disaggregation; §B.1 provides a detailed justification. Our evaluation uses three widely used datasets spanning diverse domains. (1) SWE-Bench Verified [ 22 ], a human val-idated benchmark for whether agents can generate test-passing fixes for real GitHub issues; (2) DABStep [14 ], a benchmark of real-world data analysis tasks for evaluating multi-step reasoning over structured and unstructured data; and (3) Terminal-Bench 2.0 [ 37 ], a benchmark of realistic, human-verified command-line tasks for evaluating aegnt’s ability to autonomously complete complex, long-horizon tasks. We use Zeus [ 10 , 64 ] for all the frequency and power related control and measurement. We use the two different agents scaffolding, whose im-plementation in Harbor [ 16 ], for the evaluation: (1) mini-swe-agent [ 61 ]: a lightweight open-source LLM agent that achieves strong performance despite its minimal design. (2) 
+
+terimus-2 [ 37 ]: Harbor’s autonomous reference agent for evaluating LLM capabilities. For a fair evaluation, we first record the requests and tim-ing from a real agent execution, then replay those requests with exactly the same token distribution, relative timing, and agent issuing order. As a result, our evaluation guar-antees identical workload across different runs, eliminating any runtime variations. The evaluation runs over a 3-hour window to capture context dynamics and reflect real-world long-running workloads. 
+
+> 8
+
+KAIROS : Stateful, Context-Aware Power-Efficient Agentic Inference Serving 0.04 0.06 0.08             
+
+> Input Jobs/s
+> 0.0
+> 10.0
+> 20.0
+> 30.0
+> 40.0
+> 50.0
+> P5 Output Throughput (tokens/s)
+> 0.03 0.04 0.05
+> Input Jobs/s
+> 0.015 0.02 0.025
+> Input Jobs/s
+> 0.04 0.06 0.08
+> Input Jobs/s
+> 0.0
+> 100.0
+> 200.0
+> 300.0
+> 400.0
+> Average Power (W)
+> 0.03 0.04 0.05
+> Input Jobs/s
+> 0.015 0.02 0.025
+> Input Jobs/s
+> 0%
+> 20%
+> 40%
+> 60%
+> 80%
+> 100%
+> Agents Above 20 Tokens/s (%)
+> 0.0
+> 5.0
+> 10.0
+> 15.0
+> 20.0
+> Energy per Finished Agent (kJ)
+> swebench-verified
+> mini-swe-agent
+> dabstep
+> mini-swe-agent
+> terminal-bench-2.0
+> terminus-2
+> swebench-verified
+> mini-swe-agent
+> dabstep
+> mini-swe-agent
+> terminal-bench-2.0
+> terminus-2
+> Uncontrolled Fixed Freq (810Mhz) STEER
+
+Figure 7. Comparison of throughput, SLO attainment (20 tokens/s per-agent target), energy, and power across request rates for no frequency control, fixed 810 MHz, and KAIROS . KAIROS reduces power by 27% on average without sacrificing SLO. 
+
+8 Evaluation Results 
+
+This section presents a detailed evaluation of how KAIROS 
+
+design choices impact both performance and power. 
+
+8.1 Single-Instance Agentic Serving Performance and power comparison. Figure 7 compares performance, power, and energy across different agent job-s/s arrival rates, with a per-agent SLO target of 20 tokens/s. We present additional results under varying SLO targets in the following discussion. In this section, we use P5 through-put as the performance metric, defined as the throughput of the slowest 5% of agents; analogous to P95 latency. The study evaluates three baselines: no frequency control, a fixed GPU frequency of 810 MHz, and KAIROS . While both fixed frequency baseline and KAIROS reduce power relative to no control, the fixed-frequency baseline achieves slightly larger power savings at the cost of significantly degraded SLO attainment. In contrast, KAIROS strikes a balance by achieving an average power saving of 27% (up to 39.8%) while meeting the per-agent SLO target of 20 tokens/second. This result underscores the effectiveness of a dynamic solu-tion over a static approach. While statically reducing GPU frequency can lower power, it is insufficient on its own be-cause it often causes significant SLO violations. Even from a power-only standpoint, it is impractical for deployment since it requires expensive per-workload grid search and frequency tuning for finding an optimal operating condi-tions, which keeps changing rapidly under a highly dy-namic workload (§3). Instead, KAIROS achieves a careful balance between power reduction and performance, main-taining SLO attainment while reducing power. This bal-ance comes from dynamically adapting GPU frequency and concurrency based on context pressure and agent progress through context-aware frequency control, SLO-driven boost-ing, and thrashing-aware concurrency control. 
+
+Effectiveness of SLO boosting with different targets. 
+
+Figure 8 shows per-agent P5 throughput (left) and average power (right) under different SLO targets: 20, 35, and 45 to-kens/s at a fixed request arrival rate of 0.03 agent jobs/s. This 
+
+> 2
+
+We additionally use Ministral-3-14B for model diversity. No Freq.  
+
+> Ctrl.
+> KAIROS
+> SLO 20
+> KAIROS
+> SLO 35
+> KAIROS
+> SLO 45
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> Per Agent P5 Throughput
+> (tokens/s)  45.1
+> 26.1
+> 35.4
+> 41.3
+> No Freq.
+> Ctrl.
+> KAIROS
+> SLO 20
+> KAIROS
+> SLO 35
+> KAIROS
+> SLO 45
+> 0
+> 100
+> 200
+> 300
+> 400
+> Average Power (W)  333.2
+> 223.6 255.4
+> 312.1
+
+Figure 8. Effectiveness of SLO boosting. P5 throughput and average power of KAIROS with different SLO targets of 20, 35, and 45 tokens/s. This experiment runs mini-swe-agent on DABStep with an arrival rate of 0.03 jobs/s. data is collected by running mini-swe-bench with DABstep. It compares a no frequency control baseline with KAIROS 
+
+configured for different SLO targets. Three key observations emerge. First , KAIROS adapts effectively to different SLO targets, meeting the required throughput while significantly reducing power. This demonstrates the effectiveness of its context-aware frequency control and SLO-driven boosting mechanisms of KAIROS .
+
+Second , tighter SLO targets require higher GPU frequen-cies, which reduces power savings: as the SLO increases from 20 to 45 tokens/s, power savings drop from 32.9% to 6.3% rel-ative to the baseline. Appendix §A.5 further shows per-agent throughput distribution. Third , the figure reveals a hardware limit, where 45 tokens/s represents the maximum achiev-able per-agent SLO for this setup. Pushing beyond this point would significantly degrade SLO attainment. This indicates a tipping point governed by hardware capacity, suggesting that further improvements in SLO would require additional compute resources rather than better control alone. Figure 9 provides a deeper look into KAIROS ’s runtime behavior under a request arrival rate of 0.03 jobs/s 3 and an SLO target of 35 tokens/s by showing instantaneous power, GPU frequency, and context size over time. As context size 
+
+> 3
+
+Due to space limitation, we carefully select representative request rates and SLO targets to demonstrate the effectiveness of different techniques proposed in KAIROS in Figures 9, 10, and 11. 9Yichao Yuan, Mosharaf Chowdhury, and Nishil Talati 0        
+
+> 250k
+> Context
+> (tokens)  (a)
+> 0
+> 2000
+> Freq (MHz)
+> Max Freq.
+> (b)
+> 020 40 60 80 100 120 140 160
+> Time From Start (minutes)
+> 200
+> 400
+> Power (W)  (c)
+
+Figure 9. Change in instantaneous power, GPU frequency, and context size of KAIROS with respect to time for mini-swe-agent running on DABStep with arrival rate of 0.03 jobs/s and SLO target of 35 tokens/s. No Freq.   
+
+> Ctrl.
+> KAIROS
+> No Thrash
+> Avoid.
+> KAIROS
+> Thrash
+> Avoid.
+> 0
+> 10
+> 20
+> 30
+> Per Agent P5 Throughput
+> (tokens/s)
+> 28.6
+> 2.3
+> 19.9
+> No Freq.
+> Ctrl.
+> KAIROS
+> No Thrash
+> Avoid.
+> KAIROS
+> Thrash
+> Avoid.
+> 0.000
+> 0.020
+> 0.040
+> 0.060
+> 0.080
+> System Job Throughput
+> (jobs/s)  0.051 0.046 0.051
+
+Figure 10. Effectiveness of thrashing avoidance . P5 throughput and overall job throughput for mini-swe-agent on DABStep with request rate of 0.05 jobs/s and an SLO tar-get of 20 tokens/s. (subfigure (a)) grows, KAIROS gradually increases GPU fre-quency (subfigure (b)) to accelerate agent progress and pre-vent excessive accumulation, while reducing frequency when context pressure subsides to save power (subfigure (c)). This adaptive behavior is reflected in the corresponding changes in power consumption, which closely track frequency adjust-ments. When the system detects potential SLO violations, it temporarily boosts the GPU to maximum frequency (shown by blue points) to recover performance. Overall, the figure illustrates how KAIROS dynamically responds to changing workload conditions to balance power savings and SLO at-tainment using context as a first-class control signal. 
+
+Effectiveness of thrashing avoidance (concurrency con-trol). Figure 10 evaluates the effectiveness of the thrashing avoidance mechanism under a higher load (0.05 jobs/s) with an SLO target of 20 tokens/s using mini-swe-agent on DAB-Step. It compares three configurations: no frequency control, 
+
+KAIROS without thrashing avoidance, and KAIROS with thrashing avoidance. While the no-control baseline avoids thrashing by running at high frequency, KAIROS without thrashing avoidance reduces frequency to save power, push-ing the system into a thrashing regime. This leads to a severe 0         
+
+> 1.0M
+> Context
+> (tokens)
+> Context Capacity
+> (a) Context Usage: KAIROS Without Thrashing Avoidance
+> 0.00
+> 0.03
+> 0.05
+> Jobs/s
+> (b) Job Throughput: KAIROS Without Thrashing Avoidance
+> 0
+> 10
+> Agents  (c) Pending Agent Count: KAIROS With Thrashing Avoidance
+> 0
+> 1.0M
+> Context
+> (tokens)
+> Context Capacity
+> (d) Context Usage: KAIROS With Thrashing Avoidance
+> 020 40 60 80 100 120 140 160 180
+> Time From Start (minutes)
+> 0.00
+> 0.03
+> 0.05
+> Jobs/s
+> (e) Job Throughput: KAIROS With Thrashing Avoidance
+
+Figure 11. Context size, agent processing throughput and pending agents with and without employing thrashing avoid-ance technique in KAIROS . This experiment runs mini-swe-agent with DABStep with a request rate of 0.05 jobs/s and a target SLO of 20 tokens/s. drop in per-agent P5 throughput (left figure) to 2.3 tokens/s and overall throughput (right figure) of 0.046 jobs/s, failing to keep up with the arrival rate. In contrast, enabling thrash-ing avoidance mechanism allows KAIROS to maintain P5 throughput close to the 20 tokens/s target and sustain system throughput at 0.05 jobs/s, demonstrating stable and efficient operation. Figure 11 provides a time-series view explaining this be-havior. Without thrashing avoidance, context usage (sub-figure (a)) exceeds capacity and remains high, pushing the system into a persistent thrashing regime where throughput drops (subfigure (b)) and queued agents accumulate (sub-figure (c)), making recovery difficult. This leads to unstable operation as the system cannot drain incoming work fast enough. With thrashing avoidance enabled, KAIROS pre-vents this buildup by controlling context growth (subfigure (d)) and, when necessary, triggering corrective frequency boosts to reduce accumulated context. As a result, context stays within capacity, job throughput remains stable (subfig-ure (e)), and avoids queue buildup. These results highlight how thrashing avoidance and SLO-aware boosting work to-gether to maintain system stability under high load. 
+
+Effectiveness across multiple models. Table 1 shows that the benefits of KAIROS generalize across models, both run-ning SWE-Bench Verified. On Qwen3-Coder-30B , KAIROS 
+
+reduces power by 34.5%, and on Ministral-3-14B , it reduces power by 28.9%. These results indicate that the benefit of 
+
+10 KAIROS : Stateful, Context-Aware Power-Efficient Agentic Inference Serving 
+
+Table 1. Effectiveness of KAIROS across multiple models.             
+
+> Qwen3-Coder-30B (0.06 jobs/s) Ministral-3-14B (0.06 jobs/s) No Freq. Control KAIROS No Freq. Control KAIROS
+> Power (W) 367.9 240.9 370.8 263.8 No Freq Control
+> 4x single instance
+> Round Robin
+> KAIROS
+> 0
+> 250
+> 500
+> 750
+> 1000
+> 1250
+> 1500
+> Average Power (W)  1279.5
+> 823.5 784.8
+> 686.5
+> Average Total Power
+> INS. 1
+> 25.0%
+> INS. 2
+> 28.1%
+> INS. 3
+> 22.3%
+> INS. 4
+> 24.5%
+> Power Breakdown
+> Round Robin Routing
+> Total Power = 784.8 W
+> INS. 1
+> 39.7%
+> INS. 2
+> 30.8%
+> INS. 3 20.7%
+> INS. 4
+> 8.7%
+> Power Breakdown
+> Context-Aware Routing
+> Total Power = 686.5 W
+> (a) (b) (c)
+
+Figure 12. (a) Power comparison across four serving in-stances for no frequency control, a replicated single-instance baseline, a round-robin routing policy, and KAIROS with context-aware routing. (b,c) Per-instance power breakdown for round robin and KAIROS routing. 
+
+KAIROS is not tied to a single model, but is broadly effective across different LLMs. 
+
+8.2 Multi-Instance Agentic Serving 
+
+Figure 12 demonstrates the effectiveness of KAIROS under multi-instance scaling at an input rate of 0.16 jobs/s. This experiment runs mini-swe-agent using SWE-Bench Veri-fied dataset. Compared to the baseline without frequency control, KAIROS with round-robin routing reduces aver-age power from 1279.5 W to 784.8 W, while its context-aware routing further lowers it to 686.5 W, achieving a total power reduction of 46.3%. The key difference lies in how work is distributed across instances: round-robin assigns load evenly, preventing GPUs from entering low-power idle states, whereas KAIROS ’s context-aware routing consoli-dates work onto fewer GPUs when possible. This consolida-tion avoids the significant power overhead of lightly-loaded GPUs and enables other instances to remain near idle power. As shown in Figures 12(b,c), this results in a more efficient power distribution across instances, highlighting the benefit of coordinated routing and control. In addition, KAIROS ’s context-aware router achieves per agent p5 throughput of 26.9 tokens/s, surpassing the 25.4 tokens/s when using round robin policy. 
+
+9 Related Work 
+
+To the best of our knowledge, KAIROS is the first work to optimize power for agentic inference serving . Below, we compare KAIROS with closely related works. 
+
+Power optimization in LLM serving. Prior work on power-efficient LLM serving mainly falls into two categories: DVFS [ 5 , 23 , 32 , 45 , 52 , 55 , 57 , 66 ], which adjusts GPU fre-quency online using runtime signals such as slack, batch behavior, KV-cache growth, or phase-specific latency predic-tions, and system-level scheduling [ 30 , 54 , 59 ], which reduces power through hardware-aware placement and resource al-location. These works target mostly stateless LLM serving, where requests are treated as independent. In contrast, agen-tic serving is fundamentally stateful : multi-turn conver-sations continuously grow and revisit context, so power optimization must account for the evolution of that state over time, which is the key focus of our work. 
+
+Energy/power characterization. Several recent works [ 3 ,18 , 36 , 40 , 41 , 53 , 58 , 60 ] characterize, model, or benchmark the energy and power behavior of LLM inference rather than directly optimizing it. They study inference energy trade-offs and control knobs, build workload-based energy/run-time models, profile fine-grained power use, quantify energy and carbon emissions, and propose benchmarking or report-ing frameworks such as energy-per-token. A closely related work [ 25 ] on agents characterizes the infrastructure cost of dynamic reasoning and shows that agentic workflows intro-duce substantially higher resource and energy demands than conventional single-shot inference. In contrast, our work takes a step beyond characterization: we design a runtime mechanism that uses context growth as a control signal to ac-tively reduce energy while maintaining safe, non-thrashing performance for agentic serving. 
+
+Agentic inference and stateful LLM serving. Recent systems optimize agentic workflows through workflow-aware runtimes and program semantics [ 7 , 24 , 31 , 46 –48 ], while oth-ers address multi-round behavior through cache retention and adaptive prefill/decode placement [ 17 , 29 ]. In parallel, LLM serving work improves memory efficiency through KV-cache management, paging, offloading, scheduling, and dis-aggregation [ 2, 26 , 27 , 42 , 44 , 68 ]. Together, these works show stateful and memory-bound workload behavior, but focus mainly on performance. In contrast, our work targets power optimization in agentic workloads and explicitly accounts for the feedback loop between slower execution, increased agent lifetime, and growing context footprint, using this coupling to drive global control decisions. 
+
+Autoscaling and resource management for AI serving. 
+
+Prior work on autoscaling and datacenter resource manage-ment provisions resources using signals such as queue length, utilization, token rate, and SLO violations [ 12 , 13 , 15 , 21 , 28 ,33 , 43 , 51 ]. These methods match capacity to demand, but do not account for the stateful, highly dynamic nature of agentic workloads. In our setting, scaling must also control multi-turn context growth and keep per-instance demand within a safe non-thrashing regime. 
+
+11 Yichao Yuan, Mosharaf Chowdhury, and Nishil Talati 
+
+10 Conclusion 
+
+This paper showed that agentic AI serving is fundamentally different from single-turn LLM serving due to its long-lived, dynamically evolving context and the emergence of a thrash-ing regime under power scaling. We found that reducing GPU frequency can unexpectedly worsen both performance and power efficiency by increasing context residency and trigger-ing memory instability. Based on these insights, this paper designed KAIROS , a dynamic system that jointly manages frequency, concurrency, and routing using context as a first-class signal . Our results demonstrated that KAIROS enables significant average power savings of 27% while maintaining performance targets, highlighting the need to rethink power reduction for stateful agentic AI serving. This work opens the door to a broader class of context-aware, power-efficient runtimes for agentic AI. It further suggests that rethinking serving around state, memory stability, and dynamic control will be essential as agentic workloads continue to scale. 
+
+References 
+
+[1] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav S. Gulavani, Alexey Tumanov, and Ramachandran Ramjee. 2024. Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve. In Proceedings of the 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI) . USENIX Association. [2] Amey Agrawal, Haoran Qiu, Junda Chen, Íñigo Goiri, Chaojie Zhang, Rayyan Shahid, Ramachandran Ramjee, Alexey Tumanov, and Esha Choukse. 2024. No Request Left Behind: Tackling Heterogene-ity in Long-Context LLM Inference with Medha. arXiv preprint arXiv:2409.17264 (2024). doi: 10.48550/arXiv.2409.17264 
+
+[3] Mauricio Fadel Argerich and Marta Patiño-Martínez. 2024. Measur-ing and Improving the Energy Efficiency of Large Language Models Inference. IEEE Access 12 (2024), 80187–80200. doi: 10.1109/ACCESS. 2024.3409745 
+
+[4] Zain Asgar, Michelle Nguyen, and Sachin Katti. 2025. Efficient and Scalable Agentic AI with Heterogeneous Systems. arXiv preprint arXiv:2507.19635 (2025). doi: 10.48550/arXiv.2507.19635 
+
+[5] Omar Basit, Yunzhao Liu, Z. Jonny Kong, and Y. Charlie Hu. 2026. BiScale: Energy-Efficient Disaggregated LLM Serving via Phase-Aware Placement and DVFS. arXiv preprint arXiv:2602.18755 (2026). doi: 10. 48550/arXiv.2602.18755 
+
+[6] Belfer Center for Science and International Affairs. 2025. AI Data Cen-ters and the U.S. Electric Grid. https://www.belfercenter.org/research-analysis/ai-data-centers-us-electric-grid . Accessed: 2026-04-14. [7] Gohar Irfan Chaudhry, Esha Choukse, Haoran Qiu, Íñigo Goiri, Ro-drigo Fonseca, Adam Belay, and Ricardo Bianchini. 2025. Murakkab: Resource-Efficient Agentic Workflow Orchestration in Cloud Plat-forms. arXiv preprint arXiv:2508.18298 (2025). doi: 10.48550/arXiv.2508. 18298 
+
+[8] Yihua Cheng, Yuhan Liu, Jiayi Yao, Yuwei An, Xiaokun Chen, Shaoting Feng, Yuyang Huang, Samuel Shen, Kuntai Du, and Junchen Jiang. 2025. LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference. arXiv preprint arXiv:2510.09665 (2025). doi: 10.48550/ arXiv.2510.09665 
+
+[9] Neil Chowdhury, James Aung, Chan Jun Shern, Oliver Jaffe, Dane Sherburn, Giulio Starace, Evan Mays, Rachel Dias, Marwan Aljubeh, Mia Glaese, Carlos E. Jimenez, John Yang, Leyton Ho, Tejal Patward-han, Kevin Liu, and Aleksander Madry. 2024. Introducing SWE-bench Verified. https://openai.com/index/introducing-swe-bench-verified/ 
+
+[10] Jae-Won Chung, Jeff J. Ma, Ruofan Wu, Jiachen Liu, Oh Jun Kweon, Yuxuan Xia, Zhiyu Wu, and Mosharaf Chowdhury. 2025. The ML.ENERGY Benchmark: Toward Automated Inference Energy Mea-surement and Optimization. arXiv:2505.06371 [cs.LG] https://arxiv. org/abs/2505.06371 
+
+[11] Jae-Won Chung, Ruofan Wu, Jeff J. Ma, and Mosharaf Chowdhury. 2026. Where Do the Joules Go? Diagnosing Inference Energy Con-sumption. arXiv:2601.22076 [cs.LG] https://arxiv.org/abs/2601.22076 
+
+[12] Daniel Crankshaw, Gur-Eyal Sela, Corey Zumar, Xiangxi Mo, Joseph E. Gonzalez, Ion Stoica, and Alexey Tumanov. 2020. InferLine: Latency-Aware Provisioning and Scaling for Prediction Serving Pipelines. In 
+
+Proceedings of the 11th ACM Symposium on Cloud Computing (SoCC ’20) . 477–491. doi: 10.1145/3419111.3421285 
+
+[13] Christina Delimitrou and Christos Kozyrakis. 2014. Quasar: Resource-Efficient and QoS-Aware Cluster Management. In Proceedings of the 19th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS ’14) . doi: 10.1145/2541940. 2541941 
+
+[14] Alex Egg, Martin Iglesias Goyanes, Friso Kingma, Andreu Mora, Le-andro von Werra, and Thomas Wolf. 2025. DABstep: Data Agent Benchmark for Multi-step Reasoning. arXiv preprint arXiv:2506.23719 
+
+(2025). doi: 10.48550/arXiv.2506.23719 
+
+[15] Ori Hadary, Luke Marshall, Ishai Menache, Abhisek Pan, Esaias E. Greeff, David Dion, Star Dorminey, Shailesh Joshi, Yang Chen, Mark Russinovich, and Thomas Moscibroda. 2020. Protean: VM Alloca-tion Service at Scale. In 14th USENIX Symposium on Operating Sys-tems Design and Implementation (OSDI 20) . https://www.usenix.org/ conference/osdi20/presentation/hadary 
+
+[16] Harbor Framework Team. 2026. Harbor: A framework for evaluating and optimizing agents and models in container environments . https: //github.com/harbor-framework/harbor 
+
+[17] Wenhao He, Youhe Jiang, Penghao Zhao, Quanqing Xu, Eiko Yoneki, Bin Cui, and Fangcheng Fu. 2026. Efficient Multi-round LLM Inference over Disaggregated Serving. arXiv preprint arXiv:2602.14516 (2026). doi: 10.48550/arXiv.2602.14516 
+
+[18] Erik Johannes Husom, Arda Goknil, Lwin Khin Shar, and Sagar Sen. 2024. The Price of Prompting: Profiling Energy Use in Large Language Models Inference. arXiv preprint arXiv:2407.16893 (2024). doi: 10.48550/ arXiv.2407.16893 
+
+[19] International Energy Agency. 2025. Energy and AI . Technical Report. International Energy Agency. https://www.iea.org/reports/energy-and-ai 
+
+[20] International Energy Agency. 2026. Electricity 2026: Grids . Technical Report. International Energy Agency. https://www.iea.org/reports/ electricity-2026/grids 
+
+[21] Shashwat Jaiswal, Kunal Jain, Yogesh Simmhan, Anjaly Parayil, Ankur Mallick, Rujia Wang, Renee St. Amant, Chetan Bansal, Victor Rühle, Anoop Kulkarni, Steve Kofsky, and Saravan Rajmohan. 2025. Serving Models, Fast and Slow: Optimizing Heterogeneous LLM Inferencing Workloads at Scale. arXiv preprint arXiv:2502.14617 (2025). doi: 10. 48550/arXiv.2502.14617 
+
+[22] Carlos E. Jimenez, John Yang, Alexander Wettig, Kilian Lieret, Shunyu Yao, Kexin Pei, Ofir Press, and Karthik Narasimhan. 2024. SWE-bench: Can Language Models Resolve Real-World GitHub Issues?. In The Twelfth International Conference on Learning Representations (ICLR) .
+
+https://openreview.net/forum?id=VTF8yNQM66 
+
+[23] Andreas Kosmas Kakolyris, Dimosthenis Masouros, Petros Vavarout-sos, Sotirios Xydis, and Dimitrios Soudris. 2024. SLO-aware GPU Frequency Scaling for Energy Efficient LLM Inference Serving. arXiv preprint arXiv:2408.05235 (2024). doi: 10.48550/arXiv.2408.05235 
+
+[24] Hao Kang, Ziyang Li, Xinyu Yang, Weili Xu, Yinfang Chen, Junxiong Wang, Beidi Chen, Tushar Krishna, Chenfeng Xu, and Simran Arora. 2026. ThunderAgent: A Simple, Fast and Program-Aware Agentic Inference System. arXiv preprint arXiv:2602.13692 (2026). doi: 10. 
+
+12 KAIROS : Stateful, Context-Aware Power-Efficient Agentic Inference Serving 48550/arXiv.2602.13692 
+
+[25] Jiin Kim, Byeongjun Shin, Jinha Chung, and Minsoo Rhu. 2026. The Cost of Dynamic Reasoning: Demystifying AI Agents and Test-Time Scaling from an AI Infrastructure Perspective. In 2026 IEEE Interna-tional Symposium on High-Performance Computer Architecture (HPCA) .1–16. [26] Kihyun Kim, Jinwoo Kim, Hyunsun Chung, Myung-Hoon Cha, Hong-Yeon Kim, and Youngjae Kim. 2025. Cost-Efficient LLM Serving in the Cloud: VM Selection with KV Cache Offloading. arXiv preprint arXiv:2504.11816 (2025). doi: 10.48550/arXiv.2504.11816 
+
+[27] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. In Proceedings of the 29th Symposium on Operating Systems Principles (SOSP ’23) . 611–626. doi: 10.1145/3600006. 3613165 
+
+[28] Ruiqi Lai, Hongrui Liu, Chengzhi Lu, Zonghao Liu, Siyu Cao, Siyang Shao, Yixin Zhang, Luo Mai, and Dmitrii Ustiugov. 2025. TokenScale: Timely and Accurate Autoscaling for Disaggregated LLM Serving with Token Velocity. arXiv preprint arXiv:2512.03416 (2025). doi: 10.48550/ arXiv.2512.03416 
+
+[29] Hanchen Li, Qiuyang Mang, Runyuan He, Qizheng Zhang, Huanzhi Mao, Xiaokun Chen, Hangrui Zhou, Alvin Cheung, Joseph Gonzalez, and Ion Stoica. 2025. Continuum: Efficient and Robust Multi-Turn LLM Agent Scheduling with KV Cache Time-to-Live. arXiv preprint arXiv:2511.02230 (2025). doi: 10.48550/arXiv.2511.02230 
+
+[30] Yueying Li, Zhanqiu Hu, Esha Choukse, Rodrigo Fonseca, G. Edward Suh, and Udit Gupta. 2025. EcoServe: Designing Carbon-Aware AI Inference Systems. arXiv preprint arXiv:2502.05043 (2025). doi: 10. 48550/arXiv.2502.05043 
+
+[31] Chaofan Lin, Zhenhua Han, Chengruidong Zhang, Yuqing Yang, Fan Yang, Chen Chen, and Lili Qiu. 2024. Parrot: Efficient Serving of LLM-based Applications with Semantic Variable. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . 929–945. 
+
+https://www.usenix.org/conference/osdi24/presentation/lin-chaofan 
+
+[32] Qunyou Liu, Darong Huang, Marina Zapater, and David Atienza. 2026. GreenLLM: SLO-Aware Dynamic Frequency Scaling for Energy-Efficient LLM Serving. In Proceedings of 63rd ACM/IEEE Design Au-tomation Conference [i.e. The Chips to Systems Conference] (DAC ’26) .ACM. https://infoscience.epfl.ch/handle/20.500.14299/261894 
+
+[33] David Lo, Liqun Cheng, Rama Govindaraju, Parthasarathy Ran-ganathan, and Christos Kozyrakis. 2015. Heracles: Improving Resource Efficiency at Scale. In Proceedings of the 42nd Annual International Symposium on Computer Architecture (ISCA ’15) . doi: 10.1145/2749469. 2749475 
+
+[34] Alexandra Sasha Luccioni, Yacine Jernite, and Emma Strubell. 2024. Power Hungry Processing: Watts Driving the Cost of AI Deployment?. In Proceedings of the 2024 ACM Conference on Fairness, Accountability, and Transparency (FAccT ’24) . Association for Computing Machinery, 85–99. doi: 10.1145/3630106.3658542 
+
+[35] Michael Luo, Xiaoxiang Shi, Colin Cai, Tianjun Zhang, Justin Wong, Yichuan Wang, Chi Wang, Yanping Huang, Zhifeng Chen, Joseph E. Gonzalez, and Ion Stoica. 2025. Autellix: An Efficient Serving Engine for LLM Agents as General Programs. arXiv preprint arXiv:2502.13965 
+
+(2025). doi: 10.48550/arXiv.2502.13965 
+
+[36] Paul Joe Maliakel, Shashikant Ilager, and Ivona Brandic. 2025. Charac-terizing LLM Inference Energy-Performance Tradeoffs across Work-loads and GPU Scaling. arXiv preprint arXiv:2501.08219 (2025). doi: 10.48550/arXiv.2501.08219 
+
+[37] Mike A. Merrill, Alexander G. Shaw, Nicholas Carlini, Boxuan Li, Harsh Raj, Ivan Bercovich, Lin Shi, Jeong Yeon Shin, Thomas Wal-she, E. Kelly Buchanan, Junhong Shen, Guanghao Ye, Haowei Lin, Jason Poulos, Maoyu Wang, Marianna Nezhurina, Jenia Jitsev, Di Lu, Orfeas Menis Mastromichalakis, Zhiwei Xu, Zizhao Chen, Yue Liu, Robert Zhang, Leon Liangyu Chen, Anurag Kashyap, Jan-Lucas Uslu, Jeffrey Li, Jianbo Wu, Minghao Yan, Song Bian, Vedang Sharma, Ke Sun, Steven Dillmann, Akshay Anand, Andrew Lanpouthakoun, Bardia Koopah, Changran Hu, Etash Guha, Gabriel H. S. Dreiman, Jiacheng Zhu, Karl Krauth, Li Zhong, Niklas Muennighoff, Robert Amanfu, Shangyin Tan, Shreyas Pimpalgaonkar, Tushar Aggarwal, Xiangning Lin, Xin Lan, Xuandong Zhao, Yiqing Liang, Yuanli Wang, Zilong Wang, Changzhi Zhou, David Heineman, Hange Liu, Harsh Trivedi, John Yang, Junhong Lin, Manish Shetty, Michael Yang, Nabil Omi, Negin Raoof, Shanda Li, Terry Yue Zhuo, Wuwei Lin, Yiwei Dai, Yuxin Wang, Wenhao Chai, Shang Zhou, Dariush Wahdany, Ziyu She, Jiaming Hu, Zhikang Dong, Yuxuan Zhu, Sasha Cui, Ah-son Saiyed, Arinbjörn Kolbeinsson, Jesse Hu, Christopher Michael Rytting, Ryan Marten, Yixin Wang, Alex Dimakis, Andy Konwinski, and Ludwig Schmidt. 2026. Terminal-Bench: Benchmarking Agents on Hard, Realistic Tasks in Command Line Interfaces. arXiv preprint arXiv:2601.11868 (2026). [38] MLCommons. 2026. MLPerf Inference: Datacenter. https:// mlcommons.org/benchmarks/inference-datacenter/ . Accessed: 2026-04-09. [39] Rohit Mural, Ryan Rafaty, Vennila Varadarajan, and Yitian Xu. 2026. 
+
+AI, Data Centers, and the U.S. Electric Grid . Technical Report. Belfer Center for Science and International Affairs, Harvard Kennedy School. https://www.belfercenter.org/sites/default/files/2026-02/ Mural%20et%20al_AI%20Data%20Centers%20Grid_20260206.pdf 
+
+[40] Chenxu Niu, Wei Zhang, Jie Li, Yongjian Zhao, Tongyang Wang, Xi Wang, and Yong Chen. 2026. TokenPowerBench: Benchmarking the Power Consumption of LLM Inference. In Proceedings of the AAAI Conference on Artificial Intelligence , Vol. 40. 32582–32590. doi: 10.1609/ aaai.v40i38.40535 
+
+[41] Miray Özcan, Philipp Wiesner, Philipp Weiß, and Odej Kao. 2025. Quantifying the Energy Consumption and Carbon Emissions of LLM Inference via Simulations. arXiv preprint arXiv:2507.11417 (2025). doi: 10.48550/arXiv.2507.11417 
+
+[42] Pratyush Patel, Esha Choukse, Chaojie Zhang, Aashaka Shah, Íñigo Goiri, Saeed Maleki, and Ricardo Bianchini. 2024. Splitwise: Efficient Generative LLM Inference Using Phase Splitting. In 2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) .doi: 10.1109/ISCA59077.2024.00019 
+
+[43] Archit Patke, Dhemath Reddy, Saurabh Jha, Chandra Narayanaswami, Zbigniew Kalbarczyk, and Ravishankar Iyer. 2025. Hierarchical Au-toscaling for Large Language Model Serving with Chiron. arXiv preprint arXiv:2501.08090 (2025). doi: 10.48550/arXiv.2501.08090 
+
+[44] Ramya Prabhu, Ajay Nayak, Jayashree Mohan, Ramachandran Ram-jee, and Ashish Panwar. 2025. vAttention: Dynamic Memory Man-agement for Serving LLMs without PagedAttention. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS ’25) .doi: 10.1145/3669940.3707256 
+
+[45] Haoran Qiu, Weichao Mao, Archit Patke, Shengkun Cui, Saurabh Jha, Chen Wang, Hubertus Franke, Zbigniew Kalbarczyk, Tamer Başar, and Ravishankar K. Iyer. 2024. Power-aware Deep Learning Model Serving with 𝜇 -Serve. In 2024 USENIX Annual Technical Conference (USENIX ATC 24) . 75–93. https://www.usenix.org/conference/atc24/ presentation/qiu 
+
+[46] Ritik Raj, Hong Wang, and Tushar Krishna. 2025. A CPU-Centric Perspective on Agentic AI. arXiv preprint arXiv:2511.00739 (2025). doi: 10.48550/arXiv.2511.00739 
+
+[47] Yeonju Ro, Haoran Qiu, Íñigo Goiri, Rodrigo Fonseca, Ricardo Bian-chini, Aditya Akella, Zhangyang Wang, Mattan Erez, and Esha Choukse. 2025. Sherlock: Reliable and Efficient Agentic Workflow Execution. arXiv preprint arXiv:2511.00330 (2025). doi: 10.48550/arXiv. 2511.00330 
+
+13 Yichao Yuan, Mosharaf Chowdhury, and Nishil Talati 
+
+[48] Keshav Santhanam, Deepti Raghavan, Muhammad Shahir Rahman, Thejas Venkatesh, Neha Kunjal, Pratiksha Thaker, Philip Levis, and Matei Zaharia. 2024. ALTO: An Efficient Network Orchestrator for Compound AI Systems. In Proceedings of the 4th Workshop on Machine Learning and Systems (EuroMLSys ’24) . 117–125. doi: 10.1145/3642970. 3655844 
+
+[49] Noah Shinn, Federico Cassano, Bailin Labash, Ashwin Gopinath, Karthik Narasimhan, and Shunyu Yao. 2023. Reflexion: Lan-guage Agents with Verbal Reinforcement Learning. In Advances in Neural Information Processing Systems (NeurIPS) , Vol. 36. 
+
+https://proceedings.neurips.cc/paper_files/paper/2023/hash/ 1b44b878bb782e6954cd888628510e90-Abstract-Conference.html 
+
+[50] Mohit Shridhar, Xingdi Yuan, Marc-Alexandre Côté, Yonatan Bisk, Adam Trischler, and Matthew Hausknecht. 2021. ALFWorld: Aligning Text and Embodied Environments for Interactive Learning. In The Ninth International Conference on Learning Representations (ICLR) .
+
+https://arxiv.org/abs/2010.03768 
+
+[51] Gursimran Singh, Timothy Yu, Haley Li, Cheng Chen, Hanieh Sadri, Qintao Zhang, Yu Zhang, Ying Xiong, Yong Zhang, and Zhenan Fan. 2025. ElasticMoE: An Efficient Auto Scaling Method for Mixture-of-Experts Models. arXiv preprint arXiv:2510.02613 (2025). doi: 10.48550/ arXiv.2510.02613 
+
+[52] Jeffrey Spaan, Kuan-Hsun Chen, and Ana-Lucia Varbanescu. 2026. Reducing Compute Waste in LLMs through Kernel-Level DVFS. arXiv preprint arXiv:2601.08539 (2026). doi: 10.48550/arXiv.2601.08539 
+
+[53] Jovan Stojkovic, Esha Choukse, Chaojie Zhang, Inigo Goiri, and Josep Torrellas. 2024. Towards Greener LLMs: Bringing Energy-Efficiency to the Forefront of LLM Inference. arXiv preprint arXiv:2403.20306 
+
+(2024). doi: 10.48550/arXiv.2403.20306 
+
+[54] Jovan Stojkovic, Chaojie Zhang, Íñigo Goiri, Esha Choukse, Haoran Qiu, Rodrigo Fonseca, Josep Torrellas, and Ricardo Bianchini. 2025. TAPAS: Thermal- and Power-Aware Scheduling for LLM Inference in Cloud Platforms. In Proceedings of the 30th ACM International Confer-ence on Architectural Support for Programming Languages and Operat-ing Systems (ASPLOS ’25) . doi: 10.1145/3676641.3716025 
+
+[55] Jovan Stojkovic, Chaojie Zhang, Íñigo Goiri, Josep Torrellas, and Esha Choukse. 2025. DynamoLLM: Designing LLM Inference Clusters for Performance and Energy Efficiency. In Proceedings of the 2025 IEEE International Symposium on High-Performance Computer Architecture (HPCA) . IEEE Computer Society, 1348–1362. doi: 10.1109/HPCA61900. 2025.00102 
+
+[56] Noppanat Wadlom, Junyi Shen, and Yao Lu. 2026. Efficient LLM Serving for Agentic Workflows: A Data Systems Perspective. arXiv preprint arXiv:2603.16104 (2026). doi: 10.48550/arXiv.2603.16104 
+
+[57] Zibo Wang, Yijia Zhang, Fuchun Wei, Bingqiang Wang, Yanlin Liu, Zhiheng Hu, Jingyi Zhang, Xiaoxin Xu, Jian He, Xiaoliang Wang, Wanchun Dou, Guihai Chen, and Chen Tian. 2025. Using Analyti-cal Performance/Power Model and Fine-Grained DVFS to Enhance AI Accelerator Energy Efficiency. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1 (Rotterdam, Netherlands) 
+
+(ASPLOS ’25) . Association for Computing Machinery, New York, NY, USA, 1118–1132. doi: 10.1145/3669940.3707231 
+
+[58] Patrick Wilhelm, Thorsten Wittkopp, and Odej Kao. 2025. Beyond Test-Time Compute Strategies: Advocating Energy-per-Token in LLM Inference. In Proceedings of the 5th Workshop on Machine Learning and Systems (EuroMLSys ’25) . Association for Computing Machinery, Rotterdam, Netherlands, 1–8. doi: 10.1145/3721146.3721953 
+
+[59] Grant Wilkins, Srinivasan Keshav, and Richard Mortier. 2024. Hybrid Heterogeneous Clusters Can Lower the Energy Consumption of LLM Inference Workloads. In Proceedings of the 15th ACM International Conference on Future and Sustainable Energy Systems (Singapore, Sin-gapore) (e-Energy ’24) . Association for Computing Machinery, New York, NY, USA, 506–513. doi: 10.1145/3632775.3662830 
+
+[60] Grant Wilkins, Srinivasan Keshav, and Richard Mortier. 2024. Offline Energy-Optimal LLM Serving: Workload-Based Energy Models for LLM Inference on Heterogeneous Systems. In Proceedings of the 3rd ACM HotCarbon Workshop on Sustainable Computer Systems (HotCar-bon ’24) . Association for Computing Machinery, Santa Cruz, CA, USA, 1–7. doi: 10.1145/3727200.3727217 
+
+[61] John Yang, Carlos E Jimenez, Alexander Wettig, Kilian Lieret, Shunyu Yao, Karthik R Narasimhan, and Ofir Press. 2024. SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering. In 
+
+The Thirty-eighth Annual Conference on Neural Information Processing Systems . https://arxiv.org/abs/2405.15793 
+
+[62] Shunyu Yao, Howard Chen, John Yang, and Karthik Narasimhan. 2022. WebShop: Towards Scalable Real-World Web Inter-action with Grounded Language Agents. In Advances in Neural Information Processing Systems (NeurIPS) , Vol. 35. 
+
+https://proceedings.neurips.cc/paper_files/paper/2022/hash/ 82ad13ec01f9fe44c01cb91814fd7b8c-Abstract-Conference.html 
+
+[63] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao. 2023. ReAct: Synergizing Reasoning and Acting in Language Models. In The Eleventh International Conference on Learning Representations (ICLR) .[64] Jie You, Jae-Won Chung, and Mosharaf Chowdhury. 2023. Zeus: Under-standing and Optimizing GPU Energy Consumption of DNN Training. In USENIX NSDI .[65] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and Byung-Gon Chun. 2022. ORCA: A Distributed Serving System for Transformer-Based Generative Models. In Proceedings of the 16th USENIX Symposium on Operating Systems Design and Implementa-tion (OSDI) . USENIX Association, 521–538. [66] Jiahuan Yu, Aryan Taneja, Junfeng Lin, and Minjia Zhang. 2025. VoltanaLLM: Feedback-Driven Frequency Control and State-Space Routing for Energy-Efficient LLM Serving. arXiv:2509.04827 [cs.DC] 
+
+https://arxiv.org/abs/2509.04827 
+
+[67] Wei Zhang, Zhiyu Wu, Yi Mu, Rui Ning, Banruo Liu, Nikhil Sarda, Myungjin Lee, and Fan Lai. 2026. JITServe: SLO-aware LLM Serving with Imprecise Request Information. In 23rd USENIX Symposium on Networked Systems Design and Implementation (NSDI 26) . USENIX Association. https://www.usenix.org/conference/nsdi26/presentation/ zhang-wei 
+
+[68] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-anzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . 193–210. https://www.usenix.org/ conference/osdi24/presentation/zhong-yinmin 
+
+[69] Andy Zhou, Kai Yan, Michal Shlapentokh-Rothman, Haohan Wang, and Yu-Xiong Wang. 2024. Language Agent Tree Search Unifies Reasoning, Acting, and Planning in Language Models. In Proceedings of the 41st International Conference on Machine Learning (Proceedings of Machine Learning Research, Vol. 235) . PMLR, 62138–62160. https: //proceedings.mlr.press/v235/zhou24r.html 
+
+14 KAIROS : Stateful, Context-Aware Power-Efficient Agentic Inference Serving 
+
+Algorithm 1 KAIROS Per-Instance Controller Algorithm 
+
+Require: Frequency levels F = {𝑓 (1) , . . . , 𝑓 (𝐿 ) }; capacity 
+
+𝑈 max ; SLO target 𝜏 ; power budget 𝑃 max ; thresholds 𝛼, 𝛽, 𝛾 
+
+Ensure: Frequency level ℓ and active set Aon at each epoch  
+
+> 1:
+
+Initialize ℓ ← 𝐿 , 𝑐 ← 0, Aon ← ∅ , Apend ← ∅  
+
+> 2:
+
+loop  
+
+> 3:
+
+Apend ← A pend ∪ new tasks  
+
+> 4:
+
+𝑈 𝑘 ← Í𝑎 ∈ A on 𝐶 𝑎  
+
+> 5:
+
+Update per-agent throughput for all 𝑎 ∈ A on ∪A pend  
+
+> 6:
+
+Update average system power ¯𝑃 
+
+// Context-aware frequency control (§6.2.2)  
+
+> 7:
+
+if 𝑈 𝑘 ≥ 𝛼𝑈 max then  
+
+> 8:
+
+ℓ ← 𝐿  
+
+> 9:
+
+else  
+
+> 10:
+
+ℓ ←
+
+j 𝑈 𝑘  
+
+> 𝛼𝑈 max
+
+· ( 𝐿 − 1)
+
+k
+
++ 1 
+
+> 11:
+
+end if 
+
+// SLO-based boosting (§6.2.3)  
+
+> 12:
+
+𝜏 min ← min 𝑎 ∈ A on ∪A pend Throughput (𝑎 ) 
+
+> 13:
+
+if 𝜏 min < 𝜏 then  
+
+> 14:
+
+ℓ ← 𝐿  
+
+> 15:
+
+end if 
+
+// Thrashing avoidance (§6.2.4)  
+
+> 16:
+
+while Apend ≠ ∅ and 𝑈 𝑘 < 𝛾𝑈 max do  
+
+> 17:
+
+Move next agent from Apend to Aon  
+
+> 18:
+
+Update 𝑈 𝑘  
+
+> 19:
+
+end while  
+
+> 20:
+
+if 𝑈 𝑘 > 𝛽𝑈 max then  
+
+> 21:
+
+Defer new admissions  
+
+> 22:
+
+end if  
+
+> 23:
+
+Apply frequency level ℓ 
+
+> 24:
+
+end loop 
+
+A Appendix 
+
+A.1 KAIROS Per-Instance Controller Pseudo-code 
+
+Algorithm 1 presents the pseudo-code for algorithm that governs per-instance frequency controller in KAIROS that employs context-aware frequency control, SLO-based boost-ing, and thrashing avoidance. 
+
+A.2 KAIROS Global Router Pseudo-code 
+
+Algorithm 2 and Algorithm 3 together present the pseudo-code for KAIROS ’s global context-aware router, which per-forms initial agent placement and dynamic reassignment across serving instances to enable consolidation under low load and balance context pressure under high load. The de-tailed explanation for the Algorithm 2 and 3 is presented in details in §6.3. 
+
+A.3 Context Usage Variation 
+
+Figure 13 uses the same workload setup as §3.1 and comple-ments Figure 3 by showing the distribution of the maximum context size reached by each agent during execution. While 
+
+Algorithm 2 KAIROS Initial Assignment Algorithm 
+
+Require: Serving instances I = {1, . . . , 𝑁 }; per-instance capacity 𝑈 max ; consolidation threshold 𝜃 cons 
+
+Ensure: Assigned instance inst (𝑎 ) for each newly arrived agent 𝑎  
+
+> 1:
+
+Initialize A𝑖 ← ∅ for all 𝑖 ∈ I  
+
+> 2:
+
+function AssignAgent (𝑎 ) 
+
+> 3:
+
+Update ongoing context usage 𝑈 𝑖 ← Í𝑏 ∈ A 𝑖 𝐶 𝑏 for all 𝑖 ∈ I 
+
+// Initial assignment policy (§6.3)  
+
+> 4:
+
+Ilight ← { 𝑖 ∈ I | 𝑈 𝑖 < 𝜃 cons 𝑈 max } 
+
+> 5:
+
+if Ilight ≠ ∅ then  
+
+> 6:
+
+𝑖 ★ ← min Ilight  
+
+> 7:
+
+else  
+
+> 8:
+
+𝑖 ★ ← arg min 𝑖 ∈ I 𝑈 𝑖  
+
+> 9:
+
+end if  
+
+> 10:
+
+Assign agent 𝑎 to instance 𝑖 ★ 
+
+> 11:
+
+A𝑖 ★ ← A 𝑖 ★ ∪ { 𝑎 } 
+
+> 12:
+
+inst (𝑎 ) ← 𝑖 ★ 
+
+> 13:
+
+𝑠 𝑎 ← 0 
+
+> 14:
+
+end function Algorithm 3 KAIROS Reassignment Algorithm 
+
+Require: Serving instances I = {1, . . . , 𝑁 }; reassignment interval 𝑇 reassign ; imbalance threshold 𝜌 
+
+Ensure: Updated assignment inst (𝑎 ) when agent 𝑎 issues a request  
+
+> 1:
+
+function MaybeReassign (𝑎 ) 
+
+> 2:
+
+𝑠 𝑎 ← 𝑠 𝑎 + 1 
+
+> 3:
+
+if 𝑠 𝑎 < 𝑇 reassign then  
+
+> 4:
+
+return  
+
+> 5:
+
+end if  
+
+> 6:
+
+Update ongoing context usage 𝑈 𝑖 ← Í𝑏 ∈ A 𝑖 𝐶 𝑏 for all 𝑖 ∈ I 
+
+// Reassignment policy (§6.3)  
+
+> 7:
+
+𝑖 ← inst (𝑎 ) 
+
+> 8:
+
+𝑗 ← arg min 𝑚 ∈ I 𝑈 𝑚  
+
+> 9:
+
+if 𝑗 ≠ 𝑖 and 𝑈 𝑖 ≥ 𝜌 · 𝑈 𝑗 then  
+
+> 10:
+
+Reassign agent 𝑎 from instance 𝑖 to instance 𝑗  
+
+> 11:
+
+A𝑖 ← A 𝑖 \ { 𝑎 } 
+
+> 12:
+
+A𝑗 ← A 𝑗 ∪ { 𝑎 } 
+
+> 13:
+
+inst (𝑎 ) ← 𝑗  
+
+> 14:
+
+end if  
+
+> 15:
+
+𝑠 𝑎 ← 0 
+
+> 16:
+
+end function 
+
+Figure 3 characterizes variability in the number of conversa-tion turns and total time spent in LLM execution, this figure captures the resulting peak memory footprint of each agent’s context. The key trend is consistent across all the benchmarks. Max-imum context usage varies widely both within and across 
+
+> 15
+
+Yichao Yuan, Mosharaf Chowdhury, and Nishil Talati 1,000 2,000 5,000 10,000 20,000 50,000 100,000  
+
+> Maximum Context Usage per Job (tokens)
+> DABStep
+> SWE-bench
+> Verified
+> Terminal-
+> Bench 2.0
+> Agent
+> Mini-SWE-Agent Terminus
+
+Figure 13. Distribution of maximum context length for dif-ferent agents. vLLM    
+
+> vLLM (recomputation)
+> vLLM (LMCache)
+> 0.00
+> 0.10
+> 0.20
+> 0.30
+> 0.40
+> 0.50
+> Throughput (jobs/s)  0.446
+> 0.249 0.258
+> vLLM
+> vLLM (recomputation)
+> vLLM (LMCache)
+> 0.0
+> 100.0
+> 200.0
+> 300.0
+> 400.0
+> 500.0
+> Average Completed-Agent
+> LLM Time (s)
+> 166.77
+> 495.01 499.65
+> vLLM
+> vLLM (recomputation)
+> vLLM (LMCache)
+> 0
+> 500
+> 1,000
+> 1,500
+> 2,000
+> Average Completion Tokens
+> 1,922
+> 1,494 1,486
+
+Figure 14. Average throughput (left), agent LLM time (mid-dle), and average completion token thorughput (right) com-parison of a non-thrashing vLLM baseline (0.5 jobs/s) with two thrashing baselines with recomputation and LMCache-based offloading (both 0.6 jobs/s). Across three latency and throughput metrics, the thrashing regime leads to severe performance degradation. agent–dataset pairs, with a pronounced long tail of agents whose contexts grow to very large sizes. While many agents reach peak contexts on the order of only tens of thousands of tokens, a non-trivial subset grows to hundreds of thou-sands of tokens. This result reinforces that agentic serving creates highly heterogeneous and difficult-to-predict mem-ory demand, where a small number of long-context agents can disproportionately stress the serving system. 
+
+A.4 System Performance in Thrashing Regime 
+
+While operating in the thrashing regime, systems typically employ either (1) recomputation of evicted tokens [ 24 , 29 ]or (2) offloading context to CPU memory or lower-tier stor-age using frameworks like LMCache [ 8 ]. Figure 14 evalu-ates these two strategies (i.e., recomputation and offloading) against a baseline operating in the non-thrashing region. To understand the effect of thrashing, we construct a controlled experiment using a short-running mini-swe-agent request from SWE-bench Verified whose conversation length is at the 25th percentile (i.e., 18 turns), and replicate this request in the input stream. This setup simplifies regime control, while the resulting insight on the cost of thrashing is independent of the specific agent or request distribution. We replay the same request at two arrival rates: 0.5 and 0.6 requests/second, which place the system in the non-thrashing and thrashing 0           
+
+> 8
+> 16
+> 24
+> 32
+> 40
+> 48
+> 56
+> 64
+> 72
+> Agent Frequency
+> (a) No Freq Control vs KAIROS SLO 20
+> No Freq Control KAIROS SLO 20
+> 0
+> 8
+> 16
+> 24
+> 32
+> 40
+> 48
+> 56
+> 64
+> 72
+> Agent Frequency
+> (b) No Freq Control vs KAIROS SLO 35
+> No Freq Control KAIROS SLO 35
+> 24 30 36 42 48 54 60 66 72
+> Per-Agent Output Throughput (tokens/s)
+> 0
+> 8
+> 16
+> 24
+> 32
+> 40
+> 48
+> 56
+> 64
+> 72
+> Agent Frequency
+> (c) No Freq Control vs KAIROS SLO 45
+> No Freq Control KAIROS SLO 45
+
+Figure 15. Per-agent throughput distribution comparing a no frequency control baseline and KAIROS with different SLO targets of 20, 35, and 45 tokens/s. regimes, respectively. We then compare performance across the two regimes. Our evaluation across three metrics reveals significant performance degradation for thrashing. 
+
+• System Throughput: Recomputation and offloading re-duce average agent completion throughput by 44.2% and 42.1%, respectively. 
+
+• LLM Latency: The average time spent in LLM calls in-creases by 3 × for both recomputation and offloading. 
+
+• Effective Decode Throughput: Excluding recomputa-tion cycles, useful decode throughput drops by 22.3%. These results quantify the sub-optimal nature of thrashing-heavy serving. Performance is limited by either redundant compute cycles in the recomputation baseline or starvation of GPU compute resources due to CPU-GPU data transfers. 
+
+A.5 Per Agent Throughput Distribution 
+
+To explain Figure 8 further, Figure 15 shows the distribution of per-agent throughput for the no frequency control base-line and KAIROS under different SLO targets of 20, 35, and 45 tokens/s. Across all settings, KAIROS shifts the through-put distribution left compared to the baseline, indicating that it deliberately slows down execution to reduce power. However, this shift is controlled: the bulk of the distribu-tion is aligned with the respective SLO targets, showing that 
+
+KAIROS adapts effectively to different performance require-ments rather than applying a one-size-fits-all policy. 
+
+16 KAIROS : Stateful, Context-Aware Power-Efficient Agentic Inference Serving 
+
+Figure 16. Launching id-tracker with Harbor and a context-aware router   
+
+> #`id-tracker `wraps an ordinary Harbor launch. # It inherits the parent environment, # reads the per-agent API token from env, # generates an agent name internally, # and forwards requests through the # ctx-aware-router. CTX_AWARE_ROUTER_URL="http://127.0.0.1:24157" \ OPENAI_BASE_URL="http://127.0.0.1:24157/v1" \ OPENAI_API_KEY=YOUR_KEY \ python -m id_tracker \ --router-url "${CTX_AWARE_ROUTER_URL}" \ -- \ harbor run \ --agent mini-swe-agent \ --model \ hosted_vllm/Qwen3-Coder-30B-A3B-Instruct \ --dataset terminal-bench@2.0
+
+Importantly, the figure demonstrates that KAIROS slows agents just enough to meet the SLO without excessive over-provisioning. Under loose SLOs (e.g., 20 tokens/s), through-put is tightly clustered near the target, maximizing power savings by avoiding unnecessary high-frequency execution. As the SLO tightens (35 and 45 tokens/s), the distribution shifts right accordingly, reflecting higher frequencies to meet stricter performance demands. This behavior highlights that 
+
+KAIROS achieves its core objective: it dynamically balances power and performance by reducing excess throughput while still maintaining SLO attainment across varying targets. 
+
+A.6 KAIROS ID Tracker Interface Example 
+
+We illustrate how KAIROS integrates with existing agent frameworks through a minimal, drop-in launch interface in Figure 16. 
+
+B Discussion 
+
+This section discusses three design and evaluation choices in detail. 
+
+B.1 PD Disaggregation 
+
+In this work, we characterize the complex interplay between frequency/power control, serving system performance, and context usage for serving agentic LLM workloads. This is a common new problem faced by different serving implemen-tation like the PD aggregated/disaggregated instances, both need to carefully deal with the persistent agent context across different requests. In these settings, context becomes a first-class resource, and its dynamic usage directly shapes both system throughput and power-performance tradeoffs. While our design is instantiated on a PD-aggregated architecture, the underlying challenge is fundamentally driven by context dynamics rather than a specific execution model. We leave a full exploration of these techniques in PD-disaggregated settings to future work, where additional coordination over-heads may arise. 
+
+B.2 Choice of SLO 
+
+Single-turn LLM serving typically defines SLOs using latency-based metrics such as Time To First Token (TTFT) and Time Between Tokens (TBT), which capture interactive responsive-ness for stateless , user-facing generation [ 1 ]. These metrics are well-aligned with applications where outputs are con-sumed incrementally by humans. However, their relevance to agentic serving is limited. Agentic execution is inherently 
+
+stateful , spanning multiple turns with persistent context across interactions, and its outputs are primarily consumed by downstream tools or agent logic rather than humans [ 35 ]. As a result, TTFT/TBT targets designed around human per-ception—do not directly capture meaningful progress in agen-tic workflows. While recent work has proposed Time To Last Token (TTLT) as an alternative [ 67 ], TTLT is defined rela-tive to isolated execution and requires knowledge of request-specific latency that is not observable at runtime, making it difficult to use as a practical control target. Consequently, there is still no consensus on an appropriate SLO for agentic serving. In this work, we instead propose to use a throughput-based 
+
+SLO defined at the agent level, which measures end-to-end progress across the entire multi-turn lifecycle. Unlike la-tency metrics that focus on individual responses, per-agent throughput directly captures how efficiently an agent ad-vances toward task completion under shared system exe-cution. This makes it a more actionable and system-level metric for online control. Moreover, because agentic work-loads involve continuous interaction and rapid consumption of generated tokens by automated components, throughput naturally aligns with the underlying execution semantics rather than human-facing responsiveness. By using through-put as the SLO, the system can reason about performance, power, and resource allocation in a unified manner, enabling more effective optimization under dynamic, stateful work-loads. To make this SLO concrete in our evaluation, we define throughput on a per-agent basis (tokens/s per agent), rather than as an aggregate system-wide metric. This distinction is important: the total load served by a GPU is the product of per-agent throughput and the number of concurrent agents, which in our setting can reach tens of agents, resulting in an overall throughput on the order of hundreds to thousands of tokens per second. A per-agent SLO ensures fairness across agents, preventing the system from prioritizing a subset of agents at the expense of others, which is particularly impor-tant in multi-tenant, stateful workloads with heterogeneous progress rates. 
+
+> 17 Yichao Yuan, Mosharaf Chowdhury, and Nishil Talati
+
+We carefully choose SLO targets based on the baseline throughput distribution without frequency control, rather than arbitrarily selecting values. As shown in Figure 15, the selected SLO targets of 20, 35, and 45 tokens/s lie within the natural operating range of the baseline system without frequency control, capturing representative points across the distribution. This ensures that the targets are both achiev-able and meaningful, allowing us to evaluate how effectively 
+
+KAIROS trades excess performance for power savings while still meeting realistic performance requirements. 
+
+B.3 Choice of Request Arrival Rate 
+
+In real-world deployments, a given hardware configuration can sustain only a limited input request arrival rate before performance degrades. As demand increases beyond this capacity, data center operators must scale up or scale out by using either more powerful hardware or higher num-ber of hardware instances to maintain throughput and SLO. Therefore, in this work, we select input arrival rates that are commensurate with the capabilities of our experimental hardware, ensuring that the system operates in a realistic and meaningful regime. While higher arrival rates can be evaluated, doing so would require proportionally more GPU resources. Our goal is to study power–performance trade-offs under representative operating conditions for a fixed hardware setup.
