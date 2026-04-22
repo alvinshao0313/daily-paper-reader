@@ -1,0 +1,858 @@
+Title: SAGE: Selective Attention-Guided Extraction for Token-Efficient
+
+URL Source: https://arxiv.org/pdf/2604.15583v1
+
+Published Time: Mon, 20 Apr 2026 00:18:03 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# SAGE: Selective Attention-Guided Extraction for Token-Efficient Document Indexing 
+
+# Xinzhi Wang 
+
+Purdue University wang6171@purdue.edu 
+
+# Peter Baile Chen 
+
+MIT peterbc@mit.edu 
+
+# Gerardo Vitagliano 
+
+MIT gerarvit@csail.mit.edu 
+
+# Matthew Russo 
+
+MIT mdrusso@csail.mit.edu 
+
+# Jun Chen 
+
+Independent Researcher chjuncn@gmail.com 
+
+# Michael Cafarella 
+
+MIT michjc@csail.mit.edu 
+
+# Samuel Madden 
+
+MIT madden@csail.mit.edu 
+
+# Chunwei Liu 
+
+Purdue University chunwei@purdue.edu 
+
+## ABSTRACT 
+
+Large language models with long context windows can answer complex questions directly from full-length academic, technical, and policy documents, but passing entire documents is often costly, slow, and can degrade answer quality while increasing the risk of unnecessary data leakage. This paper targets the common setting of answering many heterogeneous questions over long document(s), where fixed position heuristics and standard retrieval-augmented generation (RAG) can fail due to document structure variability and weak query-chunk semantic similarity, which often requires task-and domain-specific tuning of embedding retrievers. We propose Selective Attention-Guided Extraction ( SAGE ), a training-free, plug-and-play context reduction framework that uses a lightweight local LLM to perform a single prefilling pass and convert language model attention signals into a query-specific relevance heatmap at config-urable granularities. SAGE further introduces differential attention 
+
+strategies to better isolate question-relevant evidence, then selects the top-scoring units under a user-defined token budget and for-wards only this reduced context to a downstream LLM for answer generation. SAGE surpasses traditional reduction techniques across multiple long-document QA benchmarks, notably securing a top-4 rank on QuALITY-hard while constrained to a 10% context budget. This enables a 90% reduction in tokens with competitive accuracy, without the need for model fine-tuning or complex calibration. 
+
+PVLDB Reference Format: 
+
+Xinzhi Wang, Peter Baile Chen, Gerardo Vitagliano, Matthew Russo, Jun Chen, Michael Cafarella, Samuel Madden, and Chunwei Liu. SAGE: Selective Attention-Guided Extraction for Token-Efficient Document Indexing . PVLDB, 14(1): XXX-XXX, 2020. doi:XX.XX/XXX.XX 
+
+PVLDB Artifact Availability: 
+
+The source code, data, and/or other artifacts have been made available at https://github.com/Tranway1/AttentiveTrim.git. 
+
+> This work is licensed under the Creative Commons BY-NC-ND 4.0 International License. Visit https://creativecommons.org/licenses/by-nc-nd/4.0/ to view a copy of this license. For any use beyond those covered by this license, obtain permission by emailing info@vldb.org. Copyright is held by the owner/author(s). Publication rights licensed to the VLDB Endowment. Proceedings of the VLDB Endowment, Vol. 14, No. 1 ISSN 2150-8097. doi:XX.XX/XXX.XX
+
+## 1 INTRODUCTION 
+
+As LLM-based applications take on increasingly complex workloads, the demand for long-context question answering has grown rapidly [23 , 25 , 27 , 29 , 37 , 42 , 49 ]. Although recent models can ingest entire documents end-to-end [ 27 ], more context is not always better . Long inputs often mix a small amount of salient evidence with substantial irrelevant text, which can distract the model and degrade answer accuracy [ 13 , 28 ]. The practical overhead is also substantial: under pay-per-token commercial APIs, processing full documents directly increases monetary cost, and even in self-hosted settings, it wastes compute on non-essential text. These issues are exacerbated when using smaller local models. Once an input exceeds the context window of a model, the docu-ment can no longer be processed in a single forward pass, requiring chunking or multi-stage pipelines that increase latency and memory overhead while complicating deployment. Beyond efficiency and quality, minimizing unnecessary data exposure is a practical constraint in many real-world settings. En-terprise reports, proprietary documents, and internal analyses often contain sensitive information that should not be fully revealed to downstream or business-facing LLMs. Together, these considera-tions motivate context reduction : extracting a compact subset of the input that preserves answer quality while bounding LLM cost and limiting unnecessary information exposure. A natural first idea for context reduction is to take advantage of where answers usually appear in a document. Prior work [ 23 ] and our early observations suggest that some question types do show rough structural patterns. For example, in research papers, answers are often found in sections such as the abstract, introduction, eval-uation, or conclusion. This motivates validation-based positional heuristics: using a small set of documents with known answers, we can locate the answer spans, map them to token positions, and build a relevance heatmap over the document. This heatmap can then be used to guide context extraction for new documents. However, these patterns are only rough, and validation-based heatmaps have clear limitations. First, they rely on a strong LLM to accurately locate answer spans in long documents, which can be unreliable when documents are lengthy or vary in structure. Second, answer locations can differ a lot across question types. As shown in Figure 1, authorship-related evidence is usually concentrated near the beginning of a paper, while evidence for contributions is spread much more broadly. Third, for reasoning-heavy questions, the relevant evidence is often distributed across several sections rather than confined to a single region. For instance, a paper’s main           
+
+> arXiv:2604.15583v1 [cs.DB] 16 Apr 2026 0.0 0.2 0.4 0.6 0.8 1.0
+> Character position
+> What is the authors of the paper?
+> 0
+> 10
+> 20
+> Frequency (a) Who are the authors of the paper 0.0 0.2 0.4 0.6 0.8 1.0
+> Character position
+> What is the main contribution of the paper?
+> 0
+> 2
+> 4
+> Frequency
+> (b) What is the main contribution of the paper
+
+Figure 1: Heatmaps of ground-truth answer distributions in the Paper dataset. Author queries (a) cluster at the start, while contribution queries (b) disperse throughout. 
+
+contribution may be introduced in the abstract, motivated in the introduction, explained in detail later, and summarized again in the conclusion. In these cases, a single average position or fixed region is unlikely to capture all the evidence needed to answer the question correctly. Retrieval-Augmented Generation offers an alternative by re-trieving relevant evidence before generation, reducing the need to pass entire documents to the model. RAG systems span dense bi-encoders as well as token-level late interaction retrievers such as ColBERT [ 17 ] and ColBERTv2 [ 38 ], with recent refinements that further improve token-level scoring [ 15 ]. With the emergence of long-context LLMs, RAG has also moved toward retrieving larger and more coherent units [ 12 ] and organizing evidence hierarchi-cally [ 39 ]. Yet retrieval still relies on embedding similarity, which does not guarantee that selected chunks contain the answer. This gap is most visible when queries lack discriminative keywords or when the supportive context is only weakly aligned with the query in the embedding space. As a result, retrieval may miss critical evi-dence or include misleading context. For example, for a query such as “Who are the authors of this paper?”, the chunks most similar in embedding space are often in the reference section (where au-thor names appear in citations) rather than near the title or header, where the correct answer is typically found. This failure mode be-comes especially painful when many questions must be answered over the same document. These limitations point to a more adaptive, model-driven ap-proach. Instead of inferring relevance indirectly via validation heatmaps or embedding similarity, we ask " can relevance be ob-tained directly from the model itself? " Transformer-based LLMs compute attention distributions during the prefilling phase that reflect how strongly different parts of the context contribute to answering a given question. Importantly, these signals are avail-able without generating any output. We only run the prefill pass and read the attention weights, avoiding the dominant cost of the decoding phase [ 1]. We find that these attention signals provide a fine-grained, query-specific relevance signal that can be exploited without external supervision. Building on this insight, we propose Selective Attention-Guided 
+
+Extraction ( SAGE ), an attention-driven context reduction frame-work that uses a lightweight local LLM as a preprocessing filter. Given a document and a query, the local model computes token-level attention over the document, producing a relevance heatmap that can be aggregated at configurable granularities such as tokens, sentences, or sections. We then select the highest-scoring units to form a compact context that can be passed to any downstream LLM for answer generation under a user-provided token budget. A practical challenge is that raw attention can be noisy: generic document elements such as headers, boilerplate text, and format-ting cues may consistently attract attention even when they are not query-relevant. Recent work suggests that contrastive signals can help separate shared background patterns from task-specific evidence [ 7, 22 , 47 ]. Inspired by this line of work, SAGE introduces 
+
+differential attention . We subtract attention patterns induced by a contrasting query to cancel persistent noise and better isolate query-specific evidence. This design offers several system-level advantages. First, SAGE 
+
+reduces the original document to a compact context that retains only the content most relevant to the query. Second, it provides explicit budget control via a user-specified token budget, bound-ing inference cost regardless of document length. Third, unlike validation-based heatmap construction, SAGE does not require ground truth answers, validation datasets, or query-specific calibra-tion. More broadly, the approach is training-free and can be applied directly with off-the-shelf LLMs, without model modification or fine-tuning, making it readily applicable to new questions and do-mains. In addition, SAGE leverages KV-cache reuse to improve efficiency by avoiding repeated encoding of the same document chunks across queries. We evaluate SAGE on four benchmarks spanning different modal-ities. On QuALITY-hard [ 35 ], SAGE ranks 4th on the public leader-board [ 34 ] while using only a 10% context budget. On Paper and No-tice [23 ], SAGE consistently outperforms strong embedding-based RAG baselines across token budgets, and we analyze the effects of attention model size and differential-attention variants. Finally, we show that SAGE extends to semi-structured tables without dataset-specific tuning, achieving accuracy comparable to full-table input while substantially reducing the table content passed to the genera-tor. Looking ahead, we expect the same attention-guided principle to extend to additional modalities, including more complex semi-structured tables and visual documents. To summarize, our contribution includes: 
+
+• We study budgeted context reduction in the setting of multiple questions per document , and highlight limitations of validation-based positional heuristics and embedding only retrieval for dispersed evidence and weak lexical cues (Section 1). 
+
+• We propose Selective Attention-Guided Extraction ( SAGE ), a training-free pipeline that uses a lightweight local LLM to com-pute token-level relevance and select compact context under an explicit token budget (Section 3). 
+
+• We introduce differential attention to filter out query-independent noise and improve relevance estimation, and study alternative reference queries, including a fixed baseline prompt and a farthest question contrast (Section 3.2). 
+
+• We evaluate SAGE on four benchmarks spanning different regimes and modalities, showing consistent improvements over strong baselines in token accuracy trade-offs (Section 4). 
+
+> 2
+
+• We demonstrate an extension of SAGE to table selection, achiev-ing accuracy comparable to full-table input while reducing the 
+
+average row usage exposed to the generator (Section 4.8). 
+
+## 2 RELATED WORK 
+
+To mitigate the high overhead of long-context LLM inference, prior work spans several distinct but complementary directions. 
+
+## 2.1 Long-Context RAG 
+
+Retrieval-Augmented Generation (RAG) avoids full document inges-tion by conditioning generation only on retrieved evidence. While early systems relied on dense single-vector encoders, late interac-tion retrievers like ColBERT [ 17 ], ColBERTv2 [ 38 ], and TRIAL [ 15 ]improve localization by retaining token-level structure. As long-context LLMs emerged, methods like LongRAG [ 12 ] and RAPTOR [ 39 ] adapted by retrieving larger, coherent multi-thousand-token units or hierarchical summaries. However, simply retrieving more chunks is not a panacea. Jin et al . [13] shows that increasing the number of retrieved passages can actively distract the reader model with “hard negatives”, chunks of text that are highly similar to the query in embedding space but actually contain irrelevant or misleading information. This risk of degraded reasoning motivates the need for refinement pipelines like LongRefiner [14] and OP-RAG [48]. 
+
+SAGE is highly complementary to these directions. While RAG pipelines select candidate documents or chunks, SAGE acts as a budget-constrained filter to preserve only the highest-utility evi-dence within those texts with a finer granularity. 
+
+## 2.2 Prompt Compression 
+
+When retrieval is insufficient, prompt compression reduces the ef-fective prompt length while preserving necessary information [ 21 ]. One approach compresses text into continuous soft prompts [21 ] us-ing learned vectors or reusable tokens, as seen in CC [ 43 ] and GIST [31 ]. ICAE [ 6] distills text using a frozen LLM, xRAG [ 4 ] injects doc-ument embeddings via a fusion bridge, and MIPRO [ 33 ] optimizes prompt programs via meta-optimization. However, soft prompts are opaque, require domain-specific training [ 21 ], and often cause semantic distortion [24]. To avoid meaning distortion, hard prompt methods select or prune discrete tokens. Early methods like PoWER-BERT [ 8 ] and TR-BERT [ 46 ] prune tokens based on learned signals but often adopt fixed lengths on training data. Adaptive methods tailor prun-ing dynamically. SpAtten [ 41 ] uses proportional lengths, LTP [ 18 ]applies learned thresholds, and LLMLingua[ 10 ] scores and removes low-utility tokens. LongLLMLingua [ 11 ] further mitigates the risk of dropping crucial evidence by adding question-aware signals. Sim-ilarly, task-specific importance metrics are now actively used to compress dense token streams in multimodal settings [40]. To prevent the fragmentation of local syntax caused by token dropping, recent context reduction systems extract contiguous sen-tences. CPC [ 24 ] retains top-ranked sentences using a context-aware encoder, while ZenDB [ 23 ] leverages hierarchical structure in templated documents. Unlike aggressive compressors that suf-fer from knowledge overwriting [ 9 ], SAGE strictly preserves the original source text, avoiding structural assumptions by relying solely on attention signals to extract contiguous windows without training. 
+
+## 2.3 KV Cache Compression 
+
+A complementary line of work reduces memory and latency during decoding by optimizing the KV cache without altering the input prompt. FastGen [ 5 ] and SnapKV [ 20 ] profile attention patterns to compress caching for heavy-hitting tokens. For dynamic cache management, 𝐻 2𝑂 [ 51 ] formulates KV eviction as a submodular optimization problem, while NACL [ 3 ] improves eviction robust-ness via proxy-token estimation. Beyond eviction, RetrievalAtten-tion [ 26 ] manages cache access via approximate nearest-neighbor search, and SepLLM [ 2 ] leverages separator tokens as compact anchors. Other optimizations include dynamic cache budget allo-cation across layers [ 52 ] and concatenating precomputed caches across repeated contexts, as seen in KVLink [ 45 ]. While effective at reducing decoding costs, most KV-cache methods still require ingesting the full context during the computationally expensive prefilling stage. In contrast, SAGE reduces the input context before 
+
+generation, lowering both prefilling and decoding costs while pro-viding explicit budget control and supporting privacy-preserving deployments. 
+
+## 2.4 Differential and Contrastive Attention 
+
+Several studies highlight the critical role of attention structure for extractive tasks and long-context reasoning [ 44 , 50 ]. Historically, differential attention was originally introduced in image processing via the Differential Attention Network (DAN), which contrasts supporting and opposing exemplars to better align model focus with human attention [ 36 ]. In modern LLMs, methods like Differential Transformer [ 47 ] and Grouped Differential Attention [ 22 ] introduce fundamental architectural changes, computing attention as the difference between softmax maps to cancel common-mode noise. Contrastive signals are also leveraged to isolate task-relevant visual regions in multimodal models [ 7] and to suppress generic text generation during the decoding phase [19]. In contrast to approaches that require heavy model modifications, specialized training regimens (e.g., DAN [ 36 ]), or decoding-time interventions, SAGE uses differential reasoning as a training-free filter for input context reduction. By applying this contrastive signal purely during the prefilling stage without altering the underlying Transformer, SAGE provides a lightweight, plug-and-play solution to neutralize query-agnostic noise and isolate discriminative evi-dence prior to generation. 
+
+## 3 METHODOLOGY 
+
+Building upon the need for efficient, noise-resistant context man-agement, this section details the architecture of SAGE . Our primary design objective is to extract the most informative text spans from a long document while strictly adhering to a user-specified token budget, ensuring that the generation LLM receives a high-quality, continuous context. As illustrated in Figure 2, the SAGE pipeline processes a user-provided document , query , and token budget across four pri-mary stages. Stage 1○ computes a query-aware document attention score through four substeps. First, in step (a), we partition the 
+
+> 3
+
+Budget 
+
+User 
+
+Query 𝒒 
+
+## ① Compute Token Level 
+
+Attention Score ( § 3.1 )
+
+Based on the following 
+
+context, answer the 
+
+question concisely. 
+
+Context: … 
+
+Question: … 
+
+Answer: 
+
+④ Reduced Context 
+
+Prompt ( § 3.3 )
+
+③ Unit -Window 
+
+Selection ( § 3.3 ) 
+
+> Select text windows with
+> highest average
+> attention under a budget
+
+(a) Chunked Doc. Processing ( § 3.1.1 )            
+
+> Context 𝐶 1
+> (300 Tokens)
+> Context: 𝐶 1
+> Question: 𝑞
+> Answer:
+> Query → context attention
+> Aggregate over heads & layers
+> Context 𝐶 2
+> (300 Tokens)
+> Context: 𝐶 2
+> Question: 𝑞
+> Answer:
+> Context 𝐶 3
+> (300 Tokens)
+> Context: 𝐶 3
+> Question: 𝑞
+> Answer:
+> Context 𝐶 4
+> (100 Tokens)
+> Context: 𝐶 4
+> Question: 𝑞
+> Answer:
+
+(b) Attention Scale Bias ( § 3.1.2 )   
+
+> •Softmax distributes fixed scale
+> • Fewer tokens share the mass
+> ⇒higher attention scale
+
+𝑠 1
+
+𝑠 2
+
+𝑠 3
+
+𝑠 4
+
+(c) Chunk -Length Normalization ( § 3.1.2 )                  
+
+> Length -based normalization: ǁ𝑠 𝑖 =𝑠 𝑖 ∗𝑇 𝑖
+> 𝑇 default
+> 𝑇 default =300
+> Concatenating chunk attention
+> scores:
+> ǁ
+> 𝑠 1=𝑠 1∗𝑇 1
+> 𝑇 default
+> =𝑠 1∗300
+> 300 =𝑠 1Long chunk:
+> Short chunk:
+
+∗ 𝑇 4
+
+𝑇 default 
+
+=ǁ𝑠 4 𝑠 4
+
+(d) Reconstruct full -doc. Attention ( § 3.1.3 )  
+
+> Lower attention scale Higher attention scale
+
+# SAGE 
+
+> Assemble selected context
+> into a prompt
+
+Generate an 
+
+answer using 
+
+a generation 
+
+LLM 
+
+Generated 
+
+Answer 
+
+② Differential Attention 
+
+(§ 3.2 ) 
+
+Document 
+
+(1000 Tokens)            
+
+> (a) Find contrast question:
+> 𝑞 −
+> (b) Query normalization:
+> ത𝐒 (q)=1
+> 𝑇 𝑞
+> ∗𝐒 (q)
+> (c) Compute differential
+> attention
+> 𝑑 𝑞 =ത𝐒 𝑞 −ത𝐒 𝑞 −
+> Misaligned
+> attention scale
+
+𝐒 = 𝑐𝑜𝑛𝑐𝑎𝑡 ǁ 𝑠 1, ǁ 𝑠 2, ǁ 𝑠 3, ǁ 𝑠 4Figure 2: Overview of the SAGE pipeline. 1○ Attention computation utilizes chunked processing and length normalization to form a document-level score. 2○ Differential attention refines relevance by filtering structural noise. 3○ Unit-window selection 
+
+extracts top text spans under the budget. 4 ○ Spans are assembled into a reduced-context prompt for final answer generation. 
+
+document into chunks that fit within the context window of a lightweight local LLM, computing token-level attention scores for each chunk paired with the query. Because these raw scores can be skewed by chunk length, we identify attention scale misalignment across chunks in step (b) and apply chunk-length normalization in step (c) to remove the scale difference caused by varying chunk sizes. Finally, in step (d), we map these normalized scores back to their original positions to reconstruct a cohesive, full document attention score. In Stage 2○, we first apply query normalization so scores are on a consistent scale across different questions. Then, differential atten-tion is used to filter out noise and highlight query-relevant signals. Unit-window selection (Stage 3○) leverages these refined scores to extract the most useful, coherent text spans within the allocated budget. Finally, in Stage 4○, these selected spans are assembled into a reduced-context prompt and passed to the generation model to produce the final answer. In the following subsections, we discuss each stage in detail. 
+
+## 3.1 Chunked Attention Computation and Normalization 
+
+3.1.1 Chunked Attention Computation. As we try to extract the parts of a long document that are truly relevant for answering a query, we first need a query-aware signal of token importance. Self-attention offers a natural choice. When a Transformer processes the question, each query token allocates attention to the earlier context tokens it relies on. We therefore use a lightweight local LLM to measure how much attention the query assigns to each document token, yielding an efficient relevance score for guiding later selection. Given a document 𝐷 and a query 𝑞 , let 𝑇 𝐷 and 𝑇 𝑞 
+
+denote the number of tokens in the tokenized document and query, respectively. A direct forward pass over the concatenation of the full document and query is often infeasible, because 𝑇 𝐷 +𝑇 𝑞 may exceed the context window of the model. We therefore partition the document into 𝑛 
+
+contiguous chunks: 
+
+𝐷 = {𝐶 1, 𝐶 2, . . . , 𝐶 𝑛 }.
+
+Each chunk 𝐶 𝑖 contains 𝑇 𝑖 tokens, where 𝑇 𝑖 ≤ 𝑇 default , and 𝑇 default 
+
+is a predefined chunk size chosen to fit the local model context window. In practice, all chunks except possibly the last one have length 𝑇 default .For each chunk 𝐶 𝑖 , we construct the prompt 
+
+Context: 𝐶 𝑖 ; Question: 𝑞 ; Answer: 
+
+and run a forward pass through the local LLM to extract self-attention scores. Such a forward pass only requires prefilling, and no decoding or token generation is performed. This is sufficient, as our goal is to read off how the model routes attention when inter-preting the question, not to produce an answer at the current stage. As the context is placed before the query in the input sequence, each query token can attend to all tokens in 𝐶 𝑖 . We aggregate these attention scores across query tokens, layers, and heads to obtain a relevance score for each context token. 
+
+> 4
+
+For the 𝑡 -th token in chunk 𝐶 𝑖 , the raw attention score is 
+
+𝑠 𝑖,𝑡 =
+
+> 𝑇 𝑞
+
+∑︁ 
+
+> 𝑘 =1
+
+∑︁ ℓ ∈ L ∑︁ ℎ∈ H 
+
+𝐴 ℓ,ℎ 
+
+ 𝑞 𝑘 , 𝑐 𝑖,𝑡 
+
+ , (1) where 𝑐 𝑖,𝑡 denotes the 𝑡 -th token in chunk 𝐶 𝑖 , and 𝐴 ℓ,ℎ (𝑞 𝑘 , 𝑐 𝑖,𝑡 ) is the self-attention scores assigned to 𝑐 𝑖,𝑡 when processing query token 𝑞 𝑘 at layer ℓ and head ℎ.However, we cannot use the raw score 𝑠 𝑖,𝑡 directly. Chunks might have different lengths, most notably the last chunk, as the exam-ple shown in Figure 2 Step 1○ section (a) and (b). This variation changes the scale of the resulting attention values. We therefore need normalization. 
+
+3.1.2 Chunk-Length Normalization. In Transformer self-attention, the scores for each query token are produced by a softmax over all visible previous tokens. As a result, each query token distributes a fixed total attention mass across the available context tokens. When we aggregate attention across query tokens, layers, and heads to form 𝑠 𝑖,𝑡 , the attention score is influenced not only by token relevance but also by how many tokens share this fixed attention mass. This dynamic introduces a structural bias during chunked pro-cessing. If two chunks are equally relevant but differ in length, the shorter chunk will inherently exhibit a higher attention scale simply because the same total attention mass is distributed across fewer tokens. As a result, tokens in shorter chunks can appear artificially inflated in importance compared to those in longer chunks. To make the attention scale aligned across chunks, we apply a simple chunk-length based normalization: 
+
+˜𝑠 𝑖,𝑡 = 𝑠 𝑖,𝑡 · 𝑇 𝑖 
+
+𝑇 default 
+
+, (2) where 𝑇 𝑖 is the length of chunk 𝐶 𝑖 and 𝑇 default is the default chunk length. This normalization reduces the scores of shorter chunks in pro-portion to their length, preventing the inflation caused by higher attention scale. As illustrated in Figure 2 Stage 1○, Step (a) and (b), the normalization is especially important for the final chunk, which is often shorter than 𝑇 default .
+
+3.1.3 Reconstructing Full Document Attention. After computing normalized attention scores for all chunks, we reconstruct a full document attention score by concatenating chunk-level vectors in their original order. Let ˜s𝑖 denote the normalized attention vector for chunk 𝐶 𝑖 . We define the full document attention vector as 
+
+S = concat (˜s1, ˜s2, . . . , ˜s𝑛 ) . (3) The resulting vector S is aligned with the original document token order and serves as the full document relevance score for the next stage. 
+
+3.1.4 KV-cache reuse for efficient attention computation. Comput-ing attention independently for every chunk–query pair would require repeatedly encoding the same chunk content for differ-ent queries. To eliminate this redundancy, we reuse the model’s key–value (KV) cache. We decompose the chunk–query input into two parts. The prefix 
+
+is the context section, while the suffix is the query section. The 
+
+> (a) Raw attention without differ-ential attention
+> (b) Differential attention with its farthest query
+
+Figure 3: Effect of differential attention on token-level rele-vance. (a) Without differential attention, generic structural tokens "Introduction" receive high attention. (b) With differ-ential attention, generic content attention is canceled, reduc-ing noise in the attention score. 
+
+query text is inserted after the Question: marker and varies across queries. For each chunk 𝐶 𝑖 , we encode the prefix once and store the resulting KV states. These cached states represent the hidden rep-resentations of the chunk tokens and can be reused for multiple queries. We index cache entries using a hash of the chunk token IDs and maintain the cache per document. When switching to a new document, all cached states are cleared to prevent cross-document reuse. When processing a query 𝑞 for chunk 𝐶 𝑖 , we retrieve the cached KV states and run the model only on the query suffix, supplying the cached states as past key values. During this step, each query token attends to the cached context tokens, allowing the model to produce the same attention scores as if the full prefix–suffix sequence had been processed jointly. We then aggregate these attention scores to compute 𝑠 𝑖,𝑡 without re-encoding the chunk. This cache-based execution preserves the exact attention com-putation while substantially improving efficiency. Each chunk is encoded once and can be reused across many queries, reducing both computation and memory overhead. 
+
+## 3.2 Differential Attention 
+
+A full document attention map is not yet sufficient for context selec-tion. Raw attention is a useful relevance score, but it often highlights content that is broadly noticeable rather than truly informative for the target query, such as section headers and formatting markers. Figure 3 illustrates this behavior. In Figure 3a, the model correctly attends to useful evidence, but it also gives high attention to the header token “Introduction,” which is noticeable in the document structure but not necessarily relevant to the query. Because of this, attention-guided selection may waste budget on text that looks important but is not actually useful for answering the question. This observation suggests a simple way to separate signal from background. Many of these high-attention regions are query invari-ant. They receive attention for a wide range of questions because they are prominent or central to the document structure. If we can estimate this shared background attention, we can subtract it away and keep what remains distinctive to the target query.                                           
+
+> 5Query 𝑞 Query 𝑞 −
+> What is the
+> of the
+> paper?
+> title
+> What is the
+> of
+> the paper?
+> publication year
+> and venue
+> Document D
+> Query -to -
+> document
+> attention
+> 𝐒 𝑞 𝑘
+> Query -to -
+> document
+> attention
+> 𝐒 𝑞 𝑘
+> −
+> ഥ𝑺 𝑞 =1
+> 𝑇 𝑞
+> 𝑺 𝑞 𝑘
+> ഥ𝑺 𝑞 −=1
+> 𝑇 𝑞 −
+> 𝑺 𝑞 𝑘
+> −
+> 𝑑 𝑞 =ഥ𝑺 𝑞 −ഥ𝑺 𝑞 −
+> Differential attention
+> score for query q
+> Compute
+> attention scale
+> for 𝑞 and 𝑞 −
+> Each query token distributes total attention
+> mass 1over 𝐷 .
+> Summing across query tokens scales with
+> query length; we average over query tokens .
+> Unified attention scale Moderate attention scale High attention scale
+> Query Normalization
+
+Figure 4: Query normalization for differential attention. Each query token distributes a fixed total attention scale over 𝐷 ,
+
+S(𝑞 ) is the aggregation over all heads and layers across to-kens with query length. We therefore average the Query-to-document attention scale to obtain ¯S(𝑞 ) = 1 
+
+> 𝑇 𝑞
+
+S(𝑞 ) and 
+
+¯S(𝑞 − ) = 1 
+
+> 𝑇 𝑞 −
+
+S(𝑞 − ), then compute 𝑑 (𝑞 ) = ¯S(𝑞 ) − ¯S(𝑞 − ).
+
+As illustrated in Figure 3b, we compute attention for the target query and for a contrasting query, then take their difference. Re-gions that are highly attended under both queries are treated as background and largely cancel out; regions that matter primarily for the query remain prominent, yielding a cleaner, more query-specific relevance score. This framing raises two practical questions that we address next. First, how to perform the subtraction properly? Second, how do we construct an effective contrasting query that captures document-wide noise while minimally overlapping with the true evidence needed for the target query? One practical challenge is that we cannot directly subtract the two aggregated attention scores when the queries have different lengths. Each query token spreads a fixed amount of attention mass over the document, so a longer query naturally accumulates a larger total attention magnitude even when the overall attention pattern is similar. To make the two scores comparable, we first normalize attention by query length before taking the difference. 
+
+3.2.1 Query Normalization. Figure 4 illustrates why query normal-ization is necessary. Consider two queries over the same document: a shorter target query 𝑞 , "What is the title of the paper?" and a longer contrasting query 𝑞 − , "What is the publication year and venue of the paper?". Even if both queries attend to the same generic re-gions of the document, the longer query contributes more total attention mass simply because it has more query tokens, causing a misalignment in attention scale. As a result, directly subtracting the aggregated scores S(𝑞 ) and S(𝑞 − ) would confuse query length with relevance. To remove this bias, we convert each reconstructed query-to-document attention score into an average per-query-token score. Using the full document attention vector from Equation (3), we write S(𝑞 ) and S(𝑞 − ) for the reconstructed attention scores obtained with the target query 𝑞 and the contrasting query 𝑞 − , respectively. We then normalize each score by its query length: 
+
+¯S(𝑞 ) = 1
+
+𝑇 𝑞 
+
+S(𝑞 ). (4) Similarly, for a contrasting query 𝑞 − with length 𝑇 𝑞 − ,
+
+¯S(𝑞 − ) = 1
+
+𝑇 𝑞 −
+
+S(𝑞 − ). (5) We then define the differential attention score for the target query as 
+
+d(𝑞 ) = ¯S(𝑞 ) − ¯S(𝑞 − ). (6) This normalization unifies the attention scale of the two queries before subtraction, so the difference reflects relevance rather than query length. In practice, it stabilizes differential attention when query lengths vary and prevents longer queries from dominating the difference purely due to scale. The resulting score d(𝑞 ) highlights regions that are more strongly attended by the target query than by the contrasting query. Tokens that attract attention under both queries tend to cancel out and move closer to zero, while tokens that are uniquely relevant to the target query receive larger positive values. 
+
+3.2.2 Applying Differential Attention in SAGE . To make differential attention effective, the contrasting query should attend to document regions that differ from those needed by the target query. This improves separation between target-specific evidence and shared background attention, and therefore increases the denoising effect of subtraction. In our implementation, we consider three variants for analysis: 
+
+• Raw query ( 𝑞 ). The user’s original question, without differential subtraction. 
+
+• Fixed contrast query. A fixed prompt shared across the dataset. For this paper, we used “Please repeat the context.” .
+
+• Farthest query ( 𝑞 − ). A query selected to be maximally dissimilar to the target query. When multiple questions are available for the same document, we choose the farthest query as the one whose embedding is most distant from the target query embedding. By single differential attention calculation, we got target-specific evidence revealed for both queries. We compare these variants empirically in Section 4.6 and show that using a semantically distant contrast query yields a cleaner relevance score and improves downstream selection quality. 
+
+## 3.3 Unit Window Selection with Budget Control 
+
+Given the unified attention scores from the earlier stages, SAGE 
+
+converts token-level relevance signals into a set of coherent text snippets that the generation model can consume under a strict token budget. Although attention is computed at the token level, selecting only isolated high-scoring tokens produces a fragmented context that is poorly suited for generation. LLMs generally benefit from con-tiguous spans that preserve local semantics. We therefore perform budget-aware selection over fixed-length windows and merge over-lapping windows into coherent snippets. To reduce the effect of spiky token-level scores, we also apply a light local smoothing step before window scoring so that nearby tokens in the same evidence span receive more consistent scores. 
+
+> 6
+
+We define a user-specified budget 𝑏 ∈ ( 0, 1] as the fraction of the document to retain. The total number of selected tokens is constrained to ⌈𝑏𝑇 𝐷 ⌉. We use a base window ratio 𝑤 = 0.02 (2% of the document length) and define the window length 𝐿 as 
+
+𝐿 =
+
+(
+
+⌈𝑏𝑇 𝐷 ⌉, if 𝑏 < 𝑤, 
+
+⌈𝑤𝑇 𝐷 ⌉, if 𝑏 ≥ 𝑤 . 
+
+When 𝑏 < 𝑤 , selecting a single window preserves the most relevant contiguous region under the budget. When the budget is larger than 𝑤 , fixing the window size allows SAGE to select multiple evidence regions distributed across the document. We slide a length 𝐿 window over the full document attention matrix and compute an aggregate score for each window. Windows are ranked by score, and selection proceeds greedily under the bud-get constraint. If a newly selected window overlaps with previously selected spans, the spans are merged. Otherwise, the window is added as a new span. This process continues until the token budget is exhausted. This strategy avoids two common failure modes. First, selecting a single long span may introduce substantial irrelevant text while missing important evidence in other parts of the document. At the other extreme, selecting many disjoint high-scoring tokens or tiny spans yields a fragmented context that is difficult for the generation model to use. Unit-window selection balances these extremes by concentrating the budget on high utility regions while preserving local coherence. Finally, the selected snippets are assembled in an original logical order into a reduced context prompt and then passed to a generation model to produce the final answer. 
+
+## 4 EVALUATION 
+
+We evaluate SAGE on four datasets that stress attention guided context reduction from different angles, including document length, structure, modality, and question format: QuALITY [ 35 ], Paper [ 23 ], Notice [ 23 ], and AIT-QA [ 16 ]. We report task performance under varying token budgets and compare SAGE against RAG baselines on each dataset. For evaluation, we use an LLM as a judge to provide a binary correctness decision. We also compute cosine similarity for all questions to measure semantic alignment between SAGE ’s generated responses and the ground truth. Together, these metrics provide a complementary view of output quality. Rather than treating each dataset as an isolated benchmark, we use them to examine complementary aspects of long context understanding, including reasoning across distributed evidence, ro-bustness to domain variation, efficiency under tight token budgets, and adaptability to inputs. We structure our evaluation around the following guiding ques-tions: (Q1) Does SAGE consistently outperform retrieval-based pipelines that use strong embedding models under aligned token bud-gets? (Q2) Can SAGE handle reasoning-intensive questions when rel-evant evidence is hard to find by keywords or semantic similarity? (Q3) How does token budget size affect accuracy? (Q4) How does the size of the attention model influence context selection quality and accuracy? (Q5) How does SAGE compare with retrieval pipelines in run-time cost and computational overhead? (Q6) Does SAGE remain effective across different domains and document structures without dataset-specific tuning? (Q7) How do different differential attention strategies influence context selection quality? (Q8) Can SAGE remain effective under budgets smaller than a single retrieval chunk, where chunk-based methods become inflexible? (Q9) Can attention-guided selection extend to other modalities while preserving task accuracy? 
+
+## 4.1 Datasets 
+
+The four datasets varied in different modalities, context lengths, and QA formats. They also varied in their primary focus and the number of questions, allowing us to evaluate SAGE comprehensively across diverse settings. Table 1 summarizes these key characteristics. 
+
+QuALITY [ 35 ] is a long passage, multiple-choice benchmark for reading comprehension and reasoning. We evaluate on QuALITY-hard , a difficult subset constructed by labeling questions that an-notators could not reliably answer under time-constrained search, but could answer in an untimed setting. As a result, QuALITY-hard emphasizes questions that require integrating evidence across the passage rather than relying on localized keyword matches. 
+
+Paper and Notice are derived from ZenDB [ 23 ] and provide multi-question workloads over the same document. Paper con-tains very long scientific publications with both localized metadata queries and open-ended semantic questions, such as the main contri-bution. This complexity makes it a challenging setting for retrieval and a highly useful testbed for analyzing differential attention. No-tice consists of regulatory notices written in formal, repetitive legal language. Its questions target specific fields whose answers are typically localized within the document. Finally, AIT-QA [ 16 ] evaluates whether attention-guided selec-tion extends beyond free text to semi-structured tables. It contains 515 questions over 116 tables with complex headers and domain-specific terminology. 
+
+## 4.2 Baselines 
+
+We compare SAGE against a standard RAG pipeline. We instan-tiate the RAG baselines with top-performing embedding models from the MTEB leaderboard [ 30 , 32 ], including Octen-Embedding-4B , Qwen3-Embedding-8B , and UAE-Large-V1 . These three models cover a strong range of retrieval quality and computational cost, and represent competitive, widely used choices in modern RAG systems. Retrieval is performed at the document level. For each query, RAG searches only among chunks belonging to the corresponding document, rather than across the entire corpus. For each document, we tokenize the text and split it into overlapping chunks of fixed length. We compute embeddings for all chunks and retrieve the top-𝑘 chunks most similar to the query using cosine similarity. Retrieved chunks are reordered according to their original positions in the document, deduplicated in overlapping regions, concatenated, 
+
+> 7
+
+Table 1: Summary of evaluation datasets. The four datasets provide complementary test settings across different perspectives.               
+
+> Dataset Modality Context QA format Main focus # Questions QuALITY-hard
+> Text (passage) Long-context Multiple-choice Multi-hop and Reasoning intensive reading comprehension hard subset of QuALITY
+> Paper
+> (ZenDB) Text (scientific papers) Very long-context Open ended QA Mixed factual and semantic extrac-tion; long-document analysis 9 per document
+> Notice
+> (ZenDB) Text (regulatory notices) Long con-text Open ended QA Localized factual extraction under aligned token budgets 6 per document
+> AIT-QA Table (airline SEC filings) Semi-structured QA Table QA over complex headers and domain-specific content 515 (over 116 tables)
+
+and then fed to the answer-generation model. To isolate the effect of context selection, we use the same answer generation model and decoding configuration for both RAG and SAGE . In particular, generation is conditioned on the selected context and the query, with the temperature fixed to 0.0 to eliminate stochastic variation. We vary 𝑘 to assess how retrieval depth impacts performance and, when feasible, adjust the resulting prompt length to match SAGE ’s token budget, enabling fair, token-aligned comparisons. 
+
+## 4.3 Evaluation Metrics 
+
+We evaluate answer quality using two complementary criteria: 
+
+LLM-based judgment and semantic similarity . These metrics are chosen to reflect the heterogeneous answer formats across datasets, ranging from discrete multiple choice and numeric outputs to long, open-ended textual responses. 
+
+LLM-Based Judgment. Evaluating long-context QA is challeng-ing because many questions admit multiple valid phrasings, and small surface differences do not necessarily indicate incorrect rea-soning. We therefore use an LLM as a judge to apply explicit, task-aware grading rules and produce a binary correctness decision. For QuALITY, answers are discrete, so correctness is evaluated by exact match. For the other datasets, the judge directly decides whether an answer is correct, allowing harmless rephrasing while penalizing missing or incorrect core content. As answer formats and grading criteria differ across datasets, we design a separate judging prompt for each dataset. Each prompt specifies the expected answer format and the criteria for correctness, and is shared by SAGE and all baselines within that dataset. To ensure the judge behaves as intended, we manually inspected the prompts and audited a substantial sample of judged instances (about 200 per dataset) to verify that the outputs follow the stated rules. 
+
+Semantic Similarity Score. Binary correctness can hide mean-ingful differences among partially correct answers, especially for long, open-ended responses where the format may vary even if the core idea aligns with the ground truth. To better characterize answer quality, we additionally compute a semantic similarity score between the generated answer and the reference. Specifically, we embed both texts and report their cosine similarity in [0,1], which is robust to paraphrasing and reflects partial semantic overlap. We analyze similarity at the distribution level using Cumulative Dis-tribution Functions (CDFs) to compare how often each method produces high-similarity answers under different context budgets. 
+
+## 4.4 Experimental Setup 
+
+To enable a fair, controlled comparison, we use separate models for attention computation, retrieval, answer generation, and evaluation, while keeping all other settings and pipeline components fixed. 
+
+Attention Models. For SAGE , attention scores are computed using three language models of increasing scale: LLaMA-3.2-1B , Qwen3-8B , and Qwen3-14B . These models are used exclusively for attention estimation and do not participate in answer generation. This setup allows us to study the impact of model capacity on attention quality while keeping the downstream generation fixed. 
+
+Answer Generation and Evaluation. All methods, including RAG baselines, use Gemini-2.5-Flash-Lite for answer generation. By fix-ing the generation model and decoding configuration, we isolate the effect of context selection. Unless stated otherwise, SAGE uses the farthest query differential attention variant when construct-ing the reduced context for generation. LLM-based evaluation is performed using GPT-4o-mini across all datasets. 
+
+Embeddings. Different embedding models are used at different stages to balance efficiency and semantic fidelity. For farthest ques-tion selection in differential attention, we use all-MiniLM-L6-v2 due to its low computational cost and reliable relative distance estimates. For semantic similarity evaluation, we use Qwen3-Embedding-0.6B ,which provides stronger semantic representations while remaining efficient at scale. 
+
+## 4.5 QuALITY 
+
+QuALITY-hard [ 35 ] is designed to stress long-context reasoning. The questions are typically unambiguous, but answering them often requires combining evidence from multiple parts of a passage rather than matching a single keyword-rich context. This makes QuALITY-hard a direct test of whether attention-guided context reduction can preserve reasoning quality when relevant evidence is not reliably surfaced by retrieval similarity. In this section, we focus on answering (Q1) to (Q5). 
+
+4.5.1 Effectiveness compared to strong RAG baselines (Q1, Q2). Fig-ure 5 shows that SAGE outperforms on QuALITY-hard across a range of tested token budgets. The strength of SAGE comes from better context selection, not from using a large attention model. For instance, at a 10% token budget, SAGE with Qwen3-14B achieves similar accuracy compared to RAG configurations that use nearly four times as many tokens. Moreover, even the smallest attention        
+
+> 8510 15 20 25 30 35 40
+> Avg. Token Usage (%)
+> 0.30
+> 0.35
+> 0.40
+> 0.45
+> 0.50
+> 0.55
+> 0.60
+> 0.65
+> 0.70
+> Avg. Accuracy
+> SAGE
+> LLaMA-3.2-1B
+> Qwen3-8B
+> Qwen3-14B
+> RAG Baselines
+> Qwen3-Embedding-8B
+> UAE-Large-V1
+> Octen-Embedding-4B
+
+Figure 5: Accuracy on QuALITY-hard versus average token usage. We compare SAGE using attention models of different sizes with RAG baselines using different retrieval embed-dings. Even the 1B attention model outperforms RAG, and performance improves as model size increases. 
+
+model, LLaMA-3.2-1B , outperforms all strong RAG baselines across the evaluated budget range. SAGE works well as it selects evidence based on attention signals that reflect how the question connects to different parts of the passage, which helps when evidence is spread across the document. Overall, these results address (Q1) and (Q2): Across all evaluated settings, SAGE consistently outper-forms RAG baselines at similar or lower token usage, including RAG configurations using strong retrieval embeddings. 
+
+4.5.2 More token budget is not always better (Q3). As the token budget increases, both SAGE and RAG generally improve in Fig-ure 5. However, at larger budgets, the marginal gains diminish, and the curves begin to plateau. Concretely, once the prompt al-ready contains the key evidence, adding more context yields few additional correctly answered questions. This pattern suggests that QuALITY-hard is not primarily bottlenecked by raw context length. Instead, performance depends largely on retrieval quality and on whether the prompt contains the right evidence. The observation is consistent with prior findings that adding more retrieved context does not necessarily translate into better long-context QA accuracy [ 13 , 28 ]. Taken together, these results answer (Q3): accuracy satu-rates beyond moderate budgets, indicating that evidence selection matters more than simply providing more tokens. Token usage between SAGE and RAG is not strictly aligned on QuALITY. QuALITY documents vary substantially in length, approximately 1.5K to 6K words without punctuation [ 35 ]. Because RAG retrieves fixed-size chunks, the final prompt length depends on the number of retrieved chunks and the amount of overlap among them, which makes it difficult to hit an exact token budget in practice. In contrast, SAGE directly optimizes for a user-specified budget and can reliably meet it, while chunk-based retrieval may overshoot or undershoot the desired token limit. 
+
+4.5.3 Ablation on attention model size (Q4). As we increase the attention model size from LLaMA-3.2-1B to Qwen3-8B and Qwen3-14B , accuracy improves consistently across budgets. The effect is strongest under tight constraints, where selection mistakes are most costly. At a 5% token budget, accuracy increases from 0.36 (1B) to 0.46 (8B) and 0.48 (14B), meaning that larger attention models enable SAGE to answer substantially more questions correctly while operating under the same strict budget. At higher budgets the gap shrinks, again reflecting diminishing returns once most key evidence is already included. Importantly, SAGE does not require a large attention model to be effective: even the 1B scorer remains competitive and already outperforms the strongest RAG baselines in Figure 5. Overall, these results answer (Q4), increasing attention model capacity improves selection quality and yields higher QA accuracy, with the largest gains under tight budgets. 
+
+4.5.4 Runtime and computational overhead (Q5). We further exam-ine the runtime on QuALITY-hard. For RAG, the dominant overhead comes from computing embeddings for all 8,798 chunks, which takes 98.2s (UAE-Large-V1), 370.7s (Qwen3-Embedding-8B), and 
+
+838.6s (Octen-Embedding-4B). For SAGE , using LLaMA-3.2-1B as the attention model, we answer 3,797 queries in 690.9s , with 3,011 
+
+cache hits that reuse document encodings across queries. Overall, 
+
+SAGE is slower than the UAE and Qwen3 RAG baselines, but faster than the Octen baseline. Taken together, these results answer (Q5). 
+
+SAGE operates in a similar runtime regime to retrieval pipelines while achieving materially higher QuALITY-hard accuracy. 
+
+4.5.5 Public leaderboard: competitive ranking under strict budgets. 
+
+On the public QuALITY leaderboard [ 34 ], SAGE ranks 4th on QuALITY-hard while using only a 10% context budget with Qwen3-8B . This demonstrates that the accuracy gains we observe in con-trolled experiments translate to a competitive end-to-end system under strict token constraints. Notably, SAGE achieves this rank-ing with substantially lower token usage than many other high-performing systems. Many of those approaches rely on heavier pipelines, such as fine-tuning and longer inputs, which typically lead to higher inference latency. 
+
+## 4.6 Paper 
+
+We next evaluate SAGE on the Paper dataset from ZenDB [ 23 ]. Compared to QuALITY-hard, Paper pushes context reduction into a more realistic long document setting. Scientific papers are substan-tially longer and follow a clear section structure. Their questions vary from asking localized metadata, such as venue and year, to open-ended semantic queries like the main contribution of a paper. This combination lets us test whether the advantages of SAGE 
+
+extend beyond narrative passages. Concretely, Paper answers (Q1), (Q2), (Q3), and (Q7), and serves as evidence for (Q6). Without any dataset-specific tuning, SAGE remains effective on Paper, indicating that the benefits of attention-guided context reduction extend be-yond narrative passages to structurally complex scientific writing. 
+
+4.6.1 LLM-judge accuracy: (Q1) to (Q3). Figure 6 reports LLM-judge accuracy over average token usage for several representa-tive questions. Overall, SAGE achieves higher accuracy than RAG baselines at similar budgets ((Q1)), and its performance increases smoothly with additional context, indicating that the extra tokens selected by attention are generally helpful rather than distracting. 
+
+> 9
+
+SAGE Farthest RAG Qwen3 Embedding 8B RAG Uae Large V1 RAG Bflhc Octen Embedding 4B 0 5 10 15 
+
+> Average tokens used (%)
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Accuracy
+
+(a) What is the number of authors 0 5 10 15  
+
+> Average tokens used (%)
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Accuracy
+
+(b) What is the main contribution of the paper 0 5 10 15 
+
+> Average tokens used (%)
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Accuracy
+
+(c) What is the publication year and venue of the paper 0 5 10 15 
+
+> Average tokens used (%)
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Accuracy
+
+(d) What is the title of the paper 
+
+Figure 6: LLM-judge accuracy on the Paper dataset. Accuracy vs. average token usage over documents for SAGE and RAG baselines across representative questions. SAGE 0.5% 
+
+> SAGE 1.0%
+> SAGE 10.0%
+> SAGE 15.1%
+> Best RAG 1.5%
+> Best RAG 10.9%
+> Best RAG 15.5% 0.00 0.25 0.50 0.75 1.00
+> Similarity Score
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> P(Similarity > x)
+
+(a) What is the number of au-thors 0.00 0.25 0.50 0.75 1.00 
+
+> Similarity Score
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> P(Similarity > x)
+
+(b) What is the main contribution of the paper 0.00 0.25 0.50 0.75 1.00 
+
+> Similarity Score
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> P(Similarity > x)
+
+(c) What is the publication year and venue of the paper 0.00 0.25 0.50 0.75 1.00 
+
+> Similarity Score
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> P(Similarity > x)
+
+(d) What is the title of the paper 
+
+Figure 7: Semantic similarity CDFs on the Paper dataset. CDFs of cosine similarity between generated and ground-truth answers, comparing SAGE to the best RAG baseline at matched average token usage (including the 0.5% budget). Results use Qwen3-8B. 
+
+The difference is most visible on reasoning-intensive questions where evidence is not well captured by keyword similarity, address-ing (Q2). For example, on “What is the main contribution of the paper?” , SAGE improves rapidly with budget and remains consis-tently above RAG across the displayed range. In other words, as we allow more context, the extra tokens selected by SAGE more often contain the missing evidence needed to answer the question correctly, whereas retrieving more chunks improves correctness more slowly. For questions with more localized answers, such as publica-tion year and venue in Figure 6c, both methods benefit from addi-tional context, but SAGE reaches high accuracy with fewer tokens. For metadata queries such as title and author count, SAGE again achieves consistently stronger accuracy under the same budgets, reflecting more reliable selection of document regions that contain the relevant fields. We also evaluated larger budgets up to 40%. However, for most questions, performance flattens out at moderate budgets, with only a small subset continuing to improve at higher budgets. This an-swers (Q3) and motivates focusing Figure 6 on the most informative range up to 15%, which captures the most informative setting where differences between methods are most pronounced. 
+
+4.6.2 Semantic similarity: (Q1) to (Q3). We complement judge ac-curacy with semantic similarity distributions. Figure 7 plots CDFs of cosine similarity between generated answers and ground truth references. For a similarity threshold 𝑥 , the y-axis reports the frac-tion of questions whose similarity exceeds 𝑥 . Curves that lie higher indicate better overall answer quality. We plot the similarity thresh-old from 1 to 0 on the x-axis to make high similarity behavior easier to compare. We also evaluated ROUGE. It shows the same overall trends. For clarity, we report cosine similarity. Across representative questions, SAGE dominates the best per-forming RAG baseline in the middle-to-high similarity region, rein-forcing (Q1) by showing improvements in overall answer quality rather than only binary pass rates. The largest gains again appear on open-ended reasoning questions such as “main contribution”. 
+
+> 10 Raw (b=0.005)
+> Raw (b=0.1)
+> Raw (b=0.15)
+> Raw (b=0.4)
+> Fixed Question (b=0.005)
+> Fixed Question (b=0.1)
+> Fixed Question (b=0.15)
+> Fixed Question (b=0.4)
+> Farthest (b=0.005)
+> Farthest (b=0.1)
+> Farthest (b=0.15)
+> Farthest (b=0.4) 0.00 0.25 0.50 0.75 1.00
+> Similarity Score
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> P(Similarity > x)
+
+(a) what is the authors of the paper 0.00 0.25 0.50 0.75 1.00  
+
+> Similarity Score
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> P(Similarity > x)
+
+(b) what is the main contribution of the paper 
+
+Figure 8: Effect of differential attention on the Paper dataset. Semantic similarity CDFs compare Raw attention with differential attention variants under different token budgets. Experiments are conducted using Qwen3-8B. 
+
+This supports our answer to (Q2). Under the same budget, SAGE 
+
+produces a higher fraction of answers that closely match the ref-erence semantics, while increasing retrieval depth yields smaller shifts in the distribution. The CDFs also answer (Q3): increasing the budget generally shifts curves upward, but the improvements flatten out at larger budgets. Taken together, the judge and similarity views agree that SAGE 
+
+converts budget into answer quality more effectively than retrieval, especially for reasoning-intensive semantic questions. 
+
+4.6.3 Different Differential Attention Variant (Q7). We study the differential attention variant on Paper . Figure 8 compares raw atten-tion with fixed contrast query and farthest query. Across budgets and representative questions, both differential variants shift the similarity CDFs upward relative to raw attention, meaning they pro-duce a larger fraction of high-quality answers under the same token budget. This directly answers (Q7): differential attention strength-ens context selection by filtering out noise and producing cleaner, query-specific relevance scores. Between the two variants, farthest question performs best over-all. Its CDF curves dominate the fixed contrast variant across most similarity thresholds, with especially clear gains on reasoning ques-tions (Figure 8b). In practice, prefer an informative contrast question when available. Otherwise, use fixed contrast, which still delivers strong performance. 
+
+## 4.7 Notice 
+
+We next evaluate on the Notice dataset from ZenDB [ 23 ]. Notice documents have less variation in length, which enables more con-trolled comparisons with aligned token usage between SAGE and RAG. Extremely small budgets that fall below a single retrieval chunk are studied on this dataset. As Notice has a markedly differ-ent document style, the results below provide additional evidence for (Q6), showing SAGE remains effective without specific tuning. 
+
+4.7.1 Accuracy and semantic quality under aligned budgets. Fig-ure 9 reports LLM-judge accuracy versus average token usage for representative questions, and Figure 10 complements this view with semantic similarity distributions. Across questions, SAGE matches 
+
+Table 2: AIT-QA results comparing full-table RAG and Top-4 row selection methods. Method Value Avg. Row Usage 
+
+Full Table 0.88 100% 
+
+SAGE 0.87 51% or outperforms strong RAG baselines at aligned token usage, while also supporting substantially smaller budgets (Q1). 
+
+4.7.2 Budgets below a single retrieval chunk (Q8). Notice highlights a practical limitation of chunk-based retrieval. Even retrieving a sin-gle chunk incurs a fixed token cost, which limits its flexibility under tight budgets. In contrast, SAGE selects evidence at finer granu-larity and remains effective even when the budget is smaller than a single retrieved chunk. This answers (Q8): SAGE can operate at extremely low budgets that chunk-based RAG cannot meaningfully support. 
+
+A failure mode at larger budgets. An instructive exception ap-pears for “What are the state abbreviation and ZIP code of the com-pany?” in Figure 9d. Here, SAGE performs best at small budgets, but accuracy decreases as the budget grows and approaches the RAG baselines. The same trend appears in the similarity CDF (Figure 10d). This behavior reflects a limitation of greedy attention-based selec-tion in repetitive documents. With a small budget, SAGE typically captures the query-relevant ZIP code. As the budget increases, additional sections containing other ZIP codes may be included, introducing competing candidates and reducing precision. More broadly, this highlights that adding more context is not always bene-ficial when documents contain repeated entities and near duplicate fields. 
+
+## 4.8 AIT-QA 
+
+We finally evaluate whether attention-guided selection extends beyond free-form text to semi-structured inputs, addressing (Q9), using the AIT-QA dataset [ 16 ]. Each document in AIT-QA is a structured table represented in JSON format. As a result, neither standard RAG nor token-based context reduction can be applied 
+
+> 11
+
+SAGE Farthest RAG Qwen3 Embedding 8B RAG Uae Large V1 RAG Bflhc Octen Embedding 4B 0 20 40 60 
+
+> Average tokens used (%)
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Accuracy
+
+(a) What are the violation items 0 20 40 60  
+
+> Average tokens used (%)
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Accuracy
+
+(b) What is the date of the notice 0 20 40 60  
+
+> Average tokens used (%)
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Accuracy
+
+(c) What is the name of the com-pany 0 20 40 60 
+
+> Average tokens used (%)
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Accuracy
+
+(d) What are the state abbreviation and ZIP code of the company 
+
+Figure 9: LLM-judge accuracy on the Notice dataset. Accuracy versus average token usage for SAGE and RAG baselines across representative questions. SAGE supports budgets smaller than a single RAG chunk. For question (d), accuracy decreases as token usage increases; we discuss this failure mode in Section 4.7. SAGE 5.0%  
+
+> SAGE 22.1%
+> SAGE 38.1%
+> SAGE 53.1%
+> SAGE 74.2%
+> Best RAG 7.6%
+> Best RAG 22.8%
+> Best RAG 37.9%
+> Best RAG 53.0% Best RAG 74.0% 0.00 0.25 0.50 0.75 1.00
+
+Similarity Score 
+
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> P(Similarity > x)
+
+(a) What are the violation items 0.00 0.25 0.50 0.75 1.00 
+
+Similarity Score  
+
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> P(Similarity > x)
+
+(b) What is the date of the notice 0.00 0.25 0.50 0.75 1.00 
+
+Similarity Score  
+
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> P(Similarity > x)
+
+(c) What is the name of the com-pany 0.00 0.25 0.50 0.75 1.00 
+
+Similarity Score 
+
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> P(Similarity > x)
+
+(d) What are the state abbreviation and zip code of the company 
+
+Figure 10: Semantic similarity CDFs on the Notice dataset. CDFs compare SAGE and the best performing RAG baseline under matched average token budgets across representative questions. Results are obtained using Qwen3-8B for attention estimation. 
+
+directly. If a table is split into text chunks or partial windows would break row–column structure and substantially hinder reasoning. To handle this setting, we adapt SAGE to operate at the row level . We compute query-aware attention over the full table in its original JSON representation. For each row, we aggregate token-level attention into a single relevance score and then select the top-𝑘 rows. The reduced prompt includes only the selected rows along with the column headers. Table 2 compares this row-selection variant with a full-table baseline. Selecting only the top rows achieves accuracy comparable to using the full table, while substantially reducing the amount of table content passed to the generation model. This answers (Q9), 
+
+SAGE can preserve task accuracy on semi-structured tables while enabling budget-aware context reduction. These findings show that SAGE remains effective beyond un-structured text, highlighting its potential as a flexible, budget-aware context selection framework that transfers across data types with-out additional fine-tuning (Q6). 
+
+## 5 CONCLUSION 
+
+We presented SAGE , a training-free, plug-and-play context reduc-tion framework that leverages a lightweight local LLM to extract highly compact, fine-grained, and query-relevant subsets from long documents under strict token budgets. Across four complementary benchmarks, SAGE consistently outpaces strong RAG baselines in token efficiency, demonstrating its largest gains on complex, reasoning-intensive questions. Furthermore, by utilizing differen-tial attention, the framework remains highly effective even on sub-stantially longer, noisy scientific papers. Beyond standard text, our results on AIT-QA confirm that SAGE naturally extends to struc-tured inputs, preserving critical tabular data while drastically re-ducing the exposed context. Moving forward, we aim to enhance disambiguation mechanisms for complex structured data, integrate multi-stage retrieval, and expand SAGE to process richer multi-modal documents. 
+
+> 12
+
+## REFERENCES 
+
+[1] Amey Agrawal, Nitin Kedia, Anmol Agarwal, Jayashree Mohan, Nipun Kwa-tra, Souvik Kundu, Ramachandran Ramjee, and Alexey Tumanov. 2025. On Evaluating Performance of LLM Inference Serving Systems. arXiv preprint arXiv:2507.09019 (2025). [2] Guoxuan Chen, Han Shi, Jiawei Li, Yihang Gao, Xiaozhe Ren, Yimeng Chen, Xin Jiang, Zhenguo Li, Weiyang Liu, and Chao Huang. 2024. Sepllm: Accelerate large language models by compressing one segment into one separator. arXiv preprint arXiv:2412.12094 (2024). [3] Yilong Chen, Guoxia Wang, Junyuan Shang, Shiyao Cui, Zhenyu Zhang, Tingwen Liu, Shuohuan Wang, Yu Sun, Dianhai Yu, and Hua Wu. 2024. Nacl: A general and effective kv cache eviction framework for llm at inference time. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) . 7913–7926. [4] Xin Cheng, Xun Wang, Xingxing Zhang, Tao Ge, Si-Qing Chen, Furu Wei, Huishuai Zhang, and Dongyan Zhao. 2024. xrag: Extreme context compres-sion for retrieval-augmented generation with one token. Advances in Neural Information Processing Systems 37 (2024), 109487–109516. [5] Suyu Ge, Yunan Zhang, Liyuan Liu, Minjia Zhang, Jiawei Han, and Jianfeng Gao. 2023. Model tells you what to discard: Adaptive kv cache compression for llms. 
+
+arXiv preprint arXiv:2310.01801 (2023). [6] Tao Ge, Jing Hu, Lei Wang, Xun Wang, Si-Qing Chen, and Furu Wei. 2023. In-context autoencoder for context compression in a large language model. arXiv preprint arXiv:2307.06945 (2023). [7] Yuyao Ge, Shenghua Liu, Yiwei Wang, Lingrui Mei, Baolong Bi, Xuanshan Zhou, Jiayu Yao, Jiafeng Guo, and Xueqi Cheng. 2025. Focusing by Contrastive At-tention: Enhancing VLMs’ Visual Reasoning. arXiv preprint arXiv:2509.06461 
+
+(2025). [8] Saurabh Goyal, Anamitra Roy Choudhury, Saurabh Raje, Venkatesan Chakar-avarthy, Yogish Sabharwal, and Ashish Verma. 2020. Power-bert: Accelerating bert inference via progressive word-vector elimination. In International Confer-ence on Machine Learning . PMLR, 3690–3699. [9] Ruishan Guo, Yibing Liu, Guoxin Ma, Yan Wang, Yueyang Zhang, Long Xia, Kecheng Chen, Zhiyuan Sun, and Daiting Shi. 2026. When Less is More: The LLM Scaling Paradox in Context Compression. arXiv preprint arXiv:2602.09789 
+
+(2026). [10] Huiqiang Jiang, Qianhui Wu, Chin-Yew Lin, Yuqing Yang, and Lili Qiu. 2023. Llmlingua: Compressing prompts for accelerated inference of large language models. In Proceedings of the 2023 conference on empirical methods in natural language processing . 13358–13376. [11] Huiqiang Jiang, Qianhui Wu, Xufang Luo, Dongsheng Li, Chin-Yew Lin, Yuqing Yang, and Lili Qiu. 2024. Longllmlingua: Accelerating and enhancing llms in long context scenarios via prompt compression. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) .1658–1677. [12] Ziyan Jiang, Xueguang Ma, and Wenhu Chen. 2024. Longrag: Enhancing retrieval-augmented generation with long-context llms. arXiv preprint arXiv:2406.15319 
+
+(2024). [13] Bowen Jin, Jinsung Yoon, Jiawei Han, and Sercan O Arik. 2024. Long-context llms meet rag: Overcoming challenges for long inputs in rag. arXiv preprint arXiv:2410.05983 (2024). [14] Jiajie Jin, Xiaoxi Li, Guanting Dong, Yuyao Zhang, Yutao Zhu, Yongkang Wu, Zhonghua Li, Ye Qi, and Zhicheng Dou. 2025. Hierarchical document refine-ment for long-context retrieval-augmented generation. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) . 3502–3520. [15] Hyukkyu Kang, Injung Kim, and Wook-Shin Han. 2025. TRIAL: Token Relations and Importance Aware Late-interaction for Accurate Text Retrieval. In Proceed-ings of the 2025 Conference on Empirical Methods in Natural Language Processing .16875–16888. [16] Yannis Katsis, Saneem Chemmengath, Vishwajeet Kumar, Samarth Bharadwaj, Mustafa Canim, Michael Glass, Alfio Gliozzo, Feifei Pan, Jaydeep Sen, Karthik Sankaranarayanan, et al . 2022. Ait-qa: Question answering dataset over com-plex tables in the airline industry. In Proceedings of the 2022 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies: Industry Track . 305–314. [17] Omar Khattab and Matei Zaharia. 2020. Colbert: Efficient and effective passage search via contextualized late interaction over bert. In Proceedings of the 43rd International ACM SIGIR conference on research and development in Information Retrieval . 39–48. [18] Sehoon Kim, Sheng Shen, David Thorsley, Amir Gholami, Woosuk Kwon, Joseph Hassoun, and Kurt Keutzer. 2022. Learned token pruning for transformers. In 
+
+Proceedings of the 28th ACM SIGKDD conference on knowledge discovery and data mining . 784–794. [19] Xiang Lisa Li, Ari Holtzman, Daniel Fried, Percy Liang, Jason Eisner, Tatsunori B Hashimoto, Luke Zettlemoyer, and Mike Lewis. 2023. Contrastive decoding: Open-ended text generation as optimization. In Proceedings of the 61st annual meeting of the association for computational linguistics (volume 1: Long papers) .12286–12312. [20] Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024. Snapkv: Llm knows what you are looking for before generation. Advances in Neural Informa-tion Processing Systems 37 (2024), 22947–22970. [21] Zongqian Li, Yinhong Liu, Yixuan Su, and Nigel Collier. 2025. Prompt compres-sion for large language models: A survey. In Proceedings of the 2025 Conference of the Nations of the Americas Chapter of the Association for Computational Lin-guistics: Human Language Technologies (Volume 1: Long Papers) . 7182–7195. [22] Junghwan Lim, Sungmin Lee, Dongseok Kim, Wai Ting Cheung, Beomgyu Kim, Taehwan Kim, Haesol Lee, Junhyeok Lee, Dongpin Oh, and Eunhwan Park. 2025. Grouped Differential Attention. arXiv preprint arXiv:2510.06949 (2025). [23] Yiming Lin, Madelon Hulsebos, Ruiying Ma, Shreya Shankar, Sepanta Zeighami, Aditya G Parameswaran, and Eugene Wu. 2025. Querying templatized document collections with large language models. In 2025 IEEE 41st International Conference on Data Engineering (ICDE) . IEEE, 2422–2435. [24] Barys Liskavets, Maxim Ushakov, Shuvendu Roy, Mark Klibanov, Ali Etemad, and Shane K Luke. 2025. Prompt compression with context-aware sentence encoding for fast and improved llm inference. In Proceedings of the AAAI Conference on Artificial Intelligence , Vol. 39. 24595–24604. [25] Chunwei Liu, Matthew Russo, Michael Cafarella, Lei Cao, Peter Baile Chen, Zui Chen, Michael Franklin, Tim Kraska, Samuel Madden, Rana Shahout, et al . [n.d.]. Palimpzest: Optimizing ai-powered analytics with declarative query processing. [26] Di Liu, Meng Chen, Baotong Lu, Huiqiang Jiang, Zhenhua Han, Qianxi Zhang, Qi Chen, Chengruidong Zhang, Bailu Ding, Kai Zhang, et al . 2024. Retrievalattention: Accelerating long-context llm inference via vector retrieval. arXiv preprint arXiv:2409.10516 (2024). [27] Jiaheng Liu, Dawei Zhu, Zhiqi Bai, Yancheng He, Huanxuan Liao, Haoran Que, Zekun Wang, Chenchen Zhang, Ge Zhang, Jiebin Zhang, et al . [n.d.]. A com-prehensive survey on long context language modeling. 2025. URL https://api. semanticscholar. org/CorpusID 277271533 ([n. d.]). [28] Nelson F Liu, Kevin Lin, John Hewitt, Ashwin Paranjape, Michele Bevilacqua, Fabio Petroni, and Percy Liang. 2024. Lost in the middle: How language models use long contexts. Transactions of the Association for Computational Linguistics 
+
+12 (2024), 157–173. [29] Yubo Ma, Yuhang Zang, Liangyu Chen, Meiqi Chen, Yizhu Jiao, Xinze Li, Xinyuan Lu, Ziyu Liu, Yan Ma, Xiaoyi Dong, et al . 2024. Mmlongbench-doc: Benchmarking long-context document understanding with visualizations. Advances in Neural Information Processing Systems 37 (2024), 95963–96010. [30] mteb. [n.d.]. MTEB leaderboard - a hugging face space by mteb. https:// huggingface.co/spaces/mteb/leaderboard [31] Jesse Mu, Xiang Li, and Noah Goodman. 2024. Learning to compress prompts with gist tokens. Advances in Neural Information Processing Systems 36 (2024). [32] Niklas Muennighoff, Nouamane Tazi, Loïc Magne, and Nils Reimers. 2023. Mteb: Massive text embedding benchmark. In Proceedings of the 17th Conference of the European Chapter of the Association for Computational Linguistics . 2014–2037. [33] Krista Opsahl-Ong, Michael J Ryan, Josh Purtell, David Broman, Christopher Potts, Matei Zaharia, and Omar Khattab. 2024. Optimizing instructions and demonstrations for multi-stage language model programs. In Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing . 9340–9366. [34] Richard Yuanzhe Pang, Alicia Parrish, Nitish Joshi, Nikita Nangia, Jason Phang, Angelica Chen, Vishakh Padmakumar, Johnny Ma, Jana Thompson, He He, and Samuel Bowman. [n.d.]. QuALITY Leaderboard — nyu-mll.github.io. https://nyu-mll.github.io/quality/. [Accessed 01-03-2026]. [35] Richard Yuanzhe Pang, Alicia Parrish, Nitish Joshi, Nikita Nangia, Jason Phang, Angelica Chen, Vishakh Padmakumar, Johnny Ma, Jana Thompson, He He, and Samuel Bowman. 2022. QuALITY: Question Answering with Long Input Texts, Yes!. In Proceedings of the 2022 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies .Association for Computational Linguistics, Seattle, United States, 5336–5358. https://aclanthology.org/2022.naacl-main.391 [36] Badri Patro and Vinay P Namboodiri. 2018. Differential attention for visual question answering. In Proceedings of the IEEE conference on computer vision and pattern recognition . 7680–7688. [37] Rui Qian, Xiaoyi Dong, Pan Zhang, Yuhang Zang, Shuangrui Ding, Dahua Lin, and Jiaqi Wang. 2024. Streaming long video understanding with large language models. Advances in Neural Information Processing Systems 37 (2024), 119336– 119360. [38] Keshav Santhanam, Omar Khattab, Jon Saad-Falcon, Christopher Potts, and Matei Zaharia. 2022. Colbertv2: Effective and efficient retrieval via lightweight late interaction. In Proceedings of the 2022 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies .3715–3734. [39] Parth Sarthi, Salman Abdullah, Aditi Tuli, Shubh Khanna, Anna Goldie, and Christopher D Manning. 2024. Raptor: Recursive abstractive processing for tree-organized retrieval. In The Twelfth International Conference on Learning Representations .
+
+> 13
+
+[40] Kele Shao, TAO Keda, Kejia Zhang, Sicheng Feng, Mu Cai, Yuzhang Shang, Haoxuan You, Can Qin, Yang Sui, and Huan Wang. [n.d.]. A Survey of Token Compression for Efficient Multimodal Large Language Models. Transactions on Machine Learning Research ([n. d.]). [41] Hanrui Wang, Zhekai Zhang, and Song Han. 2021. Spatten: Efficient sparse attention architecture with cascade token and head pruning. In 2021 IEEE inter-national symposium on high-performance computer architecture (HPCA) . IEEE, 97–110. [42] Yuetian Weng, Mingfei Han, Haoyu He, Xiaojun Chang, and Bohan Zhuang. 2024. Longvlm: Efficient long video understanding via large language models. In 
+
+European Conference on Computer Vision . Springer, 453–470. [43] David Wingate, Mohammad Shoeybi, and Taylor Sorensen. 2022. Prompt com-pression and contrastive conditioning for controllability and toxicity reduction in language models. In Findings of the Association for Computational Linguistics: EMNLP 2022 . 5621–5634. [44] Wenhao Wu, Yizhong Wang, Guangxuan Xiao, Hao Peng, and Yao Fu. 2024. Retrieval head mechanistically explains long-context factuality. arXiv preprint arXiv:2404.15574 (2024). [45] Jingbo Yang, Bairu Hou, Wei Wei, Yujia Bao, and Shiyu Chang. 2025. Kvlink: Accelerating large language models via efficient kv cache reuse. arXiv preprint arXiv:2502.16002 (2025). [46] Deming Ye, Yankai Lin, Yufei Huang, and Maosong Sun. 2021. Tr-bert: Dy-namic token reduction for accelerating bert inference. In Proceedings of the 2021 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies . 5798–5809. [47] Tianzhu Ye, Li Dong, Yuqing Xia, Yutao Sun, Yi Zhu, Gao Huang, and Furu Wei. 2024. Differential transformer. arXiv preprint arXiv:2410.05258 (2024). [48] Tan Yu, Anbang Xu, and Rama Akkiraju. 2024. In defense of rag in the era of long-context language models. arXiv preprint arXiv:2409.01666 (2024). [49] Peiyuan Zhang, Kaichen Zhang, Bo Li, Guangtao Zeng, Jingkang Yang, Yuanhan Zhang, Ziyue Wang, Haoran Tan, Chunyuan Li, and Ziwei Liu. 2024. Long context transfer from language to vision. arXiv preprint arXiv:2406.16852 (2024). [50] Zhenyu Zhang, Runjin Chen, Shiwei Liu, Zhewei Yao, Olatunji Ruwase, Beidi Chen, Xiaoxia Wu, and Zhangyang Wang. 2024. Found in the middle: How language models use long contexts better via plug-and-play positional encoding. 
+
+Advances in Neural Information Processing Systems 37 (2024), 60755–60775. [51] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark Barrett, et al . 2024. H2o: Heavy-hitter oracle for efficient generative inference of large language models. 
+
+Advances in Neural Information Processing Systems 36 (2024). [52] Xiabin Zhou, Wenbin Wang, Minyan Zeng, Jiaxian Guo, Xuebo Liu, Li Shen, Min Zhang, and Liang Ding. 2024. DynamicKV: Task-aware adaptive KV cache compression for long context LLMs. arXiv preprint arXiv:2412.14838 (2024).

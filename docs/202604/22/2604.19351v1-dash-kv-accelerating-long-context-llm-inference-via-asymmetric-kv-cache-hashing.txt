@@ -1,0 +1,989 @@
+Title: DASH-KV: Accelerating Long-Context LLM Inference via Asymmetric KV Cache Hashing
+
+URL Source: https://arxiv.org/pdf/2604.19351v1
+
+Published Time: Wed, 22 Apr 2026 00:58:50 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+DASH-KV: Accelerating Long-Context LLM Inference via Asymmetric KV Cache Hashing 
+
+Jinyu Guo 1, Zhihan Zhang 2, Yutong Li 1, Jiehui Xie 2, Md. Tamim Iqbal 3,Dongshen Han 2, Lik-Hang Lee 4, Sung-Ho Bae 5, Jie Zou 2, Yang Yang 2, Chaoning Zhang 2*1School of Information and Software Engineering, University of Electronic Science and Technology of China 
+
+> 2
+
+School of Computer Science and Engineering, University of Electronic Science and Technology of China 
+
+> 3
+
+Bangladesh University of Engineering and Technology 
+
+> 4
+
+The Hong Kong Polytechnic University 
+
+> 5
+
+Kyung Hee University, School of Computing 
+
+guojinyu@uestc.edu.cn, chaoningzhang1990@gmail.com 
+
+Abstract 
+
+The quadratic computational complexity of the standard attention mechanism constitutes a fun-damental bottleneck for large language models in long-context inference. While existing KV cache compression methods alleviate memory pressure, they often sacrifice generation qual-ity and fail to address the high overhead of floating-point arithmetic. This paper introduces DASH - KV, an innovative acceleration frame-work that reformulates attention as approximate nearest-neighbor search via asymmetric deep hashing. Under this paradigm, we design an asymmetric encoding architecture that differ-entially maps queries and keys to account for their distinctions in precision and reuse char-acteristics. To balance efficiency and accu-racy, we further introduce a dynamic mixed-precision mechanism that adaptively retains full-precision computation for critical tokens. Extensive experiments on LongBench demon-strate that DASH -KV significantly outperforms state-of-the-art baseline methods while match-ing the performance of full attention, all while reducing inference complexity from O(N 2) to linear O(N ). The code is available at https: //github.com/Zhihan-Zh/DASH-KV .
+
+1 Introduction 
+
+Large-scale pre-trained language models have demonstrated transformative capabilities in tasks including text generation, multi-turn dialogue, and code completion (Achiam and Adler, 2023; Tou-vron et al., 2023). However, their deployment in production environments is confronted with signif-icant efficiency challenges. Substantial evidence indicates (Kwon et al., 2023; Pope and Douglas, 2023) that the computational expense of the stan-dard attention mechanism constitutes a primary performance bottleneck for large language model (LLM) services (Liu, 2024). This challenge is espe-cially acute in scenarios demanding sustained con- 
+
+> *
+
+Corresponding author. 
+
+text (e.g., multi-turn conversations, long-document generation) . Keys      
+
+> dream Query
+> 0.3 0.1 0.7
+> Softmax
+> Attention
+> Probs
+> Vbig
+> Standard Attention
+> cat
+> Data
+> Retriever
+> Query
+> Data Retrieval
+> Next token
+> 0.75 0.25 0.15 Similarity Matching
+> Process
+> Most Similar Data Item
+> Data Items
+> Q
+
+.DQ.KT     
+
+> kitten
+> dare to dream kitten dog car
+
+Figure 1: Alignment between Standard Attention Mech-anism and Large-Scale Retrieval 
+
+To optimize long-text inference, existing re-search can be broadly categorized into three prin-cipal approaches: quantization compression, selec-tive eviction, and structured sharing. Quantization methods (Liu et al., 2024; Hooper et al., 2024; Zhao et al., 2024; Dettmers et al., 2022; Zheng et al., 2026b) reduce memory footprint by lowering the numerical precision of cached activations. How-ever, employing low bit-widths often precipitates substantial degradation in model performance, es-pecially in ultra-low bit settings (e.g., 1-bit or 2-bit). Furthermore, these techniques typically necessi-tate de-quantization during computation, incurring additional overhead. Selective eviction strategies (Xiao et al., 2024; Zhang et al., 2023; Li et al., 2024; Ge et al., 2024) maintain a fixed-sized cache by retaining only a subset of KV pairs according to specific heuristics. While effective in constraining memory usage, this deterministic eviction results in the permanent loss of discarded information. Such irreversible information loss can impair model ef-ficacy in tasks that rely on long-range dependen-cies (Zhang et al., 2026d). Structured sharing tech-niques (Vyas et al., 2020; Ainslie et al., 2023; Cai et al., 2024; Dao et al., 2022; Sun et al., 2026; Cao 
+
+> arXiv:2604.19351v1 [cs.CL] 21 Apr 2026
+
+et al., 2026) aim to reduce redundancy by sharing KV parameters across different attention heads or layers. Nonetheless, this approach may not ade-quately account for the heterogeneous character-istics of different heads or layers and often lacks data-driven adaptability. More critically, the above static compression strategies do not address the fundamental compu-tational bottleneck of attention mechanisms (Tay et al., 2022). The similarity matching process be-tween queries and keys necessitates billions of high-precision floating-point operations (Dao et al., 2022). Prevailing optimization methods operate strictly within this floating-point computational framework (Dettmers et al., 2022; Xiao et al., 2023; Yuan et al., 2026; Zhang et al., 2026b). Conse-quently, they leave the underlying computational paradigm unchanged. Interestingly, the computation of relevance be-tween queries and keys in the attention mechanism is highly similar to relevance-based matching in retrieval tasks. As illustrated in Figure 1, this per-spective reveals a strong alignment between large-scale attention operations and established data re-trieval paradigms. In the retrieval task, hashing (Andoni and Razenshteyn, 2015) serves as a promi-nent method for Approximate Nearest Neighbor (ANN) search, offering advantages in storage effi-ciency and query speed. Deep hashing (Xia et al., 2014; Cao et al., 2017), in particular, employs neural networks to learn discriminative features and encodes them into compact binary hash codes, thereby enhancing efficiency and reducing compu-tational cost (Lai et al., 2015). Therefore, if this advanced technique from retrieval tasks could be applied to the highly similar attention computation scenarios, there would be significant opportuni-ties for efficiency improvements while maintaining computational accuracy. Furthermore, another sup-porting point is that prior research indicates that KV caches exhibit low-rank characteristics (Sharma et al., 2024; Chen and Dao, 2021; Kitaev et al., 2020), suggesting they are amenable to compres-sion in a latent space. Consequently, applying deep hashing techniques to the KV cache mechanism presents considerable promise. In this paper, we propose Deep Asymmetric KV Cache Ha sh ing (DASH-KV),which represents the first deep integration of deep hashing techniques into the Transformer attention mechanism to re-construct the KV Cache computaltional paradigm. Specifically, our approach transforms the high-dimensional floating-point similarity calculation into a Hamming distance computation between compact binary hash codes. This constitutes a fundamental paradigm shift, replacing costly ma-trix multiplications with efficient bitwise opera-tions. In addition, to balance precision and effi-ciency, we propose another two key modules:(1) 
+
+Attention-Oriented Asymmetric Deep Hashing. 
+
+Considering that Queries ( Q) demand higher preci-sion to capture dynamic semantics, whereas Keys (K)—which are subject to extensive reuse in the cache—prioritize encoding efficiency, we design an Asymmetric Hashing framework to apply dif-ferentiated encoding strategies. Specifically, for 
+
+Q, we employ a deep hashing network (parameter-ized by a lightweight MLP) to maximize semantic preservation and ensure high-precision retrieval. Conversely, for K, we utilize a direct linear pro-jection to facilitate rapid encoding and compact storage, thereby perfectly adapting to scenarios involving massive KV reuse. This differentiated mapping strategy effectively achieves a targeted synergy between computational efficiency and gen-eration quality. (2) Dynamic Importance-Based Mixed-Precision Attention. Considering the vary-ing importance of different tokens, we propose a lightweight importance predictor, which operates to differentiate between critical tokens (e.g., logical connectors and named entities) and regular tokens. For identified critical tokens, the system switches to full-precision attention. For regular tokens, it employs a high-speed, hash-based attention mecha-nism. This adaptive paradigm enables fine-grained, instance-level control over the trade-off between computational efficiency and model accuracy. Experiments on LongBench confirm that DASH-KV outperforms SOTA baselines and achieves performance parity with Full Attention (e.g., on Qwen2-7B). Crucially, it reduces complexity to linear O(N ), effectively breaking the efficiency-accuracy bottleneck. In summary, the principal contributions of this work are as follows: 1. We propose the DASH-KV framework, which utilizes a novel asymmetric deep hashing paradigm. This architecture is designed to accommodate the distinct roles of queries and keys, enabling the construction of a semantic Hashing space for accelerated inference. 2. We propose an asymmetric deep hashing archi-tecture to address the heterogeneous charac-teristics of queries and keys. Additionally, we introduce a dynamic mixed-precision mecha-nism to balance accuracy and efficiency. 3. DASH-KV achieves SOTA and matches Full Attention with linear scaling, breaking the efficiency-accuracy bottleneck. 
+
+2 Related Work 
+
+2.1 KV Cache Optimization for Long-Context Inference 
+
+Existing research on KV cache optimization mainly pursues three directions: quantization, selective eviction, and structured sharing. Quantization methods (e.g., KIVI, Atom (Liu et al., 2024; Zhao et al., 2024)) reduce memory footprint by lowering numerical precision, but they incur accuracy degra-dation and de-quantization overhead. Selective eviction approaches (e.g., H2O, SnapKV (Zhang et al., 2023; Li et al., 2024)) maintain a fixed cache size, yet their eviction strategies lead to irreversible information loss. Structured sharing techniques (e.g., GQA (Ainslie et al., 2023; Sun et al., 2026)) aim to reduce parameter redundancy. However, they lack adaptability to the heterogeneous charac-teristics of different attention heads or layers. Critically, these methods remain dependent on high-dimensional floating-point computa-tion (Kwon et al., 2023), failing to address the fundamental computational complexity inherent in the attention mechanism. 
+
+2.2 Deep Hashing Methods 
+
+Hashing techniques map high-dimensional vectors to compact binary codes to enable efficient Ap-proximate Nearest Neighbor (ANN) search. The field has progressed from early random projec-tion methods, such as Locality-Sensitive Hashing (LSH) (Andoni and Indyk, 2006), to learning-based approaches like Iterative Quantization (ITQ) (Gong and Lazebnik, 2012), and further to deep super-vised hashing (e.g., DSH (Liu et al., 2016)) for improved retrieval accuracy. Despite the success of hashing in large-scale retrieval tasks (Wang et al., 2018), its potential syn-ergy with the Transformer attention mechanism has not been extensively investigated (Kitaev et al., 2020). To the best of our knowledge, this work presents the first systematic integration of hashing techniques for attention optimization (Wang et al., 2026b,a; Yuan and Nie, 2026; Zhang et al., 2026a). This is achieved by replacing computationally ex-pensive floating-point similarity operations with ef-ficient bitwise comparisons (Rastegari et al., 2016), thereby accelerating autoregressive inference. 
+
+3 DASH-KV 
+
+3.1 KV Cache Retrieval via Deep Hashing 
+
+We posit that the attention mechanism fundamen-tally constitutes a process of large-scale vector sim-ilarity matching (Kitaev et al., 2020; Tay et al., 2020). This process exhibits a strong conceptual alignment with core Information Retrieval (IR) tasks, as both are concerned with efficiently identi-fying the most relevant items from a vast candidate set. This observation motivates us to formally re-frame attention computation as a retrieval problem. Consequently, we are inspired to substitute the com-putationally intensive floating-point dot products with efficient matching in a binary Hamming space. This reformulation establishes a novel and distinct pathway for optimization. Specifically, we pre-compute and store a binary hash code hk ∈ {− 1, +1 }l for each Key in the KV Cache, where l is the hash code length. Dur-ing inference, when a new Query arrives, we first encode it into a hash code hq. Subsequently, we rapidly identify the subset of Keys most relevant to the Query via Hamming distance. The Hamming distance is defined as: dist H (hq, h k) = 12 (l − ⟨ hq, h k⟩), (1) where ⟨· , ·⟩ denotes inner product. A smaller Ham-ming distance corresponds to a higher similarity. This paradigm utilizes bitwise operations to achieve hundreds of times acceleration(1-bit vs FP16). However, relying solely on the raw Ham-ming distance for candidate filtering may intro-duce bias. To enhance the accuracy of the pre-liminary retrieval stage, we exploit two inherent architectural properties of Transformers—namely, the multi-headed attention mechanism and its deep layered structure—to design a pair of complemen-tary calibration strategies. 
+
+Cross-Head Consensus. The multi-head attention mechanism in Transformers offers multi-view rep-resentations of the input (Voita et al., 2019; Michel et al., 2019). Thus, we aggregate the selection pref-erences for the i-th Key across all attention heads b) Query-Key Relevance Computation                                               
+
+> Hamming
+> Distance = 2
+> Dfinal
+> hq
+> hk+1 -1 ... ... +1 -1
+> +1 +1 ... ... -1 -1
+> Calibration
+> a) Asymmetric Hashing
+> Query
+> Key
+> Key Hash Encoder
+> Key Hash Code
+> Key Hash
+> Token Cache KV Cache
+> Linear
+> HK+1 -1 +1
+> +1 -1 +1
+> MLP
+> HQ-1 +1 -1
+> Query Hash Encoder
+> Query Hash Code
+> hk
+> hq
+> c) Dynamic Mixed Precision Attention Mechanism
+> Prior Token Masking
+> ...
+> Key Hash
+> Token Cache
+> Relevance Scoring
+> Prior Key Tokens
+> < h q, h k>
+> D1D2... ... ... Dn
+> -1 +1 -1
+> hq
+> hk
+> +1 -1 +1
+> +1 -1 +1
+> -1 +1 -1
+> T1
+> T2
+> Tn
+> Percentile Based Thresholding
+> ...
+> (0 , t 1]
+> (t1, t 2]
+> >t2
+> Highly Relevant Key Tokens
+> Moderately Relevant Key Tokens
+> Weakly Relevant
+> Key Tokens
+> Full Precision Matmul
+> Q.K T
+> Mixed
+> Precision
+> hq . hkT
+> +Δ( hq, h k; ϕ )
+> Softmax
+> Masked out
+> ... ...
+
+Figure 2: Overview of the DASH-KV framework. It comprises three key stages: (a) Asymmetric Hashing :Queries are dynamically encoded via a lightweight MLP, while Keys are statically mapped for efficient storage; (b) Query-Key Relevance Computation : A fast, coarse-grained filtering step using Hamming distance to select relevant candidates; (c) Dynamic Mixed Precision Attention Mechanism : A dynamic mechanism that retains full precision for critical tokens, applies residual compensation for moderately relevant ones, and masks irrelevant keys from computation, effectively balancing efficiency and accuracy without permanent data loss. 
+
+by tallying its occurrences: Vote i =
+
+HX
+
+h′=1 
+
+I(D(l,h ′)
+
+raw (i) < T vote ), (2) where H is the total number of attention heads, 
+
+l denotes the current layer, I(·) is the indicator function, and Tvote is a preset voting threshold. If Vote i is large, it indicates a consensus among heads. In this case, we apply a negative correction to the distance of this Key to increase its importance: 
+
+∆spatial (i) = −βspatial · Vote i
+
+H , (3) where βspatial is a learnable parameter controlling the strength of cross-head consensus. This mech-anism mitigates the impact of misjudgments by individual heads through "majority voting." 
+
+Cross-Layer Momentum. Relying solely on spa-tial multi-head information is insufficient. The deep structure of Transformers also contains rich temporal dependencies (Liu et al., 2023). There-fore, we introduce a cross-layer momentum mech-anism, utilizing the attention distribution of the previous layer as prior information: 
+
+∆temporal (i) = −γtemporal · σ(A(l−1) 
+
+i ), (4) where A(l−1) 
+
+i is the Attention Score of the i-th Key in the previous layer, σ(·) is a normalization func-tion (e.g., Sigmoid), and γtemporal is a learnable parameter. This mechanism enables the model to inherit "experience" from the previous layer, giving higher priority to continuously attended Keys. Combining the above two calibration strategies, the final calibrated distance is: 
+
+Df inal (i) = Draw (i)+∆ spatial (i)+∆ temporal (i).
+
+(5) By setting βspatial and γtemporal as learnable pa-rameters, the model can adaptively fuse spatial (multi-head) and temporal (multi-layer) structural priors. This significantly enhances the discrimina-tive power of the hash distance. 
+
+3.2 Asymmetric Hashing 
+
+We propose an Asymmetric Hashing Framework that utilizes independent encoders for queries and keys. The Query Encoder is tasked with mapping dynamically evolving query vectors into the hash space, requiring an optimal balance between se-mantic representational capacity and inference la-tency. Consequently, we employ a lightweight Multi-Layer Perceptron (MLP) as the backbone architecture. This design avoids the excessive com-putational overhead associated with more com-plex models while preserving sufficient expressive power. Specifically, the encoder is implemented as a three-layer fully connected network: 
+
+h(1)  
+
+> q
+
+= GELU (LayerNorm (W1Q)) , (6) 
+
+h(2)  
+
+> q
+
+= GELU (W2h(1)  
+
+> q
+
+), (7) 
+
+vq = W3h(2)  
+
+> q
+
+∈ Rl, (8) where W1 ∈ Rd×256 , W2 ∈ R256 ×256 , and W3 ∈
+
+R256 ×l are learnable parameters. However, the direct application of the sign func-tion to vq for binarization results in vanishing gra-dients, which preclude end-to-end training. There-fore, we employ a Scaled tanh strategy (Cao et al., 2017). During training, the continuously differen-tiable tanh function serves as a smooth surrogate for the non-differentiable sign function: 
+
+˜hq = tanh( β · vq), (9) where β is a scaling coefficient. Rather than treat-ing it as a fixed hyperparameter, we adopt a dy-namic annealing schedule that progressively in-creases its value throughout the training process: 
+
+β = min(10 .0, 1.0 + global_step × 0.001) . (10) During inference, we directly apply the sign function to obtain the final binary hash code: 
+
+hq = sign (vq) ∈ {− 1, +1 }l. (11) 
+
+Key Encoder. In contrast to the dynamic gen-eration of queries, keys exhibit high persistence and reusability once written to the KV cache, elim-inating the need for repeated encoding. To achieve an optimal trade-off between computational over-head and representational fidelity, we implement a simple yet efficient linear projection for keys. This projection is designed to map the original key vectors into the target hash space with minimal preprocessing latency: 
+
+zk = WkK, (12) 
+
+hk = sign (zk) ∈ {− 1, +1 }l, (13) where Wk ∈ Rd×l is a learnable weight matrix. Thus, the encoding pipeline, which maps raw vectors to compact hash codes and incorporates multi-view calibration for the initial distance esti-mates, is hereby established. 
+
+3.3 Dynamic Importance-Based Mixed-Precision Attention 
+
+To achieve an optimal balance between precision and efficiency, we formulate a dynamic mixed-precision allocation mechanism that incorporates structural prior knowledge. First, a deterministic retention strategy is enacted through a predefined index set Iprior . This ensures the compulsory in-clusion of critical tokens, such as [CLS]/[SEP] to-kens responsible for global aggregation, sink to-kens that preserve numerical stability, and immedi-ate neighbor tokens that capture local dependencies. These essential components bypass the filtering stage and are processed with full-precision atten-tion directly. Subsequently, based on the calibrated distance Df inal , the system adaptively categorizes keys into three distinct tiers, applying full-precision computation, hashing with residual compensation, or computational masking, respectively. Fixed distance thresholds cannot readily accom-modate the distributional variations induced by varying sequence lengths. To address this, we em-ploy an adaptive percentile-based strategy. Specif-ically, two truncation thresholds are calculated in real-time based on the distribution of Df inal within the current sequence: 
+
+t1 = percentile (Df inal , p 1), (14) 
+
+t2 = percentile (Df inal , p 2). (15) Based on this, we classify Keys into three levels: • Highly Relevant ( D ≤ t1): Retain full-precision computation Q · KT to ensure core generation quality is uncompromised. • Moderately Relevant ( t1 < D ≤ t2): Adopt a "Hash + Residual" hybrid scheme to correct quantization errors while balancing precision and efficiency (Jegou et al., 2010). • Weakly Relevant ( D > t 2): Exclude from computation without discarding, maximizing acceleration gains. The treatment of moderately relevant Keys con-stitutes the core innovation within our mixed-precision mechanism. While these Keys con-tain non-redundant information, their computa-tional priority does not warrant the expense of full-precision computation. Our strategy, there-fore, is to first obtain a rapid approximation using hash codes and subsequently refine this estimate by compensating for quantization errors through a lightweight neural network. Specifically, given hash codes hq, h k ∈ {− 1, +1 }l for Query and Key, we train a residual function ∆( hq, h k; ϕ) such that: Attention (Q, K, V ) ≈ softmax (S)V, (16) where the approximate score matrix S is defined as: 
+
+S = hqhTk
+
+dh
+
++ ∆( hq, h k; ϕ). (17) Here, hq · hTk provides an efficient rough esti-mate, while ∆ is responsible for fitting the residual between the hash approximation distribution and the true distribution. Besides, dh denotes the di-mension of the hash codes. Additionally, we implement a Zero Initializa-tion Strategy for the MLP output layer (Goyal et al., 2017) (weights approach 0, bias is 0). In summary, DASH-KV implements fine-grained dynamic allocation .
+
+3.4 Loss Design 
+
+Given the intrinsic ranking-based nature of atten-tion, we employ list-wise distillation (Hinton et al., 2015) as our primary training objective. We ob-serve that the distribution of normalized hash dot products, constrained to the [−1, 1] interval, is overly smooth and fails to capture the sharper, more peaked distributions characteristic of the original full-precision attention. To address this discrep-ancy, we depart from the conventional use of sym-metric temperature scaling and introduce an asym-metric temperature scaling mechanism to amplify the numerical distinction between relevant and ir-relevant keys. The principal loss function is thus defined as the KL divergence between the student and teacher attention distributions: 
+
+Ldistill = KL (Pstudent ∥ Pteacher ). (18) Furthermore, to ensure the quality of discrete hash codes, we introduce two auxiliary constraints. The Bit Balance Loss aims to maximize informa-tion entropy, encouraging the mean of each dimen-sion of the hash code to approach zero (Liu et al., 2016): 
+
+Lbal = ∥mean (hq)∥ + ∥mean (hk)∥, (19) where hq and hk are the binary hash codes for Query and Key, respectively. The Quantization Loss constrains the hash en-coder output to approximate {− 1, +1 } (Zhu et al., 2016; Liu et al., 2016). This effectively mitigates performance collapse during the transition from continuous representation to discrete encoding in the inference stage: 
+
+Lquant = E (|hq| − 1) 2+E (|hk| − 1) 2 . (20) Combining the above three parts, the final train-ing objective is: 
+
+L = Ldistill + α · L bal + β · L quant , (21) where we set the coefficients α and β for the two auxiliary loss terms to 0.1. This configuration en-sures that the dominant gradient signal originates from aligning with the teacher model’s distribu-tion. these auxiliary terms impose effective regu-larization on the quality of the discrete hash codes, preventing convergence to degenerate solutions. 
+
+4 Experiments 
+
+4.1 Experimental Setup 4.1.1 Backbone LLMs 
+
+Our experiments employ three representative, pub-licly available large language models for compara-tive evaluation: Qwen2-7B-Instruct, Llama-3.1-8B-Instruct, and Qwen2.5-14B-Instruct. These models encompass diverse architectural designs and param-eter scales, enabling us to assess the generalizabil-ity of DASH-KV’s algorithmic advantages across varied model configurations. 
+
+4.1.2 Tasks 
+
+We evaluate the performance of DASH-KV on six tasks from the LongBench(Bai et al., 2024) bench-mark: NarrativeQA (single-document summariza-tion), HotpotQA (multi-hop reasoning), Qasper (academic paper question answering), MultiNews (multi-document summarization), GovReport (gov-ernment report comprehension), and TriviaQA (fac-tual question answering). This suite encompasses critical dimensions of long-context understanding, including both single- and multi-document pro-cessing, information retrieval, and complex rea-soning, as well as factual extraction and abstractive summarization. Collectively, these tasks provide a comprehensive evaluation of the model’s general-ization ability across diverse long-context scenar-ios (Zhang et al., 2026c). 
+
+4.1.3 Baselines 
+
+To ensure a comprehensive and fair evaluation, we selected four representative baseline methods Table 1: Performance comparison of DASH-KV with baselines on LongBench tasks. We evaluate on three models: Qwen2-7B-Instruct, Llama-3.1-8B-Instruct, and Qwen2.5-14B-Instruct. NQ: NarrativeQA, HQ: HotpotQA, QM: Qasper, MN: MultiNews, GR: GovReport, TQ: TriviaQA. 
+
+Method Type NQ HQ QM MN GR TQ Avg 
+
+Qwen2-7B-Instruct 
+
+Full Attn Dense 25.13 44.04 46.13 15.42 18.06 83.47 38.71 StreamLLM Eviction 20.47 14.31 26.97 24.88 25.70 76.56 31.48 H2O Eviction 22.88 13.30 34.28 22.72 23.69 88.75 34.27 SnapKV Retrieval 23.86 15.60 38.61 23.07 24.56 89.31 35.84 
+
+DASH-KV (Ours) Retrieval 24.65 44.50 45.34 15.40 19.13 83.33 38.73 
+
+Llama-3.1-8B-Instruct 
+
+Full Attn Dense 28.11 57.43 45.29 15.20 19.97 90.22 42.70 StreamLLM Eviction 13.60 11.70 20.10 24.70 21.50 71.10 27.12 H2O Eviction 23.10 16.00 21.30 23.40 22.30 90.20 32.72 SnapKV Retrieval 21.30 16.60 30.80 26.30 22.20 90.20 34.57 
+
+DASH-KV (Ours) Retrieval 27.61 58.01 45.35 14.90 19.25 89.47 42.43 
+
+Qwen2.5-14B-Instruct 
+
+Full Attn Dense 28.20 61.98 45.52 14.19 16.78 86.91 42.26 StreamLLM Eviction 18.30 16.40 23.40 16.04 19.01 74.10 27.87 H2O Eviction 24.40 18.00 27.60 20.99 18.96 89.70 33.28 SnapKV Retrieval 24.10 20.00 34.60 20.90 18.97 90.00 34.76 
+
+DASH-KV (Ours) Retrieval 29.52 61.83 45.79 14.44 18.06 87.88 42.92 
+
+that cover the major technical approaches for long-context optimization: • Full Attention : Dense attention mechanism, serving as the upper-bound baseline for per-formance evaluation. • StreamingLLM (Xiao et al., 2024): Lever-ages the attention sink phenomenon to enable smooth inference over infinitely long texts. • H2O (Zhang et al., 2023): Dynamically evicts low-contribution KV pairs to maintain a constant-size cache. • SnapKV (Li et al., 2024): Identify the most important prompt features in the "observation window" at the end of the input to compress the LLM KV cache. 
+
+4.1.4 Implementation details 
+
+To reflect the prevalent "short-text training, long-text inference" paradigm in practical deployment, we employ a training sequence length of 3k tokens. During inference, the sequence length is extended to 32k tokens. All experiments are conducted under consistent hardware and hyperparameter configura-tions to ensure a fair and controlled environment. For implementation expediency and to utilize Py-Torch’s optimized kernels, binary hash codes were simulated using FP16 format during prototyping. It is important to emphasize that all memory footprint statistics reported in this work are calculated based on an efficient 1-bit packed storage model. This model can be directly deployed in production via low-level bitwise operations to achieve the stated compression benefits. 
+
+4.2 Main Results on LongContext Tasks 
+
+The results presented in Table 1 demonstrate that DASH-KV attains significant inference accelera-tion while maintaining accuracy. This gain in ef-ficiency arises from the use of Hamming distance computations on 1-bit hashes. This approach pro-vides a decisive computational advantage over the resource-intensive floating-point matrix multiplica-tions required in full-precision models. 
+
+4.3 Ablation Studies 
+
+We conduct a systematic ablation study to vali-date the contribution of each component within the Table 2: Efficiency vs. Accuracy trade-off analysis comparing DASH-KV with symmetric hashing and naive LSH baselines. Ph and Pf denote the attention distributions of hash-based approximation and full-precision calculation, respectively. 
+
+Variant Recall@100 KL (Ph ∥ Pf ) Latency per Token (%) (↓) (ms) 
+
+DASH-KV-Naive 8.91 3.2000 28 DASH-KV-Sym 68.28 1.3200 38 
+
+DASH-KV (Ours) 86.06 0.4054 22 DASH-KV-MSE Full Precision 
+
+> (Baseline)
+> DASH-KV-Distill
+> 84
+> 85
+> 86
+> 87
+> 88
+> 89
+> 90
+> 91
+> Score
+> 85.40
+> 88.45
+> 89.47
+> Drop. -3.05
+> Imp. +1.02
+> Ablation Study: Effectiveness of Residual Learning
+
+Figure 3: Ablation Study on Trivi-aQA - F1 Score Comparison 32 64 128 256 
+
+> Hash Code Length (bits)
+> 55
+> 60
+> 65
+> 70
+> 75
+> 80
+> 85
+> 90
+> 95
+> Recall@K (%)
+> Sweet Spot
+> (128 bits)
+> 58.2%
+> 70.5%
+> 88.6%
+> 91.4% Saturation Point
+> Pareto Frontier Region
+> Retrieval Accuracy
+> KV Cache Memory
+> 0.78
+> 0.80
+> 0.82
+> 0.84
+> 0.86
+> 0.88
+> 0.90
+> 0.92
+> 0.94
+> Memory Usage (GB)
+> 0.807GB
+> 0.820GB
+> 0.857GB
+> 0.907GB
+> Hash Code Length vs. Efficiency-Accuracy Trade-off
+
+Figure 4: Pareto Frontier of Effi-ciency and Accuracy 30 20 10 0 10 20 30 40    
+
+> t-SNE Dimension 2
+> 0.0
+> 2.5
+> 5.0
+> 7.5
+> 10.0
+> 12.5
+> 15.0
+> 17.5
+> t-SNE Dimension 1
+> Hash Space Semantic Preservation Analysis
+> Queries ( Q)
+> High-Attention Key ( K+)
+> Irrelevant Keys ( K)
+
+Figure 5: t-SNE Visualization of Hash Codes 
+
+DASH-KV framework. Specifically, we analyze the role of the Residual Compensation Strategy in mitigating errors introduced by hash quantization. 
+
+4.3.1 Effectiveness of Residual Learning 
+
+To quantify the contribution of residual learning, a comparison is conducted among three system variants: Pure Hash (which operates without resid-ual compensation), DASH-KV-MSE (optimized via Mean Squared Error), and DASH-KV-Distill (trained utilizing Knowledge Distillation). The results presented in Figure 3 demonstrate a notable phenomenon 
+
+4.3.2 Component Effectiveness 
+
+The results presented in Table 2 demonstrate that the asymmetric design yields a substantial improve-ment in accuracy. While Locality-Sensitive Hash-ing (LSH) is computationally efficient due to its parameter-free formulation, its retrieval precision is lower than that of our trained hash encoder, as reflected by a markedly reduced Recall@100. This outcome supports the conclusion that, within the specific context of attention retrieval, a data-driven hash space optimized explicitly for semantic similarity preservation significantly outperforms generic geometric hashing approaches. 
+
+4.3.3 Parameter Sensitivity 
+
+The experimental results in Figure 4 illustrate the trade-off between hash code length and efficiency. 
+
+5 Analysis 
+
+5.1 Semantic Preservation in Hamming Space 
+
+Figure 5 illustrates the semantic preservation ca-pacity of the proposed hash encoding. Within the learned hash embedding space, semantically re-lated Queries and Keys form compact clusters, in-dicating cohesive grouping. In contrast, irrelevant Keys are effectively dispersed, resulting in a dis-tinct and significant spatial separation between dis-similar instances. 
+
+5.2 Scalability to Ultra-Long Context 
+
+To assess the scalability of DASH-KV in process-ing extended-length texts, systematic stress testing was conducted on synthetic sequences spanning 4k to 128k tokens. As shown in Figure 6, the scalability comparison reveals fundamental distinctions between the two approaches. 
+
+5.3 Layer Sensitivity and Deployment Strategy 
+
+In the following, we analyze the sensitivity of in-dividual layers to DASH-KV replacement and use the resulting observations to derive an effective deployment strategy. 
+
+5.3.1 Layer-wise Sensitivity Analysis 
+
+We observe that Transformer layers demonstrate significantly varying tolerances to sparsification. 8K 32K 64K 128K 
+
+> Sequence Length (Context)
+> 50
+> 100
+> 150
+> 200
+> 250
+> Inference Latency (ms/token)
+> Performance Scaling: DASH-KV vs Standard Attention
+> DASH-KV (Ours)
+> Standard Attention (FP16)
+
+Figure 6: Latency Scaling Curves 0 5 10 15 20 25 30  
+
+> Layer Index
+> 0
+> 5
+> 10
+> 15
+> 20
+> 25
+> 30
+> 35
+> 40
+> 45
+> Average Score (AVG)
+> Robust Middle Layers
+> (High Performance)
+> Early Layer
+> Collapse
+> Late Layer
+> Collapse
+> Layer-wise Performance Analysis (Inverted-U Curve)
+> Original Baseline (38.71)
+> DASH-KV Performance (AVG)
+
+Figure 7: U-shaped Curve of Layer Sensitivity 0 5 10 15 20 25 
+
+> Layer Index
+> −400
+> −300
+> −200
+> −100
+> 0
+> 100
+> 200
+> Value
+> Query Min Query Max Key Min Key Max
+
+Figure 8: Analysis of numerical mag-nitude divergence 
+
+To identify the optimal deployment strategy for DASH-KV, we conduct a systematic layer-wise sensitivity analysis. Specifically, we sequentially replace each layer in the Qwen2-7B model with DASH-KV and assess the resulting performance degradation across six LongBench tasks. As illus-trated in Figure 7, the sensitivity profile follows an Inverted-U-shaped curve, which is readily inter-pretable. 
+
+Early and Later Layers(e.g., Layer 0-4,27-32). 
+
+Replacing these layers with DASH-KV results in a severe performance collapse, as they play a pivotal role in preserving the model’s fundamental features and final representations. 
+
+Middle Layers(e.g., Layer 5-27). In sharp con-trast, the intermediate layers exhibit considerable robustness to sparsification. Substituting these lay-ers with DASH-KV leads to only marginal perfor-mance degradation, indicating that they possess substantial redundancy, which can be effectively compressed without compromising model efficacy. 
+
+5.3.2 Sandwich Deployment Strategy 
+
+Based on the layer-wise sensitivity analysis pre-sented earlier, this paper introduces a Sandwich Deployment Strategy. This approach maintains Full Attention in both the initial and final layers of the model to preserve representational stability, while implementing DASH-KV within the interme-diate layers to optimize computational efficiency. 
+
+5.4 Analysis of the rationality of asymmetric hashing. 
+
+Empirical evidence presented in Figures 8and 9 demonstrates a marked divergence in both the nu-merical magnitudes and distributional characteris-tics between the Query ( Q) and Key ( K) represen-tations. This observed discrepancy substantiates the rationale underlying the proposed asymmetric hashing framework. As a symmetric methodology −10 .0 −7.5 −5.0 −2.5 0.0 2.5 5.0 7.5 10 .0                           
+
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7Query ( μ=0.102, σ=3.479) Key ( μ=1.261, σ=25.604) (a) Layer 0 −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7Query ( μ=0.096, σ=1.838) Key ( μ=-0.065, σ=1.912) (b) Layer 14 −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7Query ( μ=0.215, σ=5.874) Key ( μ=-2.351, σ=39.422) (c) Layer 27
+
+Figure 9: Visualization of distributional characteristics of Queries and Keys across layers 
+
+would be inadequate to accommodate the distinct geometric manifolds and value ranges inherent to these two functional components. 
+
+6 Conclusion 
+
+This paper presents DASH-KV, a novel inference acceleration framework leveraging deep hashing re-trieval. It seeks to fundamentally address efficiency bottlenecks in long-context reasoning by reconfig-uring the underlying computational paradigm. The framework reconstructs the attention mechanism into an approximate nearest neighbor search within Hashing space. This design effectively replaces costly floating-point matrix multiplications with efficient bitwise operations. Comprehensive exper-iments conducted across multiple long-text bench-marks indicate that DASH-KV attains a superior balance between efficiency and accuracy. The work not only validates the feasibility of integrating hash retrieval into the Transformer architecture but also offers a new technical pathway for the efficient de-ployment of large-scale models. To further realize the potential of the proposed hashing strategy, fu-ture work will involve the development of custom GPU kernels optimized for low-precision bitwise similarity search. By exploiting specialized hard-ware instructions and refining memory access pat-terns, we anticipate substantial reductions in the I/O overhead associated with KV cache management, particularly in extreme long-context scenarios. 7 Limitations 
+
+Although DASH-KV significantly improves effi-ciency and maintains accuracy in long-context rea-soning, our work has certain limitations. In our experiments, we used FP16 format to simulate bi-nary hash code storage and computation. This choice was made for prototyping convenience and to make full use of existing deep learning frame-works’ efficient matrix computation kernels. We did not implement low-level bitwise operators di-rectly. However, all reported storage usage and speed-up benefits are based on a strict theoretical 1-bit packed storage model. Experiments have also confirmed that the hash retrieval mechanism per-forms consistently well. Future native hardware or operator support could fully unlock its efficiency potential. 
+
+Acknowledgements 
+
+This research is supported by Sichuan Science and Technology Program (Grant No. 2026NS-FSC1474). This research is also supported by the Postdoctoral Fellowship Program (Grade C) of the China Postdoctoral Science Foundation (Grant No. GZC20251053). This work is partially supported by UESTC Kunpeng&Ascend Center of Cultiva-tion (Project ID: H04W241592). 
+
+References 
+
+Josh Achiam and Steven Adler. 2023. Gpt-4 technical report. Technical report, OpenAI. Joshua Ainslie, James Lee-Thorp, Michiel de Jong, Yury Zemlyanskiy, Federico Lebryk, and Sumit Sanghai. 2023. Gqa: Training generalized multi-query trans-former models from multi-head checkpoints. In Pro-ceedings of EMNLP .Alexandr Andoni and Piotr Indyk. 2006. Near-optimal hashing algorithms for approximate nearest neighbor search in high dimensions. Communications of the ACM , 51(1):117–122. Alexandr Andoni and Ilya Razenshteyn. 2015. Opti-mal data-dependent hashing for approximate near neighbors. In Proceedings of the forty-seventh an-nual ACM symposium on Theory of computing , pages 793–801. Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. 2024. LongBench: A bilingual, multi-task benchmark for long context understanding. In 
+
+Proceedings of the 62nd Annual Meeting of the As-sociation for Computational Linguistics (Volume 1: Long Papers) , pages 3119–3137, Bangkok, Thailand. Association for Computational Linguistics. Cheng Cai, Yuxuan Zhang, Zehao Yang, Mingbao Han, and Lin Cai. 2024. Pyramidkv: Dynamic kv cache compression based on pyramidal information funnel-ing. arXiv preprint arXiv:2406.02069 .Sihan Cao, Jianwei Zhang, Pengcheng Zheng, Jiaxin Yan, Caiyan Qin, Yalan Ye, Wei Dong, Peng Wang, Yang Yang, and Chaoning Zhang. 2026. Language-guided token compression with reinforcement learn-ing in large vision-language models. arXiv preprint arXiv:2603.13394 .Zhangjie Cao, Mingsheng Long, Jianmin Wang, and Philip S Yu. 2017. Hashnet: Deep learning to hash by continuation. In ICCV .Yifan Chen and Tri Dao. 2021. Scatterbrain: Unify-ing sparse and low-rank attention approximation. In 
+
+Advances in Neural Information Processing Systems (NeurIPS) .Tri Dao, Daniel Y Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. 2022. Flashattention: Fast and memory-efficient exact attention with io-awareness. In NeurIPS .Tim Dettmers, Mike Lewis, Eugene Belilovsky, and Luke Zettlemoyer. 2022. Llm.int8(): 8-bit matrix multiplication for transformers at scale. In NeurIPS .Suyu Ge, Yuyin Zhang, Xiyang Liu, Juan Zhang, Min-jia andia, and Ping Luo. 2024. Model tells you what to discard: Adaptive kv cache compression for llms. In ICLR .Yunchao Gong and Svetlana Lazebnik. 2012. Iterative quantization for fast similarity search. In IEEE Con-ference on Computer Vision and Pattern Recognition (CVPR) .Priya Goyal, Piotr Dollár, Ross Girshick, Pieter No-ordhuis, Lukasz Wesolowski, Aapo Kyrola, Andrew Tulloch, Yangqing Jia, and Kaiming He. 2017. Ac-curate, large minibatch sgd: Training imagenet in 1 hour. arXiv preprint arXiv:1706.02677 .Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. 2015. Distilling the knowledge in a neural network. arXiv preprint arXiv:1503.02531 . NIPS 2015 Deep Learn-ing Workshop. Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W Mahoney, Yakun S Shao, Kurt Keutzer, and Amir Gholami. 2024. Kvquant: Towards 10 million context length llm inference with kv cache quantization. Advances in Neural Information Pro-cessing Systems , 37:1270–1303. Herve Jegou, Matthijs Douze, and Cordelia Schmid. 2010. Product quantization for nearest neighbor search. IEEE transactions on pattern analysis and machine intelligence .Nikita Kitaev, Łukasz Kaiser, and Anselm Levskaya. 2020. Reformer: The efficient transformer. In ICLR .Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Liangliang Zhong, Felix S. Yu, and Joseph E. Gonzalez. 2023. Efficient memory management for large language model serving with paged attention. In Proceedings of the ACM SIGOPS Symposium on Operating Systems Principles (SOSP) .Hanjiang Lai, Yinghao Pan, Chunyan Liu, and Shuicheng Yan. 2015. Simultaneous feature learning and hash coding with deep neural networks. IEEE Transactions on Pattern Analysis and Machine Intel-ligence .Yao Li, Jing Peng, and Yaliang Song. 2024. Snapkv: Llm knows what you are looking for before genera-tion. In Advances in Neural Information Processing Systems (NeurIPS) .Haomiao Liu, Ruiping Wang, Shiguang Shan, and Xilin Chen. 2016. Deep supervised hashing for fast image retrieval. In IEEE Conference on Computer Vision and Pattern Recognition (CVPR) .Zangwei Liu. 2024. A survey on efficient infer-ence for large language models. arXiv preprint arXiv:2402.01169 . Accepted to IJCAI 2024 Survey Track. Zichang Liu, Aditya Desai, Fangshuo Liao, Weitao Wang, Victor Xie, Zhaozhuo Xu, Anastasios Kyril-lidis, and Anshumali Shrivastava. 2023. Scis-sorhands: Exploiting the persistence of importance hypothesis for llm kv cache compression at inference time. In NeurIPS .Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen (Henry) Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. 2024. Kivi: a tuning-free asym-metric 2bit quantization for kv cache. In Proceed-ings of the 41st International Conference on Machine Learning , ICML’24. JMLR.org. Paul Michel, Omer Levy, and Graham Neubig. 2019. Are sixteen heads really better than one? In NeurIPS .Reiner Pope and Sholto Douglas. 2023. Efficiently scaling transformer inference. In Machine Learning and Systems (MLSys) .Mohammad Rastegari, Vicente Ordonez, Joseph Red-mon, and Ali Farhadi. 2016. Xnor-net: Imagenet classification using binary convolutional neural net-works. In European Conference on Computer Vision (ECCV) , pages 525–542. Springer. Pratyusha Sharma, Jordan T. Ash, and Dipendra Misra. 2024. The truth is in there: Improving reasoning in language models with layer-selective rank reduction. In The Twelfth International Conference on Learning Representations .Qigan Sun, Chaoning Zhang, Jianwei Zhang, Xudong Wang, Jiehui Xie, Pengcheng Zheng, Haoyu Wang, Sungyoung Lee, Chi-lok Andy Tai, Yang Yang, and 1 others. 2026. Grasp: Guided region-aware sparse prompting for adapting mllms to remote sensing. 
+
+arXiv preprint arXiv:2601.17089 .Yi Tay, Dara Bahri, Liu Yang, Donald Metzler, and Da-Cheng Juan. 2020. Sparse sinkhorn attention. In 
+
+ICML .Yi Tay, Mostafa Dehghani, Dara Bahri, and Donald Met-zler. 2022. Efficient transformers: A survey. ACM Computing Surveys , 55(6):1–28. Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timothée Lacroix, Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, Aurélien Rodriguez, Armand Joulin, Edouard Grave, and Guillaume Lample. 2023. Llama: Open and efficient foundation language models. CoRR ,abs/2302.13971. Elena Voita, David Talbot, Fedor Moiseev, Rico Sen-nrich, and Ivan Titov. 2019. Analyzing multi-head self-attention: Specialized heads do the heavy lifting, the rest can be pruned. In ACL .Apoorv Vyas, Angelos Katharopoulos, and Francois Fleuret. 2020. Fast transformers with clustered atten-tion. In Advances in Neural Information Processing Systems (NeurIPS) .Jingdong Wang, Ting Zhang, Nicu Sebe, and Heng Tao Shen. 2018. A survey on learning to hash. IEEE Transactions on Pattern Analysis and Machine Intel-ligence (TPAMI) , 40(4):769–790. Xudong Wang, Chaoning Zhang, Qigan Sun, Zhenzhen Huang, Chang Lu, Sheng Zheng, Zeyu Ma, Caiyan Qin, Yang Yang, and Hengtao Shen. 2026a. Trans-forming external knowledge into triplets for enhanced retrieval in rag of llms. Preprint , arXiv:2604.12610. Xudong Wang, Chaoning Zhang, Jiaquan Zhang, Cheng-hao Li, Qigan Sun, Sung-Ho Bae, Peng Wang, Ning Xie, Jie Zou, Yang Yang, and 1 others. 2026b. Efficient and interpretable multi-agent llm rout-ing via ant colony optimization. arXiv preprint arXiv:2603.12933 .Rongkai Xia, Yinghao Pan, Hanjiang Lai, Chunyan Liu, and Shuicheng Yan. 2014. Supervised hashing with kernels. IEEE Transactions on Pattern Analysis and Machine Intelligence .Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. 2023. Smoothquant: Accurate and efficient post-training quantization for large language models. In International Conference on Machine Learning (ICML) , pages 38154–38168. PMLR. Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike I. Bi. 2024. Efficient streaming lan-guage models with attention sinks. In International Conference on Learning Representations (ICLR) .Jh Yuan and Feiping Nie. 2026. Spherical cautious optimizers. In Workshop on Scientific Methods for Understanding Deep Learning .Jh Yuan, Fangyuan Xie, Feiping Nie, and Xuelong Li. 2026. Riemannian optimization on relaxed indicator matrix manifold. In The Fourteenth International Conference on Learning Representations .Jiaquan Zhang, Qigan Sun, Chaoning Zhang, Xudong Wang, Zhenzhen Huang, Yitian Zhou, Pengcheng Zheng, Chi lok Andy Tai, Sung-Ho Bae, Zeyu Ma, Caiyan Qin, Jinyu Guo, Yang Yang, and Hengtao Shen. 2026a. Tda-rc: Task-driven alignment for knowledge-based reasoning chains in large language models. Preprint , arXiv:2604.04942. Jiaquan Zhang, Chaoning Zhang, Shuxu Chen, Zhen-zhen Huang, Pengcheng Zheng, Zhicheng Wang, Ping Guo, Fan Mo, Sung-Ho Bae, Jie Zou, Jiwei Wei, and Yang Yang. 2026b. Lightweight llm agent memory with small language models. Preprint ,arXiv:2604.07798. Jiaquan Zhang, Chaoning Zhang, Shuxu Chen, Yibei Liu, Chenghao Li, Qigan Sun, Shuai Yuan, Fach-rina Dewi Puspitasari, Dongshen Han, Guoqing Wang, Sung-Ho Bae, and Yang Yang. 2026c. Text summarization via global structure awareness. 
+
+Preprint , arXiv:2602.09821. Jiaquan Zhang, Chaoning Zhang, Shuxu Chen, Xudong Wang, Zhenzhen Huang, Pengcheng Zheng, Shuai Yuan, Sheng Zheng, Qigan Sun, Jie Zou, Lik-Hang Lee, and Yang Yang. 2026d. Learning global hypoth-esis space for enhancing synergistic reasoning chain. 
+
+Preprint , arXiv:2602.09794. Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianjun Chen, Liangliang Zheng, and Joseph E. Gonzalez. 2023. H2o: Heavy-hitter oracle for efficient generative in-ference of large language models. In Advances in Neural Information Processing Systems (NeurIPS) .Yilong Zhao, Chien-Yu Lin, Kan Zhu, Zihao Ye, Lequn Chen, Sizhe Zheng, Luis Ceze, Arvind Krishna-murthy, Tianqi Chen, and Baris Kasikci. 2024. Atom: Low-bit quantization for efficient and accurate llm serving. In Proceedings of the Conference on Ma-chine Learning and Systems (MLSys) .Pengcheng Zheng, Xiaorong Pu, Kecheng Chen, Jiaxin Huang, Meng Yang, Bai Feng, Yazhou Ren, Jianan Jiang, Chaoning Zhang, Yang Yang, and 1 others. 2025. Joint lossless compression and steganography for medical images via large language models. arXiv preprint arXiv:2508.01782 .Pengcheng Zheng, Chaoning Zhang, Mingzheng Cui, Guo Chen, Qigan Sun, Jiaxin Huang, Jiaquan Zhang, Tae-Ho Kim, Caiyan Qin, Yazhou Ren, and 1 others. 2026a. Towards visual chain-of-thought reasoning: A comprehensive survey. Pengcheng Zheng, Chaoning Zhang, Jiarong Mo, Guo-Hui Li, Jiaquan Zhang, Jiahao Zhang, Sihan Cao, Sheng Zheng, Caiyan Qin, Guoqing Wang, and 1 others. 2026b. Llava-fa: Learning fourier approxima-tion for compressing large multimodal models. arXiv preprint arXiv:2602.00135 .Han Zhu, Mingsheng Long, Jianmin Wang, and Yue Cao. 2016. Deep hashing network for efficient simi-larity retrieval. In AAAI .
+
+A Additional Related Work 
+
+A.1 KV Cache Optimization for Long-Context Inference 
+
+To alleviate the bottleneck of KV Cache in long-context inference, existing works primarily fol-low three trajectories. First, quantization com-pression (e.g., KIVI, Atom) reduces memory us-age through low-bit representation. However, this approach suffers from significant accuracy loss at extremely low bit-widths and introduces addi-tional dequantization overhead. Second, selective caching (e.g., StreamingLLM, H2O) eliminates re-dundancy based on attention sparsity. Although this reduces memory usage to a constant level, rigid eviction strategies result in the permanent loss of historical information, thereby compromising long-range dependency performance. Third, structured sharing (e.g., GQA, PyramidKV) reduces redun-dancy via cross-head or cross-layer sharing. Never-theless, these methods often overlook fine-grained internal model heterogeneity and typically require integration during the pre-training phase, making flexible application to existing models difficult. While the aforementioned methods achieve sig-nificant storage compression, they share a common limitation: they fail to fundamentally resolve the at-tention computation bottleneck. Whether through quantization or sparsification, the core computa-tion still relies on similarity matching of high-dimensional floating-point vectors. Consequently, the computational complexity remains bound by the floating-point operation paradigm, failing to reach the theoretical upper limit of computational efficiency. 
+
+A.2 Deep Hashing Methods 
+
+Hashing techniques map high-dimensional vec-tors to binary codes, utilizing bitwise operations to achieve low-latency and low-memory Approxi-mate Nearest Neighbor (ANN) search. Unlike tree-based, quantization-based, or graph-based meth-ods, hashing focuses on preserving bit-level local-ity. Early random projection methods, represented by Locality-Sensitive Hashing (LSH), were simple but suffered from limited recall rates. Subsequently, learning-based hashing methods (such as Spectral Hashing and ITQ) improved accuracy with shorter code lengths by optimizing mapping functions. In recent years, deep supervised hashing (e.g., DSH, CNNH) has become mainstream by leveraging neu-ral networks to capture complex semantics. Further-more, asymmetric hashing and multi-hash ensem-ble strategies have enhanced adaptability in large-scale scenarios like Retrieval-Augmented Gener-ation (RAG) by reducing quantization errors and employing multi-view fusion. In summary, while approximate retrieval tech-nologies represented by deep hashing have achieved significant success and maturity in fields such as large-scale image retrieval, few have noted the high degree of isomorphism between their tech-nical paradigms and critical scenarios like Trans-former internal attention computation. To the best of our knowledge, this work is the first to systemat-ically introduce advanced large-scale data retrieval techniques into the internal optimization of the Transformer attention mechanism. This approach aims to break the traditional paradigm bottle-neck dominated by large-scale, high-dimensional floating-point vector similarity calculations during autoregressive generation, thereby opening new technical pathways for next-generation efficient Large Language Model (LLM) inference. 
+
+B Datasets 
+
+We evaluate our method on six representative tasks from the LongBench benchmark (Bai et al., 2024), selected to cover a diverse range of long-context capabilities including single-document QA, multi-document summarization, and multi-hop reasoning. The specifications of each dataset are detailed be-low: 
+
+NarrativeQA This dataset targets reading com-prehension over long narratives, such as book sum-maries or movie scripts. It requires the model to understand the underlying plot and causal relation-ships within extensive texts. The task involves answering specific questions based on a single long document, challenging the model’s ability to main-tain context over long sequences. 
+
+HotpotQA Focused on multi-hop reasoning, Hot-potQA requires models to synthesize information from multiple supporting documents to answer a question. Unlike simple retrieval tasks, the model must bridge distinct pieces of evidence to derive the correct answer. This tests the ability to han-dle fragmented information and perform logical deduction across multiple contexts. 
+
+Qasper This dataset consists of question-answering tasks based on academic research papers from the NLP domain. It evaluates the model’s ca-pacity to extract technical details, summarize spe-cific sections, and interpret experimental results. The inputs typically include full-text papers, re-quiring the processing of dense, domain-specific information. 
+
+MultiNews Designed for multi-document sum-marization, MultiNews requires the model to gen-erate a concise summary based on several news articles covering the same event. This task assesses the ability to identify common themes, resolve con-flicting information, and synthesize a coherent nar-rative from diverse sources. 
+
+GovReport This dataset involves summarizing long government reports. The source documents contain formal, policy-oriented language with com-plex structures. The task challenges the model to distill key policy details and hierarchical informa-tion into a comprehensive summary, testing per-formance on highly structured and formal long-context data. 
+
+TriviaQA TriviaQA is a reading comprehension dataset containing question-answer pairs accom-panied by evidence documents. The task requires the model to locate factual answers within large amounts of noisy text. It evaluates the efficacy of information retrieval and the precision of factual extraction in long-context scenarios. 
+
+C Models 
+
+We employ three distinct Large Language Models (LLMs) to evaluate the versatility and scalability of DASH-KV. The specific details of each model are as follows: 
+
+Qwen2-7B-Instruct Developed by Alibaba Cloud, this model represents the highly optimized 7B parameter class. It utilizes Grouped Query Attention (GQA) in its architecture. GQA significantly reduces the memory footprint of the KV cache during inference. This model serves as a standard baseline for evaluating efficiency in compact dense models. Llama-3.1-8B-Instruct This model is the latest iteration from Meta, featuring native support for a context window of up to 128k tokens. It employs optimized Rotary Positional Embeddings (RoPE) to handle long sequences effectively. The inclusion of Llama-3.1 allows us to assess the robustness of DASH-KV in scenarios requiring ultra-long con-text retention. 
+
+Qwen2.5-14B-Instruct This model introduces a larger parameter scale compared to the 7B and 8B baselines. It benefits from extensive pre-training on a diverse corpus, resulting in superior reasoning capabilities. Testing on this model verifies whether the performance gains of DASH-KV remain con-sistent as model size and architectural complexity increase. 
+
+D Theoretical Equivalence of Bitwise Operations 
+
+A critical premise of our approach is that the computationally expensive floating-point similarity search can be mathematically equivalently replaced by efficient bitwise operations. In our experiments, we simulate the retrieval process using matrix mul-tiplication for ease of implementation within deep learning frameworks. Here, we provide the theoret-ical proof that this simulation is strictly equivalent to the Hamming distance computation in the binary space. Consider the query hash code hq ∈ {− 1, +1 }D
+
+and the key hash code hk ∈ {− 1, +1 }D, where D
+
+denotes the embedding dimension (e.g., 128). The Inner Product in the binary space is defined as: Sim (hq, h k) = 
+
+> D
+
+X
+
+> i=1
+
+h(i) 
+
+> q
+
+· h(i) 
+
+> k
+
+(22) Since h(i) 
+
+> q
+
+, h (i) 
+
+> k
+
+∈ {− 1, +1 }, the product term 
+
+h(i) 
+
+> q
+
+· h(i) 
+
+> k
+
+takes the value +1 if the bits are iden-tical ( h(i) 
+
+> q
+
+= h(i) 
+
+> k
+
+) and −1 if they are different (h(i)
+
+> q
+
+̸ = h(i) 
+
+> k
+
+). The Hamming Distance H(hq, h k) counts the number of positions where the bits differ. Let 
+
+Ndif f be the number of differing bits (Hamming distance) and Nsame be the number of identical bits. We have the following relationships: 
+
+Ndif f = H(hq, h k) (23) 
+
+Nsame = D − H(hq, h k) (24) Substituting these into the inner product formula: Sim (hq, h k) = Nsame · (+1) + Ndif f · (−1) 
+
+(25) 
+
+= ( D − H(hq, h k)) − H(hq, h k)
+
+(26) 
+
+= D − 2 · H(hq, h k) (27) This derivation proves a strict linear mapping between the inner product and the Hamming dis-tance: 
+
+arg max  
+
+> k
+
+Sim (hq, h k) ⇐⇒ arg min  
+
+> k
+
+H(hq, h k)
+
+(28) In our PyTorch-based experiments, we compute similarity using sign (Q) · sign (K)⊤ (floating-point matrix multiplication on {− 1, +1 } tensors). Equa-tion 28 guarantees that the ranking of candidates obtained via this simulation is identical to that ob-tained via hardware-level bitwise operations (XOR followed by POPCNT). Therefore, the accuracy metrics reported in our experiments faithfully re-flect the performance of the proposed bitwise ac-celeration paradigm. 
+
+E Introduction of residuals 
+
+E.1 The necessity of residuals 
+
+To elucidate the necessity of the residual MLP, we address a fundamental limitation of binary hash-ing within the Transformer context: Magnitude-Blindness. Statistics on Key vectors reveal an immense dynamic range (e.g., spanning [− − 
+
+412 , 236] in Layer 27) accompanied by significant outliers. Binary hashing compresses both negligi-ble activations and extreme values into identical codewords. This results in "magnitude collapse," hindering the identification of critical "Attention Sinks." The residual MLP remedies this by lever-aging continuous representations to detect high-activation features and predict magnitude compen-sations. By effectively recovering the attention intensity lost during binarization, this approach sig-nificantly outperforms pure hashing in scenarios involving heavy-tailed distributions. Unlike discrete hashing, the MLP exploits con-tinuous space properties to capture original mag-nitudes, allowing it to predict substantial compen-sation for high-activation outliers. This effective restoration of the attention intensity lost to bina-rization establishes the significant superiority of DASH-KV over pure hashing in layers character-ized by heavy-tailed distributions. E.2 Analysis of the selection of the necessary residual module loss function 
+
+We evaluated three progressive variants to quantify the impact of residual learning: Pure Hash (without residual compensation), DASH-KV-MSE (trained via Mean Squared Error), and DASH-KV-Distill (trained via distillation). The experimental results reveal a critical insight: directly fitting the residual function using Mean Squared Error (MSE) results in a significant perfor-mance degradation (F1 score drops by 0.39, from 11.31 to 10.92). The underlying cause of this phe-nomenon is the Scale Shift during Length Extrapo-lation. When the model learns residuals using the MSE objective on short sequences (3k tokens), it overfits to point-wise absolute value predictions. However, when extrapolated to unseen long con-texts (32k tokens) during inference, the numerical range of attention weights shifts significantly, in-troducing systematic bias into the MSE-optimized residual predictions. In contrast, the KL divergence-based distilla-tion strategy (Distill) employs a fundamentally different optimization paradigm. Rather than fit-ting absolute residual values, it guides the residual network to learn the Relative Probability Distri-bution—specifically, adjusting the relative impor-tance rankings among different Keys rather than their absolute similarity scores. This strategy ex-hibits inherent robustness for length extrapolation: provided the relative attention rankings remain con-sistent between training and inference, the model can generalize to arbitrary sequence lengths. Our experiments validate this hypothesis: DASH-KV-Distill effectively mitigates the quantization errors introduced by pure hashing, achieving a +0.13 F1 improvement over the full-precision baseline (11.44 vs. 11.31). This underscores the superi-ority of the distillation objective in long-context scenarios. 
+
+F The necessity of layer-wise training 
+
+Our empirical investigation uncovers a fundamen-tal challenge in hashing-based attention optimiza-tion (Zheng et al., 2026a, 2025): the significant distributional heterogeneity of Query ( Q) and Key (K) representations across network depths. As widely recognized, Large Language Models pro-cess information hierarchically, with shallower lay-ers encoding local syntactic patterns and deeper layers capturing abstract semantic dependencies. −10 .0 −7.5 −5.0 −2.5 0.0 2.5 5.0 7.5 10 .0                                                                                                                                                                                                                        
+
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 0
+> Query ( μ=0.102) Key ( μ=1.261) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 1
+> Query ( μ=-0.018) Key ( μ=0.091) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 2
+> Query ( μ=-0.044) Key ( μ=0.012) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 3
+> Query ( μ=0.025) Key ( μ=0.078) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 4
+> Query ( μ=0.021) Key ( μ=-0.129) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 5
+> Query ( μ=0.008) Key ( μ=-0.035) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 6
+> Query ( μ=0.132) Key ( μ=0.073) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 7
+> Query ( μ=0.065) Key ( μ=-0.053) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 8
+> Query ( μ=0.032) Key ( μ=-0.002) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 9
+> Query ( μ=0.071) Key ( μ=-0.008) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 10
+> Query ( μ=0.136) Key ( μ=-0.032) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 11
+> Query ( μ=-0.117) Key ( μ=0.077) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 12
+> Query ( μ=0.015) Key ( μ=-0.063) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 13
+> Query ( μ=0.115) Key ( μ=0.136) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 14
+> Query ( μ=0.096) Key ( μ=-0.065) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 15
+> Query ( μ=-0.088) Key ( μ=0.033) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 16
+> Query ( μ=0.019) Key ( μ=0.016) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 17
+> Query ( μ=-0.008) Key ( μ=0.107) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 18
+> Query ( μ=0.017) Key ( μ=0.022) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 19
+> Query ( μ=-0.029) Key ( μ=-0.169) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 20
+> Query ( μ=-0.066) Key ( μ=0.046) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 21
+> Query ( μ=-0.069) Key ( μ=0.006) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 22
+> Query ( μ=-0.083) Key ( μ=0.052) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 23
+> Query ( μ=-0.034) Key ( μ=0.093) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 24
+> Query ( μ=-0.010) Key ( μ=0.088) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 25
+> Query ( μ=-0.049) Key ( μ=-0.033) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 26
+> Query ( μ=-0.003) Key ( μ=0.015) −10 .0−7.5−5.0−2.50.02.55.07.510 .0
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Layer: 27
+> Query ( μ=0.215) Key ( μ=-2.351)
+
+Figure 10: Visualization of Query and Key Activation Distributions Across Layers. We project the Query and Key vectors from representative layers (e.g., Layer 0, 14, 27) into a 2D space. The marked visual discrepan-cies indicate that the geometric distribution of attention features drifts significantly as network depth increases, implying that a static global hashing projection cannot optimally fit all layers simultaneously. 
+
+This functional distinctiveness suggests that the op-timal low-rank manifolds for preserving similarity structures are layer-dependent. To substantiate this hypothesis, we first visualize the activation landscapes of different layers in Fig-ure 10. The visualization reveals distinct clustering patterns and density variations, confirming that the feature subspaces undergo substantial transforma-tion (i.e., manifold shift) from bottom to top layers. Consequently, a "one-size-fits-all" hashing projec-tion trained on a specific distribution is theoreti-cally insufficient to capture the diverse geometric characteristics present throughout the model. To strictly quantify the impact of this heterogene-ity, we conducted a cross-layer generalization ex-periment (see Figure 11). Specifically, we isolated the hashing network weights optimized on the data distribution of an intermediate layer (Layer 14) and directly transferred them to perform retrieval on a shallow layer (Layer 1) and a deep layer (Layer 27). As evidenced by the results, this direct weight transfer precipitates a marked degradation in recall performance compared to layer-specific baselines. The inability of Layer 14’s parameters to general-ize to other depths corroborates our visual findings: Layer 0 
+
+> (Shallow)
+> Layer 14
+> (Self)
+> Layer 27
+> (Deep)
+> Target Layer (Evaluated on Layer 14 Model)
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> Recall@100 (%)
+> Cross-Layer Transferability Analysis
+> 21.6%
+> 86.1%
+> 47.2%
+> Critical Drop
+> (-65%)
+> Severe Drop
+> (-39%)
+> Self-Matched (Trained & Tested on L14)
+> Mismatched (Transfer Zero-shot)
+
+Figure 11: Impact of Cross-Layer Weight Transfer on Retrieval Recall. The figure illustrates the performance degradation when applying hash functions trained on an intermediate layer (Layer 14) to a shallow layer (Layer 1) and a deep layer (Layer 27). The sharp decline in recall confirms the distributional mismatch between lay-ers. 
+
+the geometric structure of the attention mechanism is highly layer-specific. This phenomenon under-scores the limited generalizability of a single global weight configuration. Therefore, we conclude that 
+
+independent parameter optimization for each layer (Layer-Wise Training) is not merely an en-gineering choice but a theoretical necessity for en-suring high-fidelity retrieval and minimizing quan-tization errors across the entire model. 
+
+G Task Performance 
+
+To rigorously evaluate the efficacy of our proposed method, we conducted extensive experiments us-ing the Qwen2-7B-Instruct model as our primary testbed. We systematically replaced the standard attention mechanism with our optimized module across various layer configurations—ranging from specific single layers to multiple intermediate lay-ers. This ablation study aims to verify whether our approach can maintain high-fidelity retrieval and reasoning capabilities compared to the full-attention baseline. The quantitative results are summarized in Ta-ble 3. Our method demonstrates remarkable robust-ness across all six long-context benchmarks. No-tably, replacing the attention mechanism in deeper layers (e.g., Layer 18 or Layer 27) yields perfor-mance highly comparable to the original model. For instance, the configuration replacing Layer 18 achieves an average score of 38.73, which marginally surpasses the full-attention baseline of 38.71. Furthermore, we explored an aggressive com-pression strategy by replacing a block of eight inter-mediate layers (Layers 10, 12, ..., 24). Even under this setting, the model maintains a competitive av-erage score of 38.19, exhibiting negligible degrada-tion in multi-hop reasoning (HotpotQA) and sum-marization tasks (MultiNews). However, we ob-served that replacing the very first layer (Layer 0) leads to a catastrophic performance drop (13.30 Avg), underscoring the critical role of initial lay-ers in preserving raw token semantics, which are sensitive to approximation. Table 3: Performance Comparison on Qwen2-7B-Instruct. We compare the Full Attention baseline (Original) against variants where specific layers are replaced by our method. The metrics reported are F1 scores for Nar-rativeQA, HotpotQA, Qasper, MultiNews, and GovReport, and Exact Match (EM) for TriviaQA. Avg denotes the average score across all tasks. Note that replacing Layer 0 results in significant degradation, highlighting the sensitivity of early layers.
