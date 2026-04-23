@@ -1,0 +1,625 @@
+Title: SparseBalance: Load-Balanced Long Context Training with Dynamic Sparse Attention
+
+URL Source: https://arxiv.org/pdf/2604.13847v1
+
+Published Time: Thu, 16 Apr 2026 00:58:10 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# SparseBalance: Load-Balanced Long Context Training with Dynamic Sparse Attention 
+
+Hongtao Xu 1,2 , Jianchao Tan 2, Yuxuan Hu 2, Pengju Lu 1, Hongyu Wang 1, Pingwei Sun 2,Yerui Sun 2, Yuchen Xie 2, Xunliang Cai 2, Mingzhen Li 3,* , and Weile Jia 3,* 
+
+> 1
+
+School of Advanced Interdisciplinary Sciences, University of Chinese Academy of Sciences , Beijing, China 
+
+> 2
+
+Meituan , Beijing, China 
+
+> 3
+
+University of Chinese Academy of Sciences , Beijing, China 
+
+Abstract —While sparse attention mitigates the computational bottleneck of long-context LLM training, its distributed training process exhibits extreme heterogeneity in both 1) sequence length and 2) sparsity sensitivity, leading to a severe imbalance problem and sub-optimal model accuracy. Existing algorithms and training frameworks typically focus on single issue, failing to systematically co-optimize these two problems. Therefore, we propose SparseBalance, a novel algorithm-system co-design framework, which exploits the sparsity and sequence heterogeneity to optimize model accuracy and system efficiency jointly. First, we propose workload-aware dynamic sparsity tuning, which employs a bidirectional sparsity adjustment to eliminate stragglers and exploit inherent bubbles for free accuracy. Second, we propose a sparsity-aware batching strategy to achieve coarse-grained balance, which complements dynamic sparsity tuning. Experimental results demonstrate that SparseBalance achieves up to a 1.33 × end-to-end speedup while still improving the long-context capability by 0.46% on the LongBench benchmark. 
+
+Index Terms —Sparse Attention, Distributed Training, Load Imbalance, Large Language Model 
+
+I. I NTRODUCTION 
+
+The long-context modeling capability is increasingly crucial for the evolution of Large Language Models (LLMs), serving as the backbone for advanced downstream applications such as code generation, in-depth reasoning, and autonomous agent systems. Mainstream LLMs typically perform an additional training stage on specific long-context datasets to extend the context windows [ 1 ], [ 2], [ 3], [ 4]. However, as the context length increases, the standard attention mechanism becomes the primary computational bottleneck. Because standard attention requires computing affinities across all token pairs, it exhibits a quadratic computational complexity with respect to sequence length, thus severely hindering the context expansion. To miti-gate this, sparse attention has emerged as a promising solution in recent released LLMs [ 5], [ 6]. By selectively computing the critical tokens, sparse attention reduces the computational complexity and breaks the performance bottleneck. However, long-context sparse training still faces a severe load imbalance problem caused by the inherent heterogeneity in sequence length distributions. For instance, the Qwen2.5 technical report [ 3] discloses their data mix strategy at long context training stage, which comprises 40% long sequences and 60% short sequences. This heterogeneity in sequence length leads to severe load imbalance problem in distributed training, significantly degrading the system efficiency. Existing works attempt to alleviate this issue through batching or packing strategies. However, these methods can hardly solve the problem completely due to the inherently discrete nature in this bin-packing problem, especially for highly skewed datasets. This imbalance manifests across multiple parallelism dimensions in distributed training. In inner-level pipeline parallelism (PP), varying workloads exacerbate pipeline bub-bles, and the processing time of extremely long sequences essentially dominates the overall pipeline latency. Worse still, this imbalance in PP ultimately propagates to the outer-level parallelism like data parallelism (DP), severely amplifying the degradation of system efficiency. Meanwhile, sparse training introduces another critical hetero-geneity in sparsity sensitivity. Although existing trainable sparse attention algorithms typically adopt a predefined sparsity degree, 
+
+we observe distinct sparsity sensitivities across different sequences and transformer layers . Furthermore, if simply tran-sitioned to dynamic sparse training without system awareness, this inherent sparsity heterogeneity would lead to the exact same workload imbalance problem. Therefore, these two dimensions of heterogeneity—sequence length and sparsity sensitivity—are deeply intertwined and jointly impact the runtime workload, highlighting the critical need for algorithm-system co-design. However, current algorithms and training frameworks typically address these challenges in isolation, solely focusing on workload balance or developing sophisticated sparse algorithms. Consequently, they fail to systematically co-optimize these two issues, resulting in sub-optimal performance in either training efficiency or model accuracy. 
+
+To address sequence length heterogeneity and spar-sity sensitivity heterogeneity simultaneously, we propose SparseBalance, a novel algorithm–system co-design enabling bidirectional sparsity tuning for LLM training. SparseBalance jointly optimizes model accuracy and system efficiency while considering their inherent trade-off. 
+
+First, we propose a workload-aware Dynamic Sparsity 
+
+Tuning (DST) strategy, which performs bidirectional sparsity adjustment at runtime to rebalance the workload at the layer level. Specifically, DST identifies bottleneck micro-batches and reduces their attention budget to accelerate execution, while simultaneously increasing the attention budget of non-
+
+> arXiv:2604.13847v1 [cs.LG] 15 Apr 2026
+
+bottleneck micro-batches to exploit pipeline bubbles for free accuracy improvements. To ensure the efficiency and accuracy during such tuning process, we introduce an anchor-guided thresholding mechanism, which determines the direction and bounds the magnitude for each micro-batch. Second, to fully unleash the optimization potential of DST, we propose a Sparsity-Aware Batching (SAB) strategy, which involves lightweight sparsity estimation and latency-based data packing. SAB provides a well-balanced initial workload distribution, which serves as a foundation for the fine-grained runtime adjustments in DST. Additionally, we implement the latency prediction module, which maps the sequence length and sparsity to practical execution latency through offline profiling, providing the accurate performance guide for both DST and SAB module. Together, SAB and DST form a unified optimization pipeline, spanning from coarse-grained data reorganization to fine-grained runtime tuning, enabling efficient load balancing without sacrificing model accuracy. We evaluate SparseBalance on two real-world datasets and conduct comprehensive evaluations across three downstream benchmarks. Our key contributions are as follows:  
+
+> •
+
+We provide a novel perspective on improving sparse attention training through algorithm-system co-design to jointly optimize system efficiency and model accuracy.  
+
+> •
+
+We propose workload-aware dynamic sparsity tuning (DST) to dynamically rebalance the training workload at runtime, while preserving model accuracy.  
+
+> •
+
+We propose sparsity-aware batching (SAB) dedicated for sparse training scenario, it involves a lightweight sparsity estimator and latency-based batching strategy, providing coarse-grained balance for DST.  
+
+> •
+
+We implement SparseBalance and experimental results demonstrate that SparseBalance improves the end-to-end training efficiency by up to 1.33 × while still improving the model’s downstream capability. II. B ACKGROUND 
+
+A. Distributed Training Strategies Data Parallelism (DP) [7] partitions the global training batch across multiple workers. In each iteration, every worker independently processes its assigned subset of data and computes the local gradients. At the end of each iteration, DP enforces a rigid synchronization barrier, requiring all workers to synchronize their gradients before updating the model weights. This inherent synchronization mechanism forces all workers to wait for the slowest worker (i.e., the straggler) to reach the barrier, making DP highly sensitive to workload imbalances. 
+
+Pipeline Parallelism (PP) [ 8], [ 9], [ 10 ], [ 11 ] splits the model layers into sequential stages, with each stage assigned to a different PP worker. To maximize hardware utilization, existing methods orchestrate model execution into a pipeline by dividing the input data into multiple micro-batches. These micro-batches then sequentially traverse all PP ranks via point-to-point communication to deliver activations and gradients between stages. However, PP inherently suffers from the pipeline bubble problem. This issue is severely exacerbated under highly heterogeneous workloads, as any execution delay in a single stage cascades throughout the entire pipeline. 
+
+Tensor Parallelism (TP) [12 ] divides the tensor operations across devices, and each device handles a slice of the tensor operations. With TP, each GPU only has part of the input and parameters, resulting in intensive communication during training. Therefore, TP is typically applied within a single node, while other levels of parallelism are applied across nodes. 
+
+Sequence Parallelism (SP) partitions the input tensor along the sequence length dimension [ 13 ], [ 14 ], [ 15 ], [ 16 ]. There are three types of SP according to the communication schemes: (i) ring-based point-to-point communications [ 15 ], (ii) AllToAll-based communications [ 14 ], and (iii) AllGather-based com-munications [ 16 ]. Additionally, there is another type of SP, which is proposed by Megatron-LM and splits the dropout and normalization module activation [ 13 ]. In this paper, we use this Megatron-style SP as default. 
+
+B. Self-Attention and Trainable Sparse Attention 
+
+Modern LLMs are typically built by stacking many Trans-former layers, each of which contains a self-attention module as the core mechanism to capture complex dependencies between elements within a sequence. In long-context training, the self-attention module becomes the dominant computational bottleneck because its cost scales quadratically with the sequence length. Given the query ( Q), key ( K), and value (V ) matrices, where Q, K, V ∈ RN ×d with N denoting the sequence length and d representing the hidden dimension. The self-attention computation is formulated as follows: Attention (Q, K, V ) = softmax 
+
+ QK ⊤
+
+√d
+
+
+
+V (1) In this formulation, the dot product QK ⊤ calculates the raw affinity scores, representing the alignment between sequence elements. These scores are subsequently scaled by 1√d . Then, the softmax operation is applied row-wise to yield a normalized distribution of attention weights. Finally, these weights are multiplied by the value matrix V to aggregate the relevant contextual information into the final output representation. To alleviate the quadratic computational bottleneck of standard attention in long-context modeling, various trainable sparse attention methods have been proposed [ 17 ], [ 5], [ 18 ]. These methods leverage the inherent sparsity of the attention mechanism by selecting only a subset of highly relevant tokens, referred to as critical tokens , to approximate the full attention computation. Existing trainable sparse methods typically adopt a block-sparse paradigm, which partition the key and value (KV) sequences into discrete blocks. They compute the correlation between each query token and these blocks using specific routing metrics to determine the critical tokens. This type of sparse attention computation is formulated as follows: SparseAttn (Q, K, V ) = softmax 
+
+ QK [I]⊤
+
+√d
+
+
+
+V [I] (2) 0k 10k 20k 30k 40k 50k 60k 
+
+Sequence Lengths 
+
+> 0.00
+> 0.05
+> 0.10
+> 0.15
+> 0.20
+> Percentage  Longalign-10k
+> ChatQA2-Long-SFT
+
+Fig. 1: Extreme heterogeneity in sequence length distribu-tions across two real-world long-context datasets. The x-axis represents the sequence length, and the y-axis denotes its corresponding proportion within the entire dataset. where I ∈ RN serves as the indexer indicating the set of selected critical tokens. The primary distinction among existing algorithms lies in the design of this routing mechanism, also referred to as the indexer. For instance, MoBA [ 17 ] identifies critical tokens by calculating the relevance between each query and the mean representation of the key blocks. Similarly, DSA [ 5 ]employs a lightweight, low-precision indexer based on multi-head latent attention. Despite differing indexer designs, these block-sparse algorithms uniformly select a fixed Top-K most relevant token blocks for computation across all samples. Notably, our method reuses the inherent indexer of these sparse algorithms to achieve workload-aware dynamic sparsity tuning with negligible additional overhead. Consequently, our approach can be seamlessly integrated into existing sparse attention algorithms. In this paper, we also use the attention budget k
+
+(e.g., the Top-K selected blocks) to characterize the sparsity level. A smaller attention budget k indicates higher sparsity, while a larger k indicates lower sparsity. III. O BSERVATION 
+
+A. Sequence Length Heterogeneity in Datasets 
+
+In long context training, the sequence length distribution could varying significantly. To illustrate this, we analyze two real-world, open-source datasets: nvidia/ChatQA2-Long-SFT-data (ChatQA2) [ 19 ] and zai-org/LongAlign-10k [ 20 ]. As shown in Figure 1, both datasets exhibit highly skewed length distributions. ChatQA2 demonstrates a bimodal pattern, dominated by ultra-short (<4K) and long (>16K) sequences. In contrast, LongAlign-10k presents a pronounced long-tail distribution, with sequence lengths stretching continuously from 8K up to 72K tokens. Consequently, this extreme heterogeneity in sequence lengths leads to distinct runtime workloads across distributed workers, highlighting the critical need for a workload-aware solution that can dynamically balance workloads. 
+
+B. Imbalance Problem in Distributed Training 
+
+The heterogeneous sequence length distributions directly degrade the distributed LLM training, leading to severe load 1 2 3 4 1 2 3 4                                                            
+
+> 12314234
+> 121132243344
+> 111222333444
+> 12341234
+> 12314234
+> 12132434
+> 11223344
+> Time
+> PP Device
+> PP Worker0 PP Worker1 PP Worker2 PP Worker3
+> PP Bubble
+> DP Bubble
+
+Fig. 2: Illustration of the straggler effect caused by workload imbalance. Within PP group, a bottleneck micro-batch (e.g., Micro-batch 4) dictates the critical path and exacerbates pipeline bubbles. Furthermore, DP synchronization significantly amplifies this imbalance across the entire system. 10 15 20 25 30 35 40 45 50 55 60 
+
+> Iteration
+> 100
+> 200
+> 300
+> Forward Time (ms)
+> Max Time
+> Mean Time
+> Min Time
+> Performance Gap
+
+Fig. 3: Forward-pass latency of micro-batches over continuous training iterations. The substantial gap between the maximum (Tmax , red solid line), mean ( Tmean , blue dashed line), and minimum ( Tmin , green dashed line) latencies reveals severe workload imbalance. imbalance problem. The parallel training strategies always operate in a hierarchical and synchronized manner. The longest micro-batch inevitably bottlenecks the entire system. From the perspective of pipeline parallelism (PP), stages process micro-batches sequentially and rely on synchronous point-to-point communication to pass middle states. As illustrated in Figure 2, the critical path of the PP execution time can be formulated as 
+
+Tpp ≥ Tmax × P P _Size + P Tother . Therefore, the longest micro-batch strictly bounds the overall pipeline throughput, causing severe pipeline bubbles. Data parallelism (DP) also suffers from the straggler effect due to the requirement of collective gradient synchronization at the end of each iteration. Worse still, the imbalance will be amplified when DP and PP are coupled, which is a standard configuration in large-scale LLM training. Consequently, the longest micro-batch fundamentally dominates the global step time, severely impacting the end-to-end training latency. To empirically quantify this phenomenon, Figure 3 visualizes the forward-pass latency of various micro-batches over 50 continuous training iterations. Specifically, the red solid line represents the maximum latency ( Tmax ), the blue dashed line indicates the mean latency ( Tmean ), and the green dashed line denotes the minimum latency ( Tmin ). The substantial performance gap between the maximum and minimum latencies indicates a massive optimization potential. While existing 10 20 30 40 50 60 
+
+> Attention Budget k (Selected Blocks)
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Cumulative Probability  90% Probability
+> 26K @L27
+> 14K @L27
+> 26K @L35
+> 16K @L27
+
+Fig. 4: Cumulative score coverage under different attention budgets. works resort to more balanced batching strategies, they cannot perfectly eliminate the straggler effect due to the discrete nature of the batching problem, especially for highly skewed data distributions, highlighting the critical need for a more fundamental approach. 
+
+C. Inter- and Intra-Sequence Sparsity Heterogeneity 
+
+Beyond sequence length heterogeneity, sparse training also exhibits substantial heterogeneity in sparsity sensitivity , at both the inter-sequence and intra-sequence levels. To quantify this effect, we profile the cumulative probability of attention score in our realistic training scenario. Figure 4 plots the recovery ratio under different attention budgets k (equivalently, the number of selected critical blocks (TopK), more budgets implies less sparsity degree). We report three sequences of lengths 14K, 16K, and 26K at layer 27, and additionally plot the same 26K sequence at layers 27 and 35. First, The results reveal clearly distinct sparsity sensitivities across sequences, which we refer to inter-sequence sparsity heterogeneity . For instance, the red curve in Figure 4 exhibits a highly concentrated attention pattern, where a minimal budget (about k ≈ 10 ) is sufficient to recover 90% of the original attention representation. By contrast, the blue and green curves demonstrate a dispersed attention distribution, requiring a substantially larger budgets (about k ≈ 36 and 50 ) to achieve the same recovery ratio. Second, the same sequence can exhibit very different sparsity patterns across layers, which we term intra-sequence sparsity heterogeneity . For the same 26K sample shown in Figure 4, layer 27 (red) remains sharply concentrated, whereas layer 35 (orange) is much flatter and more sensitive to aggressive budget reduction. Taken together, these observations reveal substantial potential for dynamic sparsity tuning and directly motivates the layer-level dynamic sparsity tuning design in SparseBalance. IV. D ESIGN 
+
+Figure 5 illustrates the overall design of SparseBalance. From the execution perspective, SparseBalance balances the workload in a coarse-to-fine manner. SAB first reorganizes training samples using sparsity estimation and latency-based packing, achieving coarse-grained workload balance across Latency Prediction       
+
+> (Sparsity K, Length )map Latency
+> Sparsity -Aware Batching
+> Coarse -grained balancing
+> …
+> MB 1
+> DST
+> Latency
+> based
+> batching
+
+SparseBalance       
+
+> …
+> Latency
+> anchor
+> GPU
+> Dynamic Sparsity Tuning
+> Fine -grained balancing
+> Rank Initialize
+> MB 0
+> Bidirectional
+> adjustment
+> CPU
+> Top -k
+> Score
+> Accum
+> current k
+> 1.0
+> Tuning space
+> Accuracy bound
+> ΔP
+
+Fig. 5: Overview of SparseBalance, which consists of three components: workload-aware dynamic sparsity tuning (DST), sparsity-aware batching (SAB) and latency prediction module. micro-batches. Built on top of this, DST further conducts per-layer runtime sparsity tuning to mitigate residual imbalance at a finer granularity while preserving model quality. Both SAB and DST rely on accurate latency prediction as a performance guidance for optimization. To this end, we design a latency prediction module that maps sequence length and sparsity degree to practical execution latency under specific hardware and training configurations through offline profiling manner. For clarity, we first present DST in Section IV-A , then introduce the latency prediction module in Section IV-B , and finally describe the design of SAB in Section IV-C. 
+
+A. Workload-Aware Dynamic Sparsity Tuning 
+
+Existing methods for long-context training typically rely on batching or packing strategies to alleviate the imbalance problem induced by the heterogeneity in sequence length. However, due to the inherently discrete nature of batch construction, these approaches cannot fundamentally eliminate the imbalance, especially under highly skewed sequence-length distributions. Even with careful data shuffling, a single micro-batch containing a difficult-to-pack sequence may still become a straggler on the critical path, delaying the entire iteration. Therefore, a finer-grained load balancing mechanism is required to mitigate this problem. Fortunately, sparse training provides such an opportunity for finer-grained load balancing. As discussed in Section III-C ,long-context sparse training exhibits another important het-erogeneity in sparsity sensitivity. This observation allows us to treat the sparsity (attention budget) not merely as a fixed algorithmic hyper-parameter, but as an adaptive degree of freedom for runtime load balancing. Based on this insight, we propose Workload-Aware Dynamic Sparsity Tuning (DST) ,which dynamically redistributes the attention budget across micro-batches according to their impact on the critical path. At a high level, DST performs bidirectional budget adjust-ment. For bottleneck micro-batches on the critical path, DST reduces their attention budget, i.e., tunes them toward higher sparsity, to shorten their execution time and eliminate stragglers. Even a small reduction for these bottlenecks can improve the end-to-end step latency, since their delay is amplified by synchronization and dependencies in distributed training. In contrast, for non-bottleneck micro-batches whose latency does not affect the overall step time, DST allocates more attention budget, i.e., tunes them toward lower sparsity, to improve the fidelity of sparse attention. Although such adjustment may slightly increase local execution time, the additional cost can be absorbed by the inevitable idle time introduced by pipeline execution and synchronization. In this sense, DST converts this otherwise wasted time into free accuracy .To make this bidirectional tuning both effective and safe, we design an anchor-guided thresholding mechanism . For a global batch containing N micro-batches, let kbase i denote the attention budget assigned by the underlying sparse attention method. Using the latency predictor introduced in Section IV-B ,we first estimate the latency of each micro-batch under its base budget, and then define an execution anchor as 
+
+Tanchor = ϕ
+
+n ˆTi(kbase i )
+
+oNi=1 
+
+
+
+(3) where ϕ(·) is an anchor operator, such as the minimum, mean, or maximum of the predicted micro-batch latencies. DST then aligns each micro-batch to this reference point and obtains the corresponding target budget kanchor i . Therefore, the anchor determines the tuning direction: micro-batches above the anchor are compressed, whereas those below the anchor can use more attention budget. To preserve model quality, DST further constrains the tuning magnitude using the routing logits already produced by the sparse attention indexer, introducing almost no additional runtime overhead. Specifically, we normalize and sort the routing logits of micro-batch i to obtain importance scores 
+
+ri, 1 ≥ ri, 2 ≥ · · · , where P 
+
+> j
+
+ri,j = 1 . We then define the cumulative score coverage under budget k as 
+
+Ci(k) = 
+
+> k
+
+X
+
+> j=1
+
+ri,j (4) 
+
+Ci(k) characterizes how well the selected sparse pattern preserves the high-importance regions indicated by the routing scores. For bottleneck micro-batches, reducing the budget from 
+
+kbase i to kanchor i may hurt model quality. We therefore bound the allowable coverage drop by a threshold p:
+
+Ci(kbase i ) − Ci(kanchor i ) ≤ p (5) Here, p serves as the primary knob controlling the aggres-siveness of dynamic sparsity tuning: a larger p permits more aggressive compression of bottleneck micro-batches and thus favors system efficiency, while a smaller p enforces stricter fidelity to the original sparse attention pattern. For bottleneck micro-batches, DST further restricts the candidate budgets to those that simultaneously satisfy the latency target and the quality bound. We define the feasible set as 
+
+Fi =
+
+n
+
+k ∈ K ˆTi(k) ≤ Tanchor , C i(kbase i ) − Ci(k) ≤ p
+
+o
+
+(6) 0 2 4 6 8     
+
+> Theoretical FLOPs (TFLOPs)
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> 120
+> 140
+> Execution Latency (ms)
+> (a) Chunk Size = 64
+> 02468
+> Theoretical FLOPs (TFLOPs)
+> (b) Chunk Size = 256
+> 5000
+> 10000
+> 15000
+> 20000
+> 25000
+> 30000 Sequence Length
+
+Fig. 6: Practical latency of sparse attention cannot be reliably predicted by either theoretical FLOPs or sequence length alone, motivating our profiling-based latency predictor. Accordingly, the final accepted budget is given by 
+
+kf inal i =
+
+(max Fi, ˆTi(kbase i ) > T anchor 
+
+kanchor i , ˆTi(kbase i ) ≤ Tanchor 
+
+(7) In this way, the anchor determines the tuning direction and target balance point, while the threshold p controls the safe tuning magnitude. As a result, DST shortens the critical path by compressing bottleneck micro-batches and simultaneously improves the computation fidelity of non-bottleneck micro-batches, achieving better workload balance without sacrificing model quality. 
+
+B. Profiling-Based Latency Modeling 
+
+The effectiveness of DST relies on accurate latency guidance. In particular, DST must estimate not only the execution latency of a micro-batch under its current attention budget, but also the budget required to align its latency to a target anchor. Therefore, we design a lightweight latency prediction module that maps sequence length and attention budget to practical execution latency under a given hardware environment, parallelization strategy, and sparse attention implementation. However, building an accurate latency predictor for sparse attention is non-trivial. For standard attention, sequence length or theoretical FLOPs is often a reasonable proxy for workload. In sparse training, however, this approximation becomes unreliable, because the practical latency is jointly affected by sequence length, attention budget, sparse kernel implementation, and hardware characteristics. To empirically validate this mismatch, we profile the latency of one Transformer layer under different settings using the official implementation of MoBA. As shown in Figure 6, neither FLOPs-based nor length-based modeling can consistently predict the practical latency of sparse attention. Therefore, we adopt a profiling-based design instead of an analytical one. The predictor Perf exposes two runtime interfaces: 
+
+ˆT (x, k ) = Perf.predict (x, k ) (8) 
+
+ktarget = Perf.align (x, T target ) (9) where x denotes the length descriptor of a micro-batch and k
+
+denotes the attention budget. The first interface estimates the practical latency under budget k, while the second returns the largest budget whose predicted latency does not exceed the target latency Ttarget .To materialize these interfaces efficiently, we adopt a
+
+profiling-based latency modeling approach. Specifically, we use a single Transformer layer as a performance proxy, discretize sequence lengths into bins X and attention budgets into a small candidate set K, and profile the latency of every pair (x, k ) ∈ X × K . The resulting lookup table is 
+
+M[x, k ] = profile (x, k ) (10) where M stores the measured latency on the target system. At runtime, Perf.predict queries M directly, optionally with interpolation when the input falls between neighboring buckets, while Perf.align searches over K and returns the budget whose predicted latency best matches the target. This design keeps the online overhead negligible, because runtime only requires lightweight table lookup and search over a small candidate set. Moreover, the profiled table remains reusable as long as the hardware environment, parallelization strategy, and sparse attention implementation remain unchanged. Based on this predictor, Algorithm 1 summarizes the runtime workflow of DST. In addition, we later reuse the same latency predictor in SAB to guide latency-based batching. 
+
+Algorithm 1 Workload-Aware Dynamic Sparsity Tuning (DST) 
+
+Require: Threshold p, anchor strategy anchor , current micro-batch length xi, global-batch length list {xj }Nj=1 , base budget list {kbase j }Nj=1 , routing logits logits i, latency predictor P erf 
+
+Ensure: Final attention budget kf inal i for current micro-batch  
+
+> 1:
+
+Tlist ← [ ]  
+
+> 2:
+
+for each (xj , k base j ) in {(xj , k base j )}Nj=1 do  
+
+> 3:
+
+Tlist .append (Perf.predict (xj , k base j ))  
+
+> 4:
+
+end for  
+
+> 5:
+
+Tanchor ← SelectAnchor (Tlist , anchor ) 
+
+> 6:
+
+kanchor i ← Perf.align (xi, T anchor ) 
+
+> 7:
+
+kf inal i ← kanchor i 
+
+> 8:
+
+Ci ← AccumulateNormScores (logits i) 
+
+> 9:
+
+if Ci[kbase i ] − Ci[kanchor i ] > p then  
+
+> 10:
+
+kf inal i ← FindFeasibleK (Ci, k base i , p ) 
+
+> 11:
+
+end if  
+
+> 12:
+
+return kf inal i
+
+C. Sparsity-Aware Batching 
+
+While DST provides fine-grained runtime balancing, it still benefits from a reasonably balanced initial workload distribution. Workload balanced batching strategy can provide this initial balance and enable smoother runtime sparsity tuning in DST. However, existing batching or packing strategies typically rely on sequence length or theoretical FLOPs as the workload partition metric [ 21 ], [ 22 ], which is often inaccurate in sparse attention scenario as discussed in Section IV-B .Moreover, batching is executed on the CPU side before the GPU-side DST module, while the final sparsity is determined dynamically in the DST module. Therefore, the accurate workload estimation remains difficult. To address the above issues, we implement Sparsity-Aware Batching (SAB), a batching strategy tailored to dynamic sparse training, which involves lightweight sparsity prediction and latency-based workload partition. First, we use the base sparsity as an initial estimate and periodically calibrate it using runtime statistics collected from DST. Concretely, for each sequence-length bin, we maintain an exponential moving average of the final attention budgets produced by DST, and periodically refresh the sparsity estimate used by SAB. Although this approximation is lightweight, it is sufficient to provide a more workload-aware batching signal in practice. Based on the predicted sparsity, we reuse Perf.predict 
+
+as a sample-level workload proxy to guide the batching process. As shown in Algorithm 2, SAB first estimates the workload weight of each sample through sparsity prediction and latency prediction. On top of that, SAB implements a two-level workload partition, which first balances the workload across DP groups and then forms micro-batches within each group. Here, bin_packing denotes a standard balanced partition solver that groups samples according to the provided workload weights. The output of SAB is a set of micro-batch index lists, which are then consumed by the dataloader to materialize the actual training batches and transfer to GPU. Since this reorganization is strictly confined within the global batch, it preserves original data randomness. In this way, SAB provides a better coarse-grained initialization for DST, while DST further refines the residual imbalance at runtime. 
+
+Algorithm 2 Sparsity-Aware Batching (SAB) 
+
+Require: Input batch B, global batch size gbs , micro-batch size mbs , data parallel size N , current DP rank dp i,sequence lengths L, sparsity predictor Spar , latency predictor P erf 
+
+Ensure: Local micro-batch index bins for the current DP rank  
+
+> 1:
+
+W ← ∅  
+
+> 2:
+
+for each sample index i ∈ B do  
+
+> 3:
+
+˜ki ← Spar.predict (L[i])  
+
+> 4:
+
+W [i] ← Perf.predict (L[i], ˜ki) 
+
+> 5:
+
+end for  
+
+> 6:
+
+DP _Bins ← bin_packing (W, N ) 
+
+> 7:
+
+Idp ← DP _Bins [dp i] 
+
+> 8:
+
+M B _Bins ← bin_packing (W [Idp ], gbs/ (mbs · N ))  
+
+> 9:
+
+return M B _Bins 
+
+V. E XPERIMENTS 
+
+In this section, we comprehensively evaluate SparseBalance in both aspects of system efficiency and model accuracy. We first detail our experimental setup in Section V-A . Then, Section V-B evaluates the system efficiency brought by Sparse-Balance. Following this, we analyze its impact on model accuracy and downstream benchmark in Section V-C . Finally, Section V-D discusses the trade-offs between system efficiency and model accuracy. 
+
+A. Experimental Settings 
+
+Testbeds. The experiments were conducted on two GPU clusters. The first cluster contains 4 nodes and each node equipped with 8 ×H200 GPUs with 141GB of HBM3e memory. The second cluster contains 4 nodes and each node equipped with 8 ×H20 GPUs with 141GB of HBM3e memory. Both clusters are interconnected via NVLink within the node and InfiniBand network across the node. The software stack includes CUDA 12.4 [ 23 ], PyTorch 2.5.1 [ 24 ], and NCCL 2.21.5 [ 25 ]. We implement SparseBalance on top of Megatron-LM [ 12 ], [10], [13] (core v0.13.2) and ms-swift [26] (v3.10.0). 
+
+Models, Datasets, and Baseline. We evaluate SparseBalance using two open-source LLMs: Qwen2.5-0.5B and Qwen2.5-3B [ 3 ]. We use two real-world long-context datasets: ChatQA2-Long-SFT [ 27 ] and LongAlign-10k [ 20 ], whose sequence length distributions are shown in Figure 1. To evaluate the model accuracy, we conduct long context supervised training using Qwen2.5-3B model on ChatQA2-Long-SFT dataset with 3 epoch, selecting MoBA [ 17 ] as our base sparse attention algorithm. To assess the long context capabilities, we evaluate the model on three downstream tasks. 
+
+Hyper-parameters Configuration. We select three represen-tative anchor strategies: Mean-Anchor (M EAN ), Min-Anchor (M IN ), and Max-Anchor (M AX ), which align the workload to the mean, minimum, and maximum of predicted micro-batch latency, respectively. For the threshold p, we mainly evaluate two settings, p = 0 .1 and p = 0 .2, denoted as A NCHOR p. By default, we use a hybrid 4D parallel configuration with DP = 4 ,PP = 4 , TP = 2 , and SP = 2 , together with selective activation recomputation, a micro-batch size of 1, and a global batch size of 16. We set the peak learning rate to 1 × 10 −6, the warm-up fraction to 0.20, and the minimum learning rate to 1 × 10 −7.For Parameter-Efficient Fine-Tuning (PEFT) experiments with LoRA [ 28 ], [ 29 ], we use rank 32, alpha 64, and dropout 0.05. 
+
+B. Efficiency Evaluation 
+
+In this section, we focus on the system efficiency of SparseBalance. We first report the overall speedups under different settings and hardware in Section V-B 1. Then, we conduct quantitative analysis of the workload balance situation and overheads of SparseBalance in case study Section V-B 3. Finally, in Section V-B 2, we analyze the efficiency impact of the anchor selection, threshold value and micro-batch size. In the following sections, we use M EAN 0.1 as default configuration, as it provides the optimal overall trade-off between efficiency and model accuracy, which we detailed in Section V-D. 
+
+1) End-to-End Performance 
+
+We evaluate the end-to-end performance of SparseBalance on the two datasets and two GPU clusters described in Section V-A . We assess SparseBalance using three model configurations: 0.5B, 3B, and 3B with LoRA. As shown in Figure 7, SparseBalance achieves an average end-to-end speedup of 1.30 ×, peaking on the Qwen2.5-3B model trained on the LongAlign-10k dataset. We observe similar speedup trends on both the H200 and H20 clusters, which suggests that the efficiency benefit of SparseBalance is robust across different GPU platforms. Furthermore, we perform an ablation study to isolate the effectiveness of each component: “+DST” denotes the exclusive application of the Dynamic Sparsity Tuning module, while “+SAB” indicates the standalone use of the Sparsity-Aware Batching module. First, we analyze the performance variances between the two datasets. In terms of end-to-end speedup, LongAlign achieves higher overall gains compared to ChatQA2-Long-SFT. However, when breaking down the contributions, LongAlign benefits significantly more from the DST module, whereas its gains from the SAB module are noticeably lower. We attribute this discrepancy to the distinct length distributions and intrinsic characteristics of the datasets. As discussed in Section III, sequence lengths in LongAlign are relatively concentrated between 8K and 16K tokens. Conversely, ChatQA2-Long-SFT exhibits a clear bimodal distribution, with the majority of sequences being either shorter than 4K or longer than 16K tokens. Because of this concentrated distribution, LongAlign is less sensitive to batching strategies. In contrast, the extreme length variance in ChatQA2-Long-SFT allows the SAB module to deliver larger optimizations. Furthermore, as the optimization potential of the DST module is highly correlated with data complexity, its varying performance indicates the distinct characteristics of these two datasets. Next, we examine the impact of different training config-urations. We observe that the 3B model achieves a higher speedup ratio than the 0.5B model. This is because the attention mechanism constitutes a more severe computational bottleneck in the 3B model, amplifying the load imbalance issues. Consequently, optimizing the 3B model yields more efficiency benefits. Additionally, the 3B LoRA configuration exhibits speedups similar to the standard 3B model, demonstrating the versatility and robustness of SparseBalance across different training paradigms. 
+
+2) Ablation Study 
+
+To evaluate the impact of the key hyper-parameters in SparseBalance, we conduct an ablation study on the sparsity threshold p, the execution anchor choice, and the micro-batch size using the Qwen2.5-3B model. We test the speedup ratio under a configuration of DP = 2 , PP = 4 , TP = 1 , SP = 1 in this section. First, we study the impact of p and anchor choice. With the anchor fixed to M EAN , increasing p from 0.05 to 0.30 
+
+steadily improves the end-to-end speedup from 1.074 × to 
+
+1.451 ×, indicating that a looser threshold enables more aggressive optimization. Second, we evaluate the two extreme anchor choices, M IN and M AX , which align the workload to the predicted shortest and longest micro-batch latencies, respectively. The range of bars delineates the optimization potential within this dimension. Last, Figure 9 further shows that SparseBalance consistently achieves notable speedups across all tested micro-batch sizes, demonstrating its robustness to different batching sizes. +DST +SAB +SAB+DST 
+
+> 1.0
+> 1.2
+> 1.4
+> 1.6
+> Speedup
+> 1.13×
+> 1.29×
+> 1.27×
+> 1.23×
+> 1.10×
+> 1.33×
+> 1.09×
+> 1.12×
+> 1.25×
+> 1.18×
+> 1.08×
+> 1.29×
+
+Qwen2.5-0.5B   
+
+> +DST +SAB +SAB+DST
+> 1.14×
+> 1.16×
+> 1.31×
+> 1.23×
+> 1.07×
+> 1.30×
+> 1.14×
+> 1.13×
+> 1.29×
+> 1.22×
+> 1.06×
+> 1.32×
+
+Qwen2.5-3B   
+
+> +DST +SAB +SAB+DST
+> 1.14×
+> 1.16×
+> 1.32×
+> 1.24×
+> 1.08×
+> 1.33×
+> 1.14×
+> 1.12×
+> 1.28×
+> 1.24×
+> 1.06×
+> 1.33×
+
+Qwen2.5-3B LoRA    
+
+> ChatQA2-Long-SFT LongAlign-10k H20 H200
+
+Fig. 7: Overall performance and step-by-step speedups on two clusters and two datasets. We evaluate the normalized speedup ratios (measured by average iteration time) of SparseBalance and its two main components for specific model settings (from left to right: Qwen2.5-0.5B, Qwen2.5-3B, and Qwen2.5-3B in LoRA). Results demonstrate significant efficiency improvements in SparseBalance and confirm the effectiveness of each component. 0.05 0.10 0.15 0.20 0.25 0.30   
+
+> Sparsity Threshold ( p)
+> 1.0
+> 1.2
+> 1.4
+> 1.6
+> 1.8
+> Speedup
+> 1.074x
+> 0.930x
+> 1.085x 1.186x
+> 0.935x
+> 1.195x 1.272x
+> 0.933x
+> 1.308x
+> 1.356x
+> 0.932x
+> 1.413x
+> 1.406x
+> 0.932x
+> 1.565x
+> 1.451x
+> 0.934x
+> 1.683x
+> Range (Min to Max)
+> Mean (Anchor = Mean)
+
+Fig. 8: Sensitivity of end-to-end speedup with respect to the sparsity threshold p and execution anchor choice. The upper end of each bar corresponds to M IN , the lower end corresponds to M AX , and the horizontal line denotes M EAN .1 2 3 4
+
+Micro-Batch Size 
+
+1.0 
+
+1.2 
+
+1.4  
+
+> Speedup
+> 1.11x
+> 1.22x
+> 1.29x 1.26x
+
+Fig. 9: Sensitivity of end-to-end speedup to different micro-batch sizes ( mbs = 1 to 4, corresponding to global batch sizes gbs = 8 to 32 ). SparseBalance consistently achieves clear speedups across all tested settings. 
+
+3) Case Study 
+
+To further understand where the efficiency gains of Sparse-Balance come from, we conduct a case study that jointly examines workload imbalance and overheads in iteration level. In particular, we compare SparseBalance with a Length-Based Batching (LBB) strategy, which uses sequence length as the TABLE I: LBB denotes a length-based batching strategy. Imbalance measures the average micro-batch-level imbalance degree (lower is better). Overheads report the additional cost introduced by SparseBalance.                               
+
+> Config. Imbalance ↓Iter. (ms) Overheads (ms) Speedup ↑
+> Baseline 1.81 ×4202.09 0.00 1.00 ×
+> +DST 1.73 ×3901.57 37.14 1.08 ×
+> +SAB 1.41 ×3470.73 1.81 1.21 ×
+> +LBB 1.58 ×3421.98 0.00 1.23 ×
+> +SAB+DST 1.34 ×3107.83 44.23 1.35 ×
+> +LBB+DST 1.41 ×3272.88 39.01 1.28 ×
+
+batching weight and serves as a representative baseline for existing batching methods. In contrast, SparseBalance uses latency prediction to guide workload partitioning. We conduct this study on Qwen2.5-3B with ChatQA2 under a single-node setting with DP = 2 , PP = 4 , micro-batch size = 2 , and global batch size = 16 .We quantify the workload imbalance in each iteration as 
+
+Imbalance = max( Tmb,i )
+
+> 1
+> N
+
+P Tmb,i 
+
+(11) where Tmb,i denotes the average execution time of micro-batch 
+
+i across ranks. This metric reflects how unevenly the workload is distributed within an iteration. Although it is not directly proportional to the end-to-end iteration time, it provides a useful diagnostic signal for analyzing the straggler effect. Table I reveals three observations. First, the overheads of SparseBalance remains small. SAB introduces negligible overhead, while the full SAB+DST pipeline adds only 44.23 ms, which is below 1.5% of the total iteration time. Second, SAB achieves a slightly lower standalone speedup than LBB. We attribute this gap to the fact that SAB is designed to cooperate with the subsequent runtime adjustment in DST, and therefore performs a more aggressive data reorganization based on the predicted sparsity. When DST is disabled, this prediction cannot be fully realized at runtime, making sub-optimal efficiency. Third, once combined with DST, SAB consistently outperforms LBB in both imbalance degree and end-to-end speedup, highlights the strong synergy between SAB and DST. 
+
+C. Accuracy Evaluation 
+
+In this section, we evaluate whether SparseBalance preserves model quality while improving system efficiency. We first analyze training loss to verify stable convergence, and then evaluate the fine-tuned checkpoints on downstream benchmarks covering general reasoning, long-context understanding, and exact retrieval. 0 2000 4000 6000 8000 10000 12000     
+
+> Iteration
+> 1.6
+> 1.8
+> 2.0
+> 2.2
+> 2.4
+> Training Loss
+> 11900 11920 11940 11960 11980
+> 1.60
+> 1.65
+> Baseline
+> mean p=0.1
+> mean p=0.2
+> min p=0.1
+> min p=0.2
+
+Fig. 10: Training loss comparison between the MoBA baseline and SparseBalance with different dynamic tuning configura-tions. TABLE II: Average accuracy (%) of Needle-in-a-Haystack (NIAH) tasks evaluated on Qwen-2.5-3B model. Results are averaged across the niah_single_1 , niah_single_2 , and 
+
+niah_single_3 evaluations for each model. 
+
+Model ≤8K 16K 32K 64K 
+
+Baseline SFT 100.00 100.00 100.00 97.60 
+
+MIN 0.1 100.00 100.00 99.93 96.33 MIN 0.2 100.00 100.00 99.93 95.20 MEAN 0.1 100.00 100.00 100.00 97.53 MEAN 0.2 100.00 100.00 99.93 96.47 
+
+1) Training Loss 
+
+To validate the model convergence and accuracy, we conduct long-context fine-tuning on the Qwen-2.5-3B model using the ChatQA2 dataset. We employ MoBA with a block size of 256 and top-k 32 as our baseline. For SparseBalance, we evaluate configurations with M IN 0.1, M IN 0.2, M EAN 0.1, and M EAN 0.2.We exclude the M AX configurations, as they severely degrade training efficiency without practical benefits. As illustrated in Figure 10, the training loss curves of SparseBalance closely track the baseline. Although minor deviations appear during the early training stages—likely stemming from the instability of transitioning from dense pre-training to sparse fine-tuning—the gap rapidly diminishes. Notably, the configuration with p = 0 .2 exhibits a slightly higher loss than p = 0 .1. This underscores the necessity of TABLE III: General benchmark results on Qwen2.5-3B. Bold 
+
+indicates the best performance.                                              
+
+> Task Base-SFT MIN 0.1MIN 0.2MEAN 0.1MEAN 0.2
+> ARC-Chal. 0.4727 0.4735 0.4684 0.4744 0.4659 ARC-Easy 0.7332 0.7348 0.7277 0.7315 0.7260 BoolQ 0.7936 0.7994 0.7951 0.8003 0.8031
+> HellaSwag 0.7356 0.7354 0.7355 0.7349 0.7366
+> Lambada 0.6598 0.6583 0.6594 0.6604 0.6592 Piqa 0.7884 0.7867 0.7894 0.7911 0.7900 Winogrande 0.6875 0.6851 0.6835 0.6843 0.6859
+> Average 0.6958 0.6962 0.6941 0.6967 0.6952
+
+TABLE IV: Category-level average results on LongBench for Qwen2.5-3B. 
+
+Category Base-SFT MIN 0.1 MIN 0.2 MEAN 0.1 MEAN 0.2
+
+Single-Doc QA 32.24 33.86 33.68 32.93 32.99 Multi-Doc QA 34.18 35.56 35.04 35.84 35.41 Summarization 26.14 24.71 24.92 25.63 24.38 Retrieval 49.08 47.10 48.30 48.34 49.00 Code 67.41 66.44 66.52 66.54 66.24 
+
+Overall 39.28 39.19 39.28 39.46 39.14 
+
+the performance-bound mechanism in our DST module, which effectively prevents excessive critical information dropping in sensitive sequences. Furthermore, setting the anchor M EAN 
+
+tends to yield lower loss compared to targeting the minimum latency M IN . This is consistent with the design intuition of bidirectional tuning in SparseBalance. 
+
+2) Benchmark Evaluation 
+
+To thoroughly evaluate the model capabilities, we assess the fine-tuned models on three benchmarks, representing distinct core abilities: long-context understanding (LongBench), exact retrieval (Needle-in-a-Haystack, NIAH) and standard zero-shot reasoning (General Benchmarks). 
+
+Long-Context Understanding. Table IV reports the category-level LongBench results, which serve as our primary downstream evaluation for long-context capability. Among all evaluated configurations, M EAN 0.1 achieves the best overall score (39.46), outperforming the Baseline SFT (39.28). In contrast, relaxing the threshold to p = 0 .2 generally causes slight degradation, indicating that overly aggressive tuning hurts model fidelity. We also observe that M EAN 0.1 provides a better overall balance than M IN 0.1, which is consistent with the design intuition that bidirectional tuning can exploit non-critical-path computation for accuracy improvement. We further note that our fine-tuning data is QA-oriented (ChatQA2-Long-SFT), which helps to explain why the gains of SparseBalance are more apparent on QA tasks. 
+
+Exact Retrieval. Table II shows that all configurations achieve perfect retrieval up to 16K context length. Even at 64K, M EAN 0.1 remains nearly on par with the Baseline SFT (97.53% vs. 97.60%), indicating that DST does not noticeably harm exact long-context retrieval. 
+
+General Benchmarks. On standard zero-shot reasoning tasks, SparseBalance remains highly competitive with the baseline. In particular, M EAN 0.1 achieves the best average score (0.6967), slightly outperforming the Baseline SFT (0.6958), which suggests that the proposed dynamic tuning does not degrade general model capability. Overall, the accuracy results show that SparseBalance preserves stable training and does not compromise downstream capability. Among the evaluated configurations, MEAN 0.1
+
+consistently provides the best overall balance, while p = 0 .1
+
+serves as a necessary strict bound for maintaining model fidelity. These results are consistent with the design of DST, where such bidirectional sparsity tuning strategy achieves a dual benefit of system efficiency and model accuracy. 
+
+D. Trade-off Analysis 
+
+The previous sections evaluate the efficiency and model quality of SparseBalance separately. Here, we jointly examine these two aspects to understand the practical operating point of dynamic sparsity tuning and the inherent trade-off in SparseBalance. To directly visualize this trade-off, we plot the relation between training speedup and model accuracy under different configurations in Figure 11, where the accuracy is represented by the weighted average score across all evaluated benchmarks. The resulting configurations form a clear Pareto frontier. In general, increasing the threshold p moves the operating point toward higher speedup but lower model quality, confirming that p directly governs how aggressive we trade accuracy for efficiency. Meanwhile, anchor point M EAN generally achieves better accuracy than the M IN while delivering comparable sys-tem efficiency. Among all evaluated configurations, M EAN 0.1
+
+lies at the most favorable point on this frontier, which improves both efficiency and accuracy. Therefore, we use M EAN 0.1 as the default practical setting in the efficiency evaluation of Section V-B. Overall, these results consolidate our claim that, through system-aware bidirectional sparsity tuning, SparseBalance can achieve a dual benefit in both system efficiency and model accuracy. 
+
+Fig. 11: Trade-off between training speedup and downstream model performance under different configurations in Sparse-Balance. VI. R ELATED WORK 
+
+System Optimization in Long-Context Training. To en-hance the training efficiency of long-context LLMs, existing sys-tems primarily rely on hybrid parallelism strategies [ 12 ], [ 10 ], [13 ], [ 30 ], which combine data, pipeline, tensor, and sequence parallelism. However, the highly heterogeneous sequence length distribution in real-world long-context data inherently leads to severe load imbalance across workers. To mitigate this issue, various batching and scheduling techniques have been proposed [22 ], [ 20 ], [ 21 ], [ 31 ]. For example, LongAlign adopts sorted batching to group sequences by length within a global batch [20 ], while WLB-LLM employs a heuristic packing approach that adaptively delays the execution of long sequences [ 22 ]. Despite their effectiveness in improving system throughput, these methods mainly optimize data organization and may compromise data randomness, potentially raising the risk of changing the convergence behavior. Furthermore, existing works are largely designed for dense attention training and fall short in sparse scenarios. As a result, they do not address the additional workload uncertainty introduced by dynamic sparse attention. 
+
+Sparse Attention Training. Sparse attention has become a promising direction for reducing the quadratic cost of long-context modeling. Early work mainly focused on training-free sparse methods for inference acceleration [ 32 ], [ 33 ], while recent efforts have shifted toward trainable sparse attention mechanisms. Representative methods such as NSA [ 18 ], MoBA [17 ], and DSA [ 5 ] accelerate training by selecting critical tokens or blocks with Top-K-style mechanisms. However, these methods typically use a fixed attention budget across sequences and layers, overlooking the substantial heterogeneity in sparsity sensitivity during training. More recent work has begun to explore dynamic sparse attention. For instance, Twilight [ 34 ]introduces hierarchical Top-P selection for adaptive budget allocation, while MTraining [ 35 ] combines dynamic sparsity guided by a vertical-slash structure with context-parallel execution optimization. Nevertheless, these methods primarily treat dynamic sparsity as an algorithmic mechanism, while SparseBalance further makes sparsity control system-aware by coupling runtime tuning with profiling-based latency modeling and workload balancing. VII. C ONCLUSION 
+
+In this paper, we propose SparseBalance, a novel algorithm-system co-design framework for long-context sparse training. It addresses a central challenge in these scenarios, where sequence-length heterogeneity, sparsity heterogeneity, and distributed workload imbalance are tightly coupled during training. To tackle this problem, we develop workload-aware dynamic sparsity tuning for fine-grained runtime balancing, a profiling-based latency predictor for practical workload estimation, and sparsity-aware batching for coarse-grained initialization. Experiments on real-world long-context datasets and evaluations on downstream tasks show that SparseBalance improves end-to-end training efficiency by up to 1.33 × while still improving the model’s long-context capability. These results suggest that dynamic sparsity should not only be viewed as an algorithmic feature, but can also serve as an effective approach for system-level load balance in distributed training. We hope SparseBalance can motivate future work on jointly optimizing model capabilities and system efficiency for long-context LLM training. REFERENCES [1] G. Team, P. Georgiev, V. I. Lei, R. Burnell, L. Bai, A. Gulati, G. Tanzer, D. Vincent, Z. Pan, S. Wang, S. Mariooryad, Y. Ding, X. Geng, F. Alcober, R. Frostig, M. Omernick, L. Walker, C. Paduraru, C. Sorokin, A. Tacchetti, C. Gaffney, S. Daruki, O. Sercinoglu, Z. Gleicher, J. Love, P. Voigtlaender, R. Jain, G. Surita, K. Mohamed, R. Blevins, J. Ahn, T. Zhu, K. Kawintiranon, O. Firat, Y. Gu, Y. Zhang, M. Rahtz, M. Faruqui, N. Clay, J. Gilmer, J. Co-Reyes, I. Penchev, R. Zhu, N. Morioka, K. Hui, K. Haridasan, V. Campos, M. Mahdieh, M. Guo, S. Hassan, K. Kilgour, A. Vezer, H.-T. Cheng, R. de Liedekerke, S. Goyal, P. Barham, D. Strouse, S. Noury, J. Adler, M. Sundararajan, S. Vikram, D. Lepikhin, M. Paganini, X. Garcia, F. Yang, D. Valter, M. Trebacz, K. Vodrahalli, C. Asawaroengchai, R. Ring, N. Kalb, L. B. Soares, S. Brahma, D. Steiner, T. Yu, F. Mentzer, A. He, L. Gonzalez, B. Xu, R. L. Kaufman, L. E. Shafey, J. Oh, T. Hennigan, G. van den Driessche, S. Odoom, M. Lucic, B. Roelofs, S. Lall, A. Marathe, B. Chan, S. Ontanon, L. He, D. Teplyashin, J. Lai, P. Crone, B. Damoc, L. Ho, S. Riedel, K. Lenc, C.-K. Yeh, A. Chowdhery, Y. Xu, M. Kazemi, E. Amid, A. Petrushkina, K. Swersky, A. Khodaei, G. Chen, C. Larkin, M. Pinto, G. Yan, A. P. Badia, P. Patil, S. Hansen, D. Orr, S. M. R. Arnold, J. Grimstad, A. Dai, S. Douglas, R. Sinha, V. Yadav, X. Chen, E. Gribovskaya, J. Austin, J. Zhao, K. Patel, P. Komarek, S. Austin, S. Borgeaud, L. Friso, A. Goyal, B. Caine, K. Cao, D.-W. Chung, M. Lamm, G. Barth-Maron, T. Kagohara, K. Olszewska, M. Chen, K. Shivakumar, R. Agarwal, H. Godhia, R. Rajwar, J. Snaider, X. Dotiwalla, Y. Liu, A. Barua, V. Ungureanu, Y. Zhang, B.-O. Batsaikhan, M. Wirth, J. Qin, I. Danihelka, T. Doshi, M. Chadwick, J. Chen, S. Jain, Q. Le, A. Kar, M. Gurumurthy, C. Li, R. Sang, F. Liu, L. Lamprou, R. Munoz, N. Lintz, H. Mehta, H. Howard, M. Reynolds, L. Aroyo, Q. Wang, L. Blanco, A. Cassirer, J. Griffith, D. Das, S. Lee, J. Sygnowski, Z. Fisher, J. Besley, R. Powell, Z. Ahmed, D. Paulus, D. Reitter, Z. Borsos, R. Joshi, A. Pope, S. Hand, V. Selo, V. Jain, N. Sethi, M. Goel, T. Makino, R. May, Z. Yang, J. Schalkwyk, C. Butterfield, A. Hauth, A. Goldin, W. Hawkins, E. Senter, S. Brin, O. Woodman, M. Ritter, E. Noland, M. Giang, V. Bolina, L. Lee, T. Blyth, I. Mackinnon, M. Reid, O. Sarvana, D. Silver, A. Chen, L. Wang, L. Maggiore, O. Chang, N. Attaluri, G. Thornton, C.-C. Chiu, O. Bunyan, N. Levine, T. Chung, E. Eltyshev, X. Si, T. Lillicrap, D. Brady, V. Aggarwal, B. Wu, Y. Xu, R. McIlroy, K. Badola, P. Sandhu, E. Moreira, W. Stokowiec, R. Hemsley, D. Li, A. Tudor, P. Shyam, E. Rahimtoroghi, S. Haykal, P. Sprechmann, X. Zhou, D. Mincu, Y. Li, R. Addanki, K. Krishna, X. Wu, A. Frechette, M. Eyal, A. Dafoe, D. Lacey, J. Whang, T. Avrahami, Y. Zhang, E. Taropa, H. Lin, D. Toyama, E. Rutherford, M. Sano, H. Choe, A. Tomala, C. Safranek-Shrader, N. Kassner, M. Pajarskas, M. Harvey, S. Sechrist, M. Fortunato, C. Lyu, G. Elsayed, C. Kuang, J. Lottes, E. Chu, C. Jia, C.-W. Chen, P. Humphreys, K. Baumli, C. Tao, R. Samuel, C. N. dos Santos, A. Andreassen, N. Raki´ cevi´ c, D. Grewe, A. Kumar, S. Winkler, J. Caton, A. Brock, S. Dalmia, H. Sheahan, I. Barr, Y. Miao, P. Natsev, J. Devlin, F. Behbahani, F. Prost, Y. Sun, A. Myaskovsky, T. S. Pillai, D. Hurt, A. Lazaridou, X. Xiong, C. Zheng, F. Pardo, X. Li, D. Horgan, J. Stanton, M. Ambar, F. Xia, A. Lince, M. Wang, B. Mustafa, A. Webson, H. Lee, R. Anil, M. Wicke, T. Dozat, A. Sinha, E. Piqueras, E. Dabir, S. Upadhyay, A. Boral, L. A. Hendricks, C. Fry, J. Djolonga, Y. Su, J. Walker, J. Labanowski, R. Huang, V. Misra, J. Chen, R. Skerry-Ryan, A. Singh, S. Rijhwani, D. Yu, A. Castro-Ros, B. Changpinyo, R. Datta, S. Bagri, A. M. Hrafnkelsson, M. Maggioni, D. Zheng, Y. Sulsky, S. Hou, T. L. Paine, A. Yang, J. Riesa, D. Rogozinska, D. Marcus, D. E. Badawy, Q. Zhang, L. Wang, H. Miller, J. Greer, L. L. Sjos, A. Nova, H. Zen, R. Chaabouni, M. Rosca, J. Jiang, C. Chen, R. Liu, T. Sainath, M. Krikun, A. Polozov, J.-B. Lespiau, J. Newlan, Z. Cankara, S. Kwak, Y. Xu, P. Chen, A. Coenen, C. Meyer, K. Tsihlas, A. Ma, J. Gottweis, J. Xing, C. Gu, J. Miao, C. Frank, Z. Cankara, S. Ganapathy, I. Dasgupta, S. Hughes-Fitt, H. Chen, D. Reid, K. Rong, H. Fan, J. van Amersfoort, V. Zhuang, A. Cohen, S. S. Gu, A. Mohananey, A. Ilic, T. Tobin, J. Wieting, A. Bortsova, P. Thacker, E. Wang, E. Caveness, J. Chiu, E. Sezener, A. Kaskasoli, S. Baker, K. Millican, M. Elhawaty, K. Aisopos, C. Lebsack, N. Byrd, H. Dai, W. Jia, M. Wiethoff, E. Davoodi, A. Weston, L. Yagati, A. Ahuja, I. Gao, G. Pundak, S. Zhang, M. Azzam, K. C. Sim, S. Caelles, J. Keeling, A. Sharma, A. Swing, Y. Li, C. Liu, C. G. Bostock, Y. Bansal, Z. Nado, A. Anand, J. Lipschultz, A. Karmarkar, L. Proleev, A. Ittycheriah, S. H. Yeganeh, G. Polovets, A. Faust, J. Sun, A. Rrustemi, P. Li, R. Shivanna, J. Liu, C. Welty, F. Lebron, A. Baddepudi, S. Krause, E. Parisotto, R. Soricut, Z. Xu, D. Bloxwich, M. Johnson, B. Neyshabur, J. Mao-Jones, R. Wang, V. Ramasesh, Z. Abbas, A. Guez, C. Segal, D. D. Nguyen, J. Svensson, L. Hou, S. York, K. Milan, S. Bridgers, W. Gworek, M. Tagliasacchi, J. Lee-Thorp, M. Chang, A. Guseynov, A. J. Hartman, M. Kwong, R. Zhao, S. Kashem, E. Cole, A. Miech, R. Tanburn, M. Phuong, F. Pavetic, S. Cevey, R. Comanescu, R. Ives, S. Yang, C. Du, B. Li, Z. Zhang, M. Iinuma, C. H. Hu, A. Roy, S. Bijwadia, Z. Zhu, D. Martins, R. Saputro, A. Gergely, S. Zheng, D. Jia, I. Antonoglou, A. Sadovsky, S. Gu, Y. Bi, A. Andreev, S. Samangooei, M. Khan, T. Kocisky, A. Filos, C. Kumar, C. Bishop, A. Yu, S. Hodkinson, S. Mittal, P. Shah, A. Moufarek, Y. Cheng, A. Bloniarz, J. Lee, P. Pejman, P. Michel, S. Spencer, V. Feinberg, X. Xiong, N. Savinov, C. Smith, S. Shakeri, D. Tran, M. Chesus, B. Bohnet, G. Tucker, T. von Glehn, C. Muir, Y. Mao, H. Kazawa, A. Slone, K. Soparkar, D. Shrivastava, J. Cobon-Kerr, M. Sharman, J. Pavagadhi, C. Araya, K. Misiunas, N. Ghelani, M. Laskin, D. Barker, Q. Li, A. Briukhov, N. Houlsby, M. Glaese, B. Lakshminarayanan, N. Schucher, Y. Tang, E. Collins, H. Lim, F. Feng, A. Recasens, G. Lai, A. Magni, N. D. Cao, A. Siddhant, Z. Ashwood, J. Orbay, M. Dehghani, J. Brennan, Y. He, K. Xu, Y. Gao, C. Saroufim, J. Molloy, X. Wu, S. Arnold, S. Chang, J. Schrittwieser, E. Buchatskaya, S. Radpour, M. Polacek, S. Giordano, A. Bapna, S. Tokumine, V. Hellendoorn, T. Sottiaux, S. Cogan, A. Severyn, M. Saleh, S. Thakoor, L. Shefey, S. Qiao, M. Gaba, S. yiin Chang, C. Swanson, B. Zhang, B. Lee, P. K. Rubenstein, G. Song, T. Kwiatkowski, A. Koop, A. Kannan, D. Kao, P. Schuh, A. Stjerngren, G. Ghiasi, G. Gibson, L. Vilnis, Y. Yuan, F. T. Ferreira, A. Kamath, T. Klimenko, K. Franko, K. Xiao, I. Bhattacharya, M. Patel, R. Wang, A. Morris, R. Strudel, V. Sharma, P. Choy, S. H. Hashemi, J. Landon, M. Finkelstein, P. Jhakra, J. Frye, M. Barnes, M. Mauger, D. Daun, K. Baatarsukh, M. Tung, W. Farhan, H. Michalewski, F. Viola, F. de Chaumont Quitry, C. L. Lan, T. Hudson, Q. Wang, F. Fischer, I. Zheng, E. White, A. Dragan, J. baptiste Alayrac, E. Ni, A. Pritzel, A. Iwanicki, M. Isard, A. Bulanova, L. Zilka, E. Dyer, D. Sachan, S. Srinivasan, H. Muckenhirn, H. Cai, A. Mandhane, M. Tariq, J. W. Rae, G. Wang, K. Ayoub, N. FitzGerald, Y. Zhao, W. Han, C. Alberti, D. Garrette, K. Krishnakumar, M. Gimenez, A. Levskaya, D. Sohn, J. Matak, I. Iturrate, M. B. Chang, J. Xiang, Y. Cao, N. Ranka, G. Brown, A. Hutter, V. Mirrokni, N. Chen, K. Yao, Z. Egyed, F. Galilee, T. Liechty, P. Kallakuri, E. Palmer, S. Ghemawat, J. Liu, D. Tao, C. Thornton, T. Green, M. Jasarevic, S. Lin, V. Cotruta, Y.-X. Tan, N. Fiedel, H. Yu, E. Chi, A. Neitz, J. Heitkaemper, A. Sinha, D. Zhou, Y. Sun, C. Kaed, B. Hulse, S. Mishra, M. Georgaki, S. Kudugunta, C. Farabet, I. Shafran, D. Vlasic, A. Tsitsulin, R. Ananthanarayanan, A. Carin, G. Su, P. Sun, S. V, G. Carvajal, J. Broder, I. Comsa, A. Repina, W. Wong, W. W. Chen, P. Hawkins, E. Filonov, L. Loher, C. Hirnschall, W. Wang, J. Ye, A. Burns, H. Cate, D. G. Wright, F. Piccinini, L. Zhang, C.-C. Lin, I. Gog, Y. Kulizhskaya, A. Sreevatsa, S. Song, L. C. Cobo, A. Iyer, C. Tekur, G. Garrido, Z. Xiao, R. Kemp, H. S. Zheng, H. Li, A. Agarwal, C. Ngani, K. Goshvadi, R. Santamaria-Fernandez, W. Fica, X. Chen, C. Gorgolewski, S. Sun, R. Garg, X. Ye, S. M. A. Eslami, N. Hua, J. Simon, P. Joshi, Y. Kim, I. Tenney, S. Potluri, L. N. Thiet, Q. Yuan, F. Luisier, A. Chronopoulou, S. Scellato, P. Srinivasan, M. Chen, V. Koverkathu, V. Dalibard, Y. Xu, B. Saeta, K. Anderson, T. Sellam, N. Fernando, F. Huot, J. Jung, M. Varadarajan, M. Quinn, A. Raul, M. Le, R. Habalov, J. Clark, K. Jalan, K. Bullard, A. Singhal, T. Luong, B. Wang, S. Rajayogam, J. Eisenschlos, J. Jia, D. Finchelstein, A. Yakubovich, D. Balle, M. Fink, S. Agarwal, J. Li, D. Dvijotham, S. Pal, K. Kang, J. Konzelmann, J. Beattie, O. Dousse, D. Wu, R. Crocker, C. Elkind, S. R. Jonnalagadda, J. Lee, D. Holtmann-Rice, K. Kallarackal, R. Liu, D. Vnukov, N. Vats, L. Invernizzi, M. Jafari, H. Zhou, L. Taylor, J. Prendki, M. Wu, T. Eccles, T. Liu, K. Kopparapu, F. Beaufays, C. Angermueller, A. Marzoca, S. Sarcar, H. Dib, J. Stanway, F. Perbet, N. Trdin, R. Sterneck, A. Khorlin, D. Li, X. Wu, S. Goenka, D. Madras, S. Goldshtein, W. Gierke, T. Zhou, Y. Liu, Y. Liang, A. White, Y. Li, S. Singh, S. Bahargam, M. Epstein, S. Basu, L. Lao, A. Ozturel, C. Crous, A. Zhai, H. Lu, Z. Tung, N. Gaur, A. Walton, L. Dixon, M. Zhang, A. Globerson, G. Uy, A. Bolt, O. Wiles, M. Nasr, I. Shumailov, M. Selvi, F. Piccinno, R. Aguilar, S. McCarthy, M. Khalman, M. Shukla, V. Galic, J. Carpenter, K. Villela, H. Zhang, H. Richardson, J. Martens, M. Bosnjak, S. R. Belle, J. Seibert, M. Alnahlawi, B. McWilliams, S. Singh, A. Louis, W. Ding, D. Popovici, L. Simicich, L. Knight, P. Mehta, N. Gupta, C. Shi, S. Fatehi, J. Mitrovic, A. Grills, J. Pagadora, T. Munkhdalai, D. Petrova, D. Eisenbud, Z. Zhang, D. Yates, B. Mittal, N. Tripuraneni, Y. Assael, T. Brovelli, P. Jain, M. Velimirovic, C. Akbulut, J. Mu, W. Macherey, R. Kumar, J. Xu, H. Qureshi, G. Comanici, J. Wiesner, Z. Gong, A. Ruddock, M. Bauer, N. Felt, A. GP, A. Arnab, D. Zelle, J. Rothfuss, B. Rosgen, A. Shenoy, B. Seybold, X. Li, J. Mudigonda, G. Erdogan, J. Xia, J. Simsa, A. Michi, Y. Yao, C. Yew, S. Kan, I. Caswell, C. Radebaugh, A. Elisseeff, P. Valenzuela, K. McKinney, K. Paterson, A. Cui, E. Latorre-Chimoto, S. Kim, W. Zeng, K. Durden, P. Ponnapalli, T. Sosea, C. A. Choquette-Choo, J. Manyika, B. Robenek, H. Vashisht, S. Pereira, H. Lam, M. Velic, D. Owusu-Afriyie, K. Lee, T. Bolukbasi, A. Parrish, S. Lu, J. Park, B. Venkatraman, A. Talbert, L. Rosique, Y. Cheng, A. Sozanschi, A. Paszke, P. Kumar, J. Austin, L. Li, K. Salama, B. Perz, W. Kim, N. Dukkipati, A. Baryshnikov, C. Kaplanis, X. Sheng, Y. Chervonyi, C. Unlu, D. de Las Casas, H. Askham, K. Tunyasuvunakool, F. Gimeno, S. Poder, C. Kwak, M. Miecnikowski, V. Mirrokni, A. Dimitriev, A. Parisi, D. Liu, T. Tsai, T. Shevlane, C. Kouridi, D. Garmon, A. Goedeckemeyer, A. R. Brown, A. Vijayakumar, A. Elqursh, S. Jazayeri, J. Huang, S. M. Carthy, J. Hoover, L. Kim, S. Kumar, W. Chen, C. Biles, G. Bingham, E. Rosen, L. Wang, Q. Tan, D. Engel, F. Pongetti, D. de Cesare, D. Hwang, L. Yu, J. Pullman, S. Narayanan, K. Levin, S. Gopal, M. Li, A. Aharoni, T. Trinh, J. Lo, N. Casagrande, R. Vij, L. Matthey, B. Ramadhana, A. Matthews, C. Carey, M. Johnson, K. Goranova, R. Shah, S. Ashraf, K. Dasgupta, R. Larsen, Y. Wang, M. R. Vuyyuru, C. Jiang, J. Ijazi, K. Osawa, C. Smith, R. S. Boppana, T. Bilal, Y. Koizumi, Y. Xu, Y. Altun, N. Shabat, B. Bariach, A. Korchemniy, K. Choo, O. Ronneberger, C. Iwuanyanwu, S. Zhao, D. Soergel, C.-J. Hsieh, I. Cai, S. Iqbal, M. Sundermeyer, Z. Chen, E. Bursztein, C. Malaviya, F. Biadsy, P. Shroff, I. Dhillon, T. Latkar, C. Dyer, H. Forbes, M. Nicosia, V. Nikolaev, S. Greene, M. Georgiev, P. Wang, N. Martin, H. Sedghi, J. Zhang, P. Banzal, D. Fritz, V. Rao, X. Wang, J. Zhang, V. Patraucean, D. Du, I. Mordatch, I. Jurin, L. Liu, A. Dubey, A. Mohan, J. Nowakowski, V.-D. Ion, N. Wei, R. Tojo, M. A. Raad, D. A. Hudson, V. Keshava, S. Agrawal, K. Ramirez, Z. Wu, H. Nguyen, J. Liu, M. Sewak, B. Petrini, D. Choi, I. Philips, Z. Wang, I. Bica, A. Garg, J. Wilkiewicz, P. Agrawal, X. Li, D. Guo, E. Xue, N. Shaik, A. Leach, S. M. Khan, J. Wiesinger, S. Jerome, A. Chakladar, A. W. Wang, T. Ornduff, F. Abu, A. Ghaffarkhah, M. Wainwright, M. Cortes, F. Liu, J. Maynez, A. Terzis, P. Samangouei, R. Mansour, T. K˛ epa, F.-X. Aubet, A. Algymr, D. Banica, A. Weisz, A. Orban, A. Senges, E. Andrejczuk, M. Geller, N. D. Santo, V. Anklin, M. A. Merey, M. Baeuml, T. Strohman, J. Bai, S. Petrov, Y. Wu, D. Hassabis, K. Kavukcuoglu, J. Dean, and O. Vinyals, “Gemini 1.5: Unlocking multimodal understanding across millions of tokens of context,” 2024. [Online]. Available: https://doi.org/10.48550/arXiv.2403.05530 [2] T. GLM, :, A. Zeng, B. Xu, B. Wang, C. Zhang, D. Yin, D. Zhang, D. Rojas, G. Feng, H. Zhao, H. Lai, H. Yu, H. Wang, J. Sun, J. Zhang, J. Cheng, J. Gui, J. Tang, J. Zhang, J. Sun, J. Li, L. Zhao, L. Wu, L. Zhong, M. Liu, M. Huang, P. Zhang, Q. Zheng, R. Lu, S. Duan, S. Zhang, S. Cao, S. Yang, W. L. Tam, W. Zhao, X. Liu, X. Xia, X. Zhang, X. Gu, X. Lv, X. Liu, X. Liu, X. Yang, X. Song, X. Zhang, Y. An, Y. Xu, Y. Niu, Y. Yang, Y. Li, Y. Bai, Y. Dong, Z. Qi, Z. Wang, Z. Yang, Z. Du, Z. Hou, and Z. Wang, “Chatglm: A family of large language models from glm-130b to glm-4 all tools,” 2024. [Online]. Available: https://doi.org/10.48550/arXiv.2406.12793 [3] Qwen, A. Yang, B. Yang, B. Zhang, B. Hui, B. Zheng, B. Yu, C. Li, D. Liu, F. Huang, H. Wei, H. Lin, J. Yang, J. Tu, J. Zhang, J. Yang, J. Yang, J. Zhou, J. Lin, K. Dang, K. Lu, K. Bao, K. Yang, L. Yu, M. Li, M. Xue, P. Zhang, Q. Zhu, R. Men, R. Lin, T. Li, T. Xia, X. Ren, X. Ren, Y. Fan, Y. Su, Y. Zhang, Y. Wan, Y. Liu, Z. Cui, Z. Zhang, and Z. Qiu, “Qwen2.5 technical report.” [Online]. Available: https://doi.org/10.48550/arXiv.2412.15115 [4] A. Yang, A. Li, B. Yang, B. Zhang, B. Hui, B. Zheng, B. Yu, C. Gao, C. Huang, C. Lv, C. Zheng, D. Liu, F. Zhou, F. Huang, F. Hu, H. Ge, H. Wei, H. Lin, J. Tang, J. Yang, J. Tu, J. Zhang, J. Yang, J. Yang, J. Zhou, J. Zhou, J. Lin, K. Dang, K. Bao, K. Yang, L. Yu, L. Deng, M. Li, M. Xue, M. Li, P. Zhang, P. Wang, Q. Zhu, R. Men, R. Gao, S. Liu, S. Luo, T. Li, T. Tang, W. Yin, X. Ren, X. Wang, X. Zhang, X. Ren, Y. Fan, Y. Su, Y. Zhang, Y. Zhang, Y. Wan, Y. Liu, Z. Wang, Z. Cui, Z. Zhang, Z. Zhou, and Z. Qiu, “Qwen3 Technical Report,” 2025, _eprint: 2505.09388. [Online]. Available: https://doi.org/10.48550/arXiv.2505.09388 [5] DeepSeek-AI, A. Liu, A. Mei, B. Lin, B. Xue, B. Wang, B. Xu, B. Wu, B. Zhang, C. Lin, C. Dong, C. Lu, C. Zhao, C. Deng, C. Xu, C. Ruan, D. Dai, D. Guo, D. Yang, D. Chen, E. Li, F. Zhou, F. Lin, F. Dai, G. Hao, G. Chen, G. Li, H. Zhang, H. Xu, H. Li, H. Liang, H. Wei, H. Zhang, H. Luo, H. Ji, H. Ding, H. Tang, H. Cao, H. Gao, H. Qu, H. Zeng, J. Huang, J. Li, J. Xu, J. Hu, J. Chen, J. Xiang, J. Yuan, J. Cheng, J. Zhu, J. Ran, J. Jiang, J. Qiu, J. Li, J. Song, K. Dong, K. Gao, K. Guan, K. Huang, K. Zhou, K. Huang, K. Yu, L. Wang, L. Zhang, L. Wang, L. Zhao, L. Yin, L. Guo, L. Luo, L. Ma, L. Wang, L. Zhang, M. S. Di, M. Y. Xu, M. Zhang, M. Zhang, M. Tang, M. Zhou, P. Huang, P. Cong, P. Wang, Q. Wang, Q. Zhu, Q. Li, Q. Chen, Q. Du, R. Xu, R. Ge, R. Zhang, R. Pan, R. Wang, R. Yin, R. Xu, R. Shen, R. Zhang, S. H. Liu, S. Lu, S. Zhou, S. Chen, S. Cai, S. Chen, S. Hu, S. Liu, S. Hu, S. Ma, S. Wang, S. Yu, S. Zhou, S. Pan, S. Zhou, T. Ni, T. Yun, T. Pei, T. Ye, T. Yue, W. Zeng, W. Liu, W. Liang, W. Pang, W. Luo, W. Gao, W. Zhang, X. Gao, X. Wang, X. Bi, X. Liu, X. Wang, X. Chen, X. Zhang, X. Nie, X. Cheng, X. Liu, X. Xie, X. Liu, X. Yu, X. Li, X. Yang, X. Li, X. Chen, X. Su, X. Pan, X. Lin, X. Fu, Y. Q. Wang, Y. Zhang, Y. Xu, Y. Ma, Y. Li, Y. Li, Y. Zhao, Y. Sun, Y. Wang, Y. Qian, Y. Yu, Y. Zhang, Y. Ding, Y. Shi, Y. Xiong, Y. He, Y. Zhou, Y. Zhong, Y. Piao, Y. Wang, Y. Chen, Y. Tan, Y. Wei, Y. Ma, Y. Liu, Y. Yang, Y. Guo, Y. Wu, Y. Wu, Y. Cheng, Y. Ou, Y. Xu, Y. Wang, Y. Gong, Y. Wu, Y. Zou, Y. Li, Y. Xiong, Y. Luo, Y. You, Y. Liu, Y. Zhou, Z. F. Wu, Z. Z. Ren, Z. Zhao, Z. Ren, Z. Sha, Z. Fu, Z. Xu, Z. Xie, Z. Zhang, Z. Hao, Z. Gou, Z. Ma, Z. Yan, Z. Shao, Z. Huang, Z. Wu, Z. Li, Z. Zhang, Z. Xu, Z. Wang, Z. Gu, Z. Zhu, Z. Li, Z. Zhang, Z. Xie, Z. Gao, Z. Pan, Z. Yao, B. Feng, H. Li, J. L. Cai, J. Ni, L. Xu, M. Li, N. Tian, R. J. Chen, R. L. Jin, S. S. Li, S. Zhou, T. Sun, X. Q. Li, X. Jin, X. Shen, X. Chen, X. Song, X. Zhou, Y. X. Zhu, Y. Huang, Y. Li, Y. Zheng, Y. Zhu, Y. Ma, Z. Huang, Z. Xu, Z. Zhang, D. Ji, J. Liang, J. Guo, J. Chen, L. Xia, M. Wang, M. Li, P. Zhang, R. Chen, S. Sun, S. Wu, S. Ye, T. Wang, W. L. Xiao, W. An, X. Wang, X. Sun, X. Wang, Y. Tang, Y. Zha, Z. Zhang, Z. Ju, Z. Zhang, and Z. Qu, “Deepseek-v3.2: Pushing the frontier of open large language models,” 2025. [Online]. Available: https://doi.org/10.48550/arXiv.2512.02556 [6] GLM-5-Team, :, A. Zeng, X. Lv, Z. Hou, Z. Du, Q. Zheng, B. Chen, D. Yin, C. Ge, C. Huang, C. Xie, C. Zhu, C. Yin, C. Wang, G. Pan, H. Zeng, H. Zhang, H. Wang, H. Chen, J. Zhang, J. Jiao, J. Guo, J. Wang, J. Du, J. Wu, K. Wang, L. Li, L. Fan, L. Zhong, M. Liu, M. Zhao, P. Du, Q. Dong, R. Lu, Shuang-Li, S. Cao, S. Liu, T. Jiang, X. Chen, X. Zhang, X. Huang, X. Dong, Y. Xu, Y. Wei, Y. An, Y. Niu, Y. Zhu, Y. Wen, Y. Cen, Y. Bai, Z. Qiao, Z. Wang, Z. Wang, Z. Zhu, Z. Liu, Z. Li, B. Wang, B. Wen, C. Huang, C. Cai, C. Yu, C. Li, C. Hu, C. Zhang, D. Zhang, D. Lin, D. Yang, D. Wang, D. Ai, E. Zhu, F. Yi, F. Chen, G. Wen, H. Sun, H. Zhao, H. Hu, H. Zhang, H. Liu, H. Zhang, H. Peng, H. Tai, H. Zhang, H. Liu, H. Wang, H. Yan, H. Ge, H. Liu, H. Chu, J. Zhao, J. Wang, J. Zhao, J. Ren, J. Wang, J. Zhang, J. Gui, J. Zhao, J. Li, J. An, J. Li, J. Yuan, J. Du, J. Liu, J. Zhi, J. Duan, K. Zhou, K. Wei, K. Wang, K. Luo, L. Zhang, L. Sha, L. Xu, L. Wu, L. Ding, L. Chen, M. Li, N. Lin, P. Ta, Q. Zou, R. Song, R. Yang, S. Tu, S. Yang, S. Wu, S. Zhang, S. Li, S. Li, S. Fan, W. Qin, W. Tian, W. Zhang, W. Yu, W. Liang, X. Kuang, X. Cheng, X. Li, X. Yan, X. Hu, X. Ling, X. Fan, X. Xia, X. Zhang, X. Zhang, X. Pan, X. Zou, X. Zhang, Y. Liu, Y. Wu, Y. Li, Y. Wang, Y. Zhu, Y. Tan, Y. Zhou, Y. Pan, Y. Zhang, Y. Su, Y. Geng, Y. Yan, Y. Tan, Y. Bi, Y. Shen, Y. Yang, Y. Li, Y. Liu, Y. Wang, Y. Li, Y. Wu, Y. Zhang, Y. Duan, Y. Zhang, Z. Liu, Z. Jiang, Z. Yan, Z. Zhang, Z. Wei, Z. Chen, Z. Feng, Z. Yao, Z. Chai, Z. Wang, Z. Zhang, B. Xu, M. Huang, H. Wang, J. Li, Y. Dong, and J. Tang, “Glm-5: from vibe coding to agentic engineering,” 2026. [Online]. Available: https://doi.org/10.48550/arXiv.2602.15763 [7] S. Li, Y. Zhao, R. Varma, O. Salpekar, P. Noordhuis, T. Li, A. Paszke, J. Smith, B. Vaughan, P. Damania, and S. Chintala, “Pytorch distributed: experiences on accelerating data parallel training,” Proc. VLDB Endow. ,vol. 13, no. 12, p. 3005–3018, Aug. 2020. [Online]. Available: https://doi.org/10.14778/3415478.3415530 [8] Y. Huang, Y. Cheng, A. Bapna, O. Firat, D. Chen, M. Chen, H. Lee, J. Ngiam, Q. V. Le, Y. Wu, and z. Chen, “Gpipe: Efficient training of giant neural networks using pipeline parallelism,” in 
+
+Advances in Neural Information Processing Systems , H. Wallach, H. Larochelle, A. Beygelzimer, F. d'Alché-Buc, E. Fox, and R. Garnett, Eds., vol. 32. Curran Associates, Inc., 2019. [Online]. Available: https://dl.acm.org/doi/10.5555/3454287.3454297 [9] D. Narayanan, A. Harlap, A. Phanishayee, V. Seshadri, N. R. Devanur, G. R. Ganger, P. B. Gibbons, and M. Zaharia, “Pipedream: generalized pipeline parallelism for dnn training,” in Proceedings of the 27th ACM Symposium on Operating Systems Principles , ser. SOSP ’19. New York, NY, USA: Association for Computing Machinery, 2019, p. 1–15. [Online]. Available: https://doi.org/10.1145/3341301.3359646 [10] D. Narayanan, M. Shoeybi, J. Casper, P. LeGresley, M. Patwary, V. Korthikanti, D. Vainbrand, P. Kashinkunti, J. Bernauer, B. Catanzaro, A. Phanishayee, and M. Zaharia, “Efficient large-scale language model training on GPU clusters using megatron-LM,” in Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis , ser. SC ’21. Association for Computing Machinery, pp. 1–15. [Online]. Available: https: //dl.acm.org/doi/10.1145/3458817.3476209 [11] P. Qi, X. Wan, G. Huang, and M. Lin, “Zero bubble (almost) pipeline parallelism,” in The Twelfth International Conference on Learning Representations , 2024. [Online]. Available: https: //openreview.net/forum?id=tuzTN0eIO5 [12] M. Shoeybi, M. Patwary, R. Puri, P. LeGresley, J. Casper, and B. Catanzaro, “Megatron-lm: Training multi-billion parameter language models using model parallelism,” 2020. [Online]. Available: https://doi.org/10.48550/arXiv.1909.08053 [13] V. A. Korthikanti, J. Casper, S. Lym, L. McAfee, M. Andersch, M. Shoeybi, and B. Catanzaro, “Reducing activation recomputation in large transformer models,” in MLSys . [Online]. Available: https://proceedings.mlsys.org/paper_files/paper/2023/hash/ 80083951326cf5b35e5100260d64ed81-Abstract-mlsys2023.html [14] S. A. Jacobs, M. Tanaka, C. Zhang, M. Zhang, R. Y. Aminadabi, S. L. Song, S. Rajbhandari, and Y. He, “System optimizations for enabling training of extreme long sequence transformer models,” in Proceedings of the 43rd ACM Symposium on Principles of Distributed Computing . ACM, pp. 121–130. [Online]. Available: https://dl.acm.org/doi/10.1145/3662158.3662806 [15] H. Liu, M. Zaharia, and P. Abbeel, “Ringattention with blockwise transformers for near-infinite context,” in The Twelfth International Conference on Learning Representations , 2024. [Online]. Available: https://openreview.net/forum?id=WsRHpHH4s0 [16] A. Grattafiori, A. Dubey, A. Jauhri, A. Pandey, A. Kadian, A. Al-Dahle, A. Letman, A. Mathur, A. Schelten, A. Vaughan, A. Yang, A. Fan, A. Goyal, A. Hartshorn, A. Yang, A. Mitra, A. Sravankumar, A. Korenev, A. Hinsvark, A. Rao, A. Zhang, A. Rodriguez, A. Gregerson, A. Spataru, B. Roziere, B. Biron, B. Tang, B. Chern, C. Caucheteux, C. Nayak, C. Bi, C. Marra, C. McConnell, C. Keller, C. Touret, C. Wu, C. Wong, C. C. Ferrer, C. Nikolaidis, D. Allonsius, D. Song, D. Pintz, D. Livshits, D. Wyatt, D. Esiobu, D. Choudhary, D. Mahajan, D. Garcia-Olano, D. Perino, D. Hupkes, E. Lakomkin, E. AlBadawy, E. Lobanova, E. Dinan, E. M. Smith, F. Radenovic, F. Guzmán, F. Zhang, G. Synnaeve, G. Lee, G. L. Anderson, G. Thattai, G. Nail, G. Mialon, G. Pang, G. Cucurell, H. Nguyen, H. Korevaar, H. Xu, H. Touvron, I. Zarov, I. A. Ibarra, I. Kloumann, I. Misra, I. Evtimov, J. Zhang, J. Copet, J. Lee, J. Geffert, J. Vranes, J. Park, J. Mahadeokar, J. Shah, J. v. d. Linde, J. Billock, J. Hong, J. Lee, J. Fu, J. Chi, J. Huang, J. Liu, J. Wang, J. Yu, J. Bitton, J. Spisak, J. Park, J. Rocca, J. Johnstun, J. Saxe, J. Jia, K. V. Alwala, K. Prasad, K. Upasani, K. Plawiak, K. Li, K. Heafield, K. Stone, K. El-Arini, K. Iyer, K. Malik, K. Chiu, K. Bhalla, K. Lakhotia, L. Rantala-Yeary, L. v. d. Maaten, L. Chen, L. Tan, L. Jenkins, L. Martin, L. Madaan, L. Malo, L. Blecher, L. Landzaat, L. d. Oliveira, M. Muzzi, M. Pasupuleti, M. Singh, M. Paluri, M. Kardas, M. Tsimpoukelli, M. Oldham, M. Rita, M. Pavlova, M. Kambadur, M. Lewis, M. Si, M. K. Singh, M. Hassan, N. Goyal, N. Torabi, N. Bashlykov, N. Bogoychev, N. Chatterji, N. Zhang, O. Duchenne, O. Çelebi, P. Alrassy, P. Zhang, P. Li, P. Vasic, P. Weng, P. Bhargava, P. Dubal, P. Krishnan, P. S. Koura, P. Xu, Q. He, Q. Dong, R. Srinivasan, R. Ganapathy, R. Calderer, R. S. Cabral, R. Stojnic, R. Raileanu, R. Maheswari, R. Girdhar, R. Patel, R. Sauvestre, R. Polidoro, R. Sumbaly, R. Taylor, R. Silva, R. Hou, R. Wang, S. Hosseini, S. Chennabasappa, S. Singh, S. Bell, S. S. Kim, S. Edunov, S. Nie, S. Narang, S. Raparthy, S. Shen, S. Wan, S. Bhosale, S. Zhang, S. Vandenhende, S. Batra, S. Whitman, S. Sootla, S. Collot, S. Gururangan, S. Borodinsky, T. Herman, T. Fowler, T. Sheasha, T. Georgiou, T. Scialom, T. Speckbacher, T. Mihaylov, T. Xiao, U. Karn, V. Goswami, V. Gupta, V. Ramanathan, V. Kerkez, V. Gonguet, V. Do, V. Vogeti, V. Albiero, V. Petrovic, W. Chu, W. Xiong, W. Fu, W. Meers, X. Martinet, X. Wang, X. Wang, X. E. Tan, X. Xia, X. Xie, X. Jia, X. Wang, Y. Goldschlag, Y. Gaur, Y. Babaei, Y. Wen, Y. Song, Y. Zhang, Y. Li, Y. Mao, Z. D. Coudert, Z. Yan, Z. Chen, Z. Papakipos, A. Singh, A. Srivastava, A. Jain, A. Kelsey, A. Shajnfeld, A. Gangidi, A. Victoria, A. Goldstand, A. Menon, A. Sharma, A. Boesenberg, A. Baevski, A. Feinstein, A. Kallet, A. Sangani, A. Teo, A. Yunus, A. Lupu, A. Alvarado, A. Caples, A. Gu, A. Ho, A. Poulton, A. Ryan, A. Ramchandani, A. Dong, A. Franco, A. Goyal, A. Saraf, A. Chowdhury, A. Gabriel, A. Bharambe, A. Eisenman, A. Yazdan, B. James, B. Maurer, B. Leonhardi, B. Huang, B. Loyd, B. D. Paola, B. Paranjape, B. Liu, B. Wu, B. Ni, B. Hancock, B. Wasti, B. Spence, B. Stojkovic, B. Gamido, B. Montalvo, C. Parker, C. Burton, C. Mejia, C. Liu, C. Wang, C. Kim, C. Zhou, C. Hu, C.-H. Chu, C. Cai, C. Tindal, C. Feichtenhofer, C. Gao, D. Civin, D. Beaty, D. Kreymer, D. Li, D. Adkins, D. Xu, D. Testuggine, D. David, D. Parikh, D. Liskovich, D. Foss, D. Wang, D. Le, D. Holland, E. Dowling, E. Jamil, E. Montgomery, E. Presani, E. Hahn, E. Wood, E.-T. Le, E. Brinkman, E. Arcaute, E. Dunbar, E. Smothers, F. Sun, F. Kreuk, F. Tian, F. Kokkinos, F. Ozgenel, F. Caggioni, F. Kanayet, F. Seide, G. M. Florez, G. Schwarz, G. Badeer, G. Swee, G. Halpern, G. Herman, G. Sizov, Guangyi, Zhang, G. Lakshminarayanan, H. Inan, H. Shojanazeri, H. Zou, H. Wang, H. Zha, H. Habeeb, H. Rudolph, H. Suk, H. Aspegren, H. Goldman, H. Zhan, I. Damlaj, I. Molybog, I. Tufanov, I. Leontiadis, I.-E. Veliche, I. Gat, J. Weissman, J. Geboski, J. Kohli, J. Lam, J. Asher, J.-B. Gaya, J. Marcus, J. Tang, J. Chan, J. Zhen, J. Reizenstein, J. Teboul, J. Zhong, J. Jin, J. Yang, J. Cummings, J. Carvill, J. Shepard, J. McPhie, J. Torres, J. Ginsburg, J. Wang, K. Wu, K. H. U, K. Saxena, K. Khandelwal, K. Zand, K. Matosich, K. Veeraraghavan, K. Michelena, K. Li, K. Jagadeesh, K. Huang, K. Chawla, K. Huang, L. Chen, L. Garg, L. A, L. Silva, L. Bell, L. Zhang, L. Guo, L. Yu, L. Moshkovich, L. Wehrstedt, M. Khabsa, M. Avalani, M. Bhatt, M. Mankus, M. Hasson, M. Lennie, M. Reso, M. Groshev, M. Naumov, M. Lathi, M. Keneally, M. Liu, M. L. Seltzer, M. Valko, M. Restrepo, M. Patel, M. Vyatskov, M. Samvelyan, M. Clark, M. Macey, M. Wang, M. J. Hermoso, M. Metanat, M. Rastegari, M. Bansal, N. Santhanam, N. Parks, N. White, N. Bawa, N. Singhal, N. Egebo, N. Usunier, N. Mehta, N. P. Laptev, N. Dong, N. Cheng, O. Chernoguz, O. Hart, O. Salpekar, O. Kalinli, P. Kent, P. Parekh, P. Saab, P. Balaji, P. Rittner, P. Bontrager, P. Roux, P. Dollar, P. Zvyagina, P. Ratanchandani, P. Yuvraj, Q. Liang, R. Alao, R. Rodriguez, R. Ayub, R. Murthy, R. Nayani, R. Mitra, R. Parthasarathy, R. Li, R. Hogan, R. Battey, R. Wang, R. Howes, R. Rinott, S. Mehta, S. Siby, S. J. Bondu, S. Datta, S. Chugh, S. Hunt, S. Dhillon, S. Sidorov, S. Pan, S. Mahajan, S. Verma, S. Yamamoto, S. Ramaswamy, S. Lindsay, S. Lindsay, S. Feng, S. Lin, S. C. Zha, S. Patil, S. Shankar, S. Zhang, S. Zhang, S. Wang, S. Agarwal, S. Sajuyigbe, S. Chintala, S. Max, S. Chen, S. Kehoe, S. Satterfield, S. Govindaprasad, S. Gupta, S. Deng, S. Cho, S. Virk, S. Subramanian, S. Choudhury, S. Goldman, T. Remez, T. Glaser, T. Best, T. Koehler, T. Robinson, T. Li, T. Zhang, T. Matthews, T. Chou, T. Shaked, V. Vontimitta, V. Ajayi, V. Montanez, V. Mohan, V. S. Kumar, V. Mangla, V. Ionescu, V. Poenaru, V. T. Mihailescu, V. Ivanov, W. Li, W. Wang, W. Jiang, W. Bouaziz, W. Constable, X. Tang, X. Wu, X. Wang, X. Wu, X. Gao, Y. Kleinman, Y. Chen, Y. Hu, Y. Jia, Y. Qi, Y. Li, Y. Zhang, Y. Zhang, Y. Adi, Y. Nam, Yu, Wang, Y. Zhao, Y. Hao, Y. Qian, Y. Li, Y. He, Z. Rait, Z. DeVito, Z. Rosnbrick, Z. Wen, Z. Yang, Z. Zhao, and Z. Ma, “The llama 3 herd of models.” [Online]. Available: https://doi.org/10.48550/arXiv.2407.21783 [17] E. Lu, Z. Jiang, J. Liu, Y. Du, T. Jiang, C. Hong, S. Liu, W. He, E. Yuan, Y. Wang, Z. Huang, H. Yuan, S. Xu, X. Xu, G. Lai, Y. Chen, H. Zheng, J. Yan, J. Su, Y. Wu, Y. Zhang, Z. Yang, X. Zhou, M. Zhang, and J. Qiu, “MoBA: Mixture of block attention for long-context LLMs,” in The Thirty-ninth Annual Conference on Neural Information Processing Systems , 2025. [Online]. Available: https://openreview.net/forum?id=RlqYCpTu1P [18] J. Yuan, H. Gao, D. Dai, J. Luo, L. Zhao, Z. Zhang, Z. Xie, Y. Wei, L. Wang, Z. Xiao, Y. Wang, C. Ruan, M. Zhang, W. Liang, and W. Zeng, “Native sparse attention: Hardware-aligned and natively trainable sparse attention,” in Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , W. Che, J. Nabende, E. Shutova, and M. T. Pilehvar, Eds. Vienna, Austria: Association for Computational Linguistics, Jul. 2025, pp. 23 078–23 097. [Online]. Available: https://doi.org/10.18653/v1/2025.acl-long.1126 [19] nvidia/ChatQA2-long-SFT-data · datasets at hugging face. [Online]. Avail-able: https://huggingface.co/datasets/nvidia/ChatQA2-Long-SFT-data [20] Y. Bai, X. Lv, J. Zhang, Y. He, J. Qi, L. Hou, J. Tang, Y. Dong, and J. Li, “LongAlign: A recipe for long context alignment of large language models,” in Findings of the Association for Computational Linguistics: EMNLP 2024 , Y. Al-Onaizan, M. Bansal, and Y.-N. Chen, Eds. Miami, Florida, USA: Association for Computational Linguistics, Nov. 2024, pp. 1376–1395. [Online]. Available: https://doi.org/10.18653/v1/2024.findings-emnlp.74 [21] H. Xu, W. Shen, Y. Wei, A. Wang, G. Runfan, T. Wang, Y. Li, M. Li, and W. Jia, “Skrull: Towards efficient long context fine-tuning through dynamic data scheduling,” in The Thirty-ninth Annual Conference on Neural Information Processing Systems , 2025. [Online]. Available: https://openreview.net/forum?id=WBEknRZBpT [22] Z. Wang, A. Cai, X. Xie, Z. Pan, Y. Guan, W. Chu, J. Wang, S. Li, J. Huang, C. Cai et al. , “Wlb-llm: Workload-balanced 4d parallelism for large language model training,” in 19th USENIX Symposium on Operating Systems Design and Implementation (OSDI 25) , 2025, pp. 785–801. [Online]. Available: https://dl.acm.org/doi/10.5555/3767901.3767944 [23] NVIDIA Corporation. (2026) Nvidia cuda toolkit documentation,. Accessed: Mar. 14, 2026. [Online]. Available: https://developer.nvidia. com/cuda/toolkit [24] A. Paszke, S. Gross, F. Massa, A. Lerer, J. Bradbury, G. Chanan, T. Killeen, Z. Lin, N. Gimelshein, L. Antiga, A. Desmaison, A. Kopf, E. Yang, Z. DeVito, M. Raison, A. Tejani, S. Chilamkurthy, B. Steiner, L. Fang, J. Bai, and S. Chintala, “Pytorch: An imperative style, high-performance deep learning library,” in Advances in Neural Information Processing Systems , H. Wallach, H. Larochelle, A. Beygelzimer, F. d'Alché-Buc, E. Fox, and R. Garnett, Eds., vol. 32. Curran Associates, Inc., 2019. [Online]. Available: https://dl.acm.org/doi/10.5555/3454287.3455008 [25] NVIDIA Corporation. (2026) Nvidia collective communications library (nccl) documentation. Accessed: Mar. 14, 2026. [Online]. Available: https://docs.nvidia.com/deeplearning/nccl/ [26] Y. Zhao, J. Huang, J. Hu, X. Wang, Y. Mao, D. Zhang, Z. Jiang, Z. Wu, B. Ai, A. Wang, W. Zhou, and Y. Chen, “Swift: a scalable lightweight infrastructure for fine-tuning,” in Proceedings of the Thirty-Ninth AAAI Conference on Artificial Intelligence and Thirty-Seventh Conference on Innovative Applications of Artificial Intelligence and Fifteenth Symposium on Educational Advances in Artificial Intelligence , ser. AAAI’25/IAAI’25/EAAI’25. AAAI Press, 2025. [Online]. Available: https://doi.org/10.1609/aaai.v39i28.35383 [27] P. Xu, W. Ping, X. Wu, C. Xu, Z. Liu, M. Shoeybi, and B. Catanzaro, “Chatqa 2: Bridging the gap to proprietary LLMs in long context and RAG capabilities,” in The Thirteenth International Conference on Learning Representations , 2025. [Online]. Available: https://openreview.net/forum?id=cPD2hU35x3 [28] E. J. Hu, yelong shen, P. Wallis, Z. Allen-Zhu, Y. Li, S. Wang, L. Wang, and W. Chen, “Lora: Low-rank adaptation of large language models,” in 
+
+International Conference on Learning Representations , 2022. [Online]. Available: https://openreview.net/forum?id=nZeVKeeFYf9 [29] Y. Chen, S. Qian, H. Tang, X. Lai, Z. Liu, S. Han, and J. Jia, “LongloRA: Efficient fine-tuning of long-context large language models,” in The Twelfth International Conference on Learning Representations ,2024. [Online]. Available: https://openreview.net/forum?id=6PmJoRfdaK [30] S. Smith, M. Patwary, B. Norick, P. LeGresley, S. Rajbhandari, J. Casper, Z. Liu, S. Prabhumoye, G. Zerveas, V. Korthikanti, E. Zhang, R. Child, R. Y. Aminabadi, J. Bernauer, X. Song, M. Shoeybi, Y. He, M. Houston, S. Tiwary, and B. Catanzaro, “Using deepspeed and megatron to train megatron-turing nlg 530b, a large-scale generative language model,” 2022. [Online]. Available: https://doi.org/10.48550/arXiv.2201.11990 [31] X. Yuan, H. Xu, W. Shen, A. Wang, X. Qiu, J. Zhang, Y. Liu, B. Yu, J. Lin, M. Li, W. Jia, Y. Li, and W. Lin, “Efficient long context fine-tuning with chunk flow,” in Forty-second International Conference on Machine Learning , 2025. [Online]. Available: https://openreview.net/forum?id=rzn2OgflOK [32] Z. Zhang, Y. Sheng, T. Zhou, T. Chen, L. Zheng, R. Cai, Z. Song, Y. Tian, C. Ré, C. Barrett et al. , “H2o: Heavy-hitter oracle for efficient generative inference of large language models,” Advances in Neural Information Processing Systems , vol. 36, pp. 34 661–34 710, 2023. [Online]. Available: https://dl.acm.org/doi/10.5555/3666122.3667628 [33] J. Tang, Y. Zhao, K. Zhu, G. Xiao, B. Kasikci, and S. Han, “Quest: query-aware sparsity for efficient long-context llm inference,” in Proceedings of the 41st International Conference on Machine Learning , ser. ICML’24. JMLR.org, 2024. [Online]. Available: https://dl.acm.org/doi/10.5555/3692070.3694025 [34] C. Lin, J. Tang, S. Yang, H. Wang, T. Tang, B. Tian, I. Stoica, S. Han, and M. Gao, “Twilight: Adaptive attention sparsity with hierarchical top-p pruning,” in The Thirty-ninth Annual Conference on Neural Information Processing Systems , 2025. [Online]. Available: https://openreview.net/forum?id=Ve693NkzcU [35] W. Li, C. Zhang, H. Jiang, Y. Li, Y. Yang, and L. Qiu, “MTraining: Efficient distributed training for ultra-long contexts via dynamic sparse attention,” in ES-FoMo III: 3rd Workshop on Efficient Systems for Foundation Models , 2025. [Online]. Available: https://openreview.net/forum?id=uOKzCkrV5L

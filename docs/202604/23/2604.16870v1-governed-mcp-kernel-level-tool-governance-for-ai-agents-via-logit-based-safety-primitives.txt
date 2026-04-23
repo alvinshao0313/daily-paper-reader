@@ -1,0 +1,386 @@
+Title: Governed MCP: Kernel-Level Tool Governance for AI Agents via Logit-Based Safety Primitives
+
+URL Source: https://arxiv.org/pdf/2604.16870v1
+
+Published Time: Tue, 21 Apr 2026 00:35:32 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+# Governed MCP: Kernel-Level Tool Governance for AI Agents via Logit-Based Safety Primitives 
+
+## Daeyeon Son Independent Researcher Republic of Korea 
+
+## sdy1350@gmail.com 
+
+## April 2026 
+
+# Abstract 
+
+AI agents increasingly call external tools (file sys-tem, network, APIs) through the Model Context Pro-tocol (MCP) [1]. These tool calls are the agent’s syscalls—privileged operations with side effects on shared state—yet today’s safety enforcement lives en-tirely in userspace, where a 10-line script can bypass it. I propose Governed MCP , a kernel-resident tool governance gateway built on a logit-based safety primi-tive (ProbeLogits, companion paper). The gateway in-terposes on every MCP tool call in a 6-layer pipeline: schema validation, trust tier check, rate limit, adver-sarial pre-filter, ProbeLogits gate (the load-bearing se-mantic check), and constitutional policy match, with a Blake3-hashed audit chain. I implement Governed MCP in Anima OS , a bare-metal x86_64 OS in ∼86,000 lines of Rust. The five non-inference layers add 65.3 μs of overhead per call; ProbeLogits adds 65 ms (per-token-class semantic deci-sion) on 7B Q4_0. A 4-config ablation on a 101-prompt MCP-domain benchmark shows that removing the Pro-beLogits layer collapses F1 from 0.773 to 0.327 ( ∆F1 = −0.446)—hand-rule firewalling alone is insufficient. All 15 WASM-to-system host functions in the runtime route through the gateway (complete mediation of the WASM ABI surface; the scope and caveats of this claim are stated in §4.6); a 10-LoC userspace bypass that de-feats existing guardrail libraries is structurally impossi-ble against the kernel-resident gate. To my knowledge, no prior system places semantic safety enforcement below the agent’s privilege boundary in an operating system. Governed MCP demonstrates that tool-call governance is feasible as an OS primitive, not just an application-layer concern. 
+
+# 1 Introduction 
+
+AI agents are increasingly autonomous, executing multi-step plans via tool calls (file reads, web fetches, code ex-ecution, shell commands). The Model Context Protocol (MCP), introduced by Anthropic [1], has become the de facto standard for tool calling: a JSON-RPC interface where the agent proposes a tool name and arguments, and a server executes them. 
+
+Tool calls are syscalls. Like syscalls, they cross the privilege boundary between agent (less trusted) and host (more trusted), and they carry the same risks: ar-gument exfiltration, side effects on shared state, escala-tion. Unlike syscalls, they have no kernel mediation. Existing safety infrastructure—NeMo Guardrails [7], AGT schemas [8], AutoGPT-style [9] wrappers—all op-erate as Python libraries imported by the agent process, in the same address space and with the same privilege as the agent itself. The agent decides whether to call them. 
+
+The structural problem is not that these libraries are weak, but that they are libraries: they cannot be the privilege boundary between the agent and the host. Listing 1 shows three increasingly subtle ways an agent (or compromised tool that exfiltrated credentials) can bypass them, none of which require a vulnerability in the safety library: These bypasses succeed because Python imports, at-tribute writes, and dict mutations all run with the agent’s own privilege. No amount of library-level hard-ening (input validation, signed checks, etc.) closes the gap, because the gap is at the privilege boundary : there is no boundary. Any defense the library implements, the agent’s process can also undo. The same critique applies to JavaScript wrappers, Go middleware, and any other in-process safety layer. Kernel-grade governance requires that the safety check live in a privilege domain the agent cannot enter. 
+
+This paper proposes Governed MCP , a kernel-resident governance gateway that interposes on every MCP tool call. The gateway runs in the OS kernel of Anima OS—a bare-metal x86_64 operating system written in Rust whose inference engine and safety prim-itives are described in a companion paper [6]. Agents 1
+
+> arXiv:2604.16870v1 [cs.CR] 18 Apr 2026
+
+Listing 1: Three bypass paths for in-process safety li-braries. None exploit a library bug; all rely on the agent process having the same privilege as the safety library.                                                                                                     
+
+> 1#(1) Skip the import . The library only runs if the
+> 2#agent code chooses to call it .
+> 3from openai import OpenAI ; from os import system
+> 4#no ‘ from nemo_guardrails import LLMRails ‘
+> 5client =OpenAI ()
+> 6plan =client . chat . completions . create (...)
+> 7system ( plan . choices [0]. message . content ) #unguarded
+> 89#(2) Replace the function . Same address space = > same write
+> 10 #permission to the library ’s symbols .
+> 11 import nemoguardrails
+> 12 nemoguardrails . LLMRails . generate =lambda self , p : p
+> 13 #now every " guarded " call returns the prompt unfiltered
+> 14 15 #(3) Inject the safety verdict . Many libraries return a
+> 16 #dict ; mutate it before the caller checks it .
+> 17 result =guardrails . check ( prompt )
+> 18 result [ " allowed " ] =True
+> 19 #downstream gate sees allowed = True
+
+execute as WASM [2] bytecode in a sandbox above the gateway; the only path from the sandbox to a tool call is through host functions that the kernel exposes, every one of which routes through the gateway. Because the agent’s WASM context cannot address the gateway’s memory and cannot invoke kernel code except through the WASM ABI, the agent cannot skip the check by de-sign : there is no userspace shim to monkey-patch be-cause the check is not in userspace. The gateway is structured as a six-layer pipeline. The first four layers are syntactic and policy checks: JSON-RPC schema validation, trust-tier whitelist (which tools may be invoked by which trust class of agent), token-bucket rate limit, and an O( n) regex pre-filter for prompt-injection patterns. The fifth layer is the load-bearing semantic check: a single forward pass through the loaded inference model that reads “Safe” vs. “Dan-gerous” logits at the verbalizer position (the ProbeLog-its primitive). The sixth applies a 12-principle constitu-tional policy match. Each tool call appends a Blake3-hashed audit record. End-to-end overhead on a 7B Q4_0 model is 65 ms per call (dominated by the infer-ence layer); the five non-inference layers add only 65.3 μsin total. 
+
+Why this matters now. The Model Context Proto-col entered widespread deployment in 2024–2025, and major frameworks (Anthropic’s Claude clients, Ope-nAI’s Tool API, Microsoft’s Copilot tools) now ship MCP support by default. This means tool-call gover-nance is no longer a research concern but a deployment one—and the governance layer that ships in current pro-duction stacks is exactly the in-process Python-library design that Listing 1 defeats. The window to define what a proper kernel-grade MCP gateway should look like is open now , before deployment patterns harden around the current weak architecture. 
+
+Contributions. 
+
+1. A 6-layer kernel-resident MCP governance pipeline (schema, trust, rate, adversarial pre-filter, ProbeLogits, constitutional) with 65.3 μs non-inference overhead and FAIL-CLOSED semantics: if the inference engine is unavailable, all tool calls are denied. To my knowledge, this is the first kernel-resident MCP gateway with semantic intent classifi-cation. 2. Demonstration that the ProbeLogits seman-tic layer is load-bearing : a 4-configuration ab-lation on a 101-prompt MCP-domain benchmark shows ∆F1 = −0.446 when the ProbeLogits gate is removed (full pipeline F1 = 0.773, no-ProbeLogits F1 = 0.327). Hand-rule firewalling without semantic understanding is insufficient. 3. Complete mediation of the WASM ABI sur-face (structural argument + empirical verification): all 15 WASM-to-system host functions route through the gateway via a single governance_check_host() 
+
+entry, the gateway’s MCP entry point is pub(crate) 
+
+(not in the WASM ABI), and a test harness enu-merates 123 reachable synchronous agent-to-system paths and verifies each increments the gateway counter exactly once. The argument is scoped to the WASM ABI surface (not the entire kernel; out-of-scope items are listed in §3). 4. Open-source bare-metal implementation 
+
+(∼86,000 lines of Rust, AGPL-3.0) demonstrating that kernel-grade governance is feasible without proprietary silicon or hypervisor tricks. The remainder of the paper is organized as follows. §2 surveys the MCP protocol and existing safety in-frastructure. §3 fixes the threat model. §4 describes the gateway’s six-layer design and the ProbeLogits sub-strate. §5 evaluates the gateway end-to-end. §6 dis-cusses generalization, limitations, and future work; §7 positions the work; §8 concludes. 
+
+# 2 Background 
+
+The Model Context Protocol. MCP [1], intro-duced by Anthropic in late 2024, is a JSON-RPC [3] interface that standardizes how an LLM-driven agent discovers and invokes external tools. A tool is a function described by a JSON Schema for its input arguments and output shape; tools are hosted by an MCP server (a 2Python or Node process bound to a transport) and con-sumed by an MCP host (the agent runtime). The proto-col defines four primary methods: list_tools (server returns its catalog of tool descriptions), call_tool 
+
+(host invokes a tool with JSON arguments and re-ceives a JSON or stream result), list_prompts , and 
+
+list_resources . Two transports are supported: stdio (in-process subprocess) and Streamable HTTP (long-polling over HTTP/1.1 or HTTP/2). 
+
+Why MCP is the right abstraction. Prior to MCP, every agent framework defined its own tool in-terface: LangChain Tool [5], OpenAI function_call 
+
+schema [4], and proprietary AGT [8] all required tool authors to write framework-specific adapters. MCP factors out the tool catalog and invocation protocol, so a single MCP server can be consumed by Claude clients, OpenAI clients, AutoGPT-style agents, and cus-tom runtimes without modification. This factoring also makes MCP the right governance chokepoint: every tool invocation, regardless of which agent framework called it, traverses the same JSON-RPC method, so a single gateway can mediate all of them. Enforcement at the protocol layer dominates enforcement at the framework layer because it cannot be bypassed by switching frame-works. 
+
+Where MCP servers run today. In current pro-duction deployments, MCP servers run as unprivi-leged userspace processes on the developer’s machine (stdio transport) or as remote services accessed over HTTP. The MCP host (the agent runtime) is also a userspace process, typically a Python application using the mcp-server-stdio or mcp-client-http libraries. Safety enforcement is left to the host’s own code; noth-ing in the MCP specification requires the host to call a safety check before invoking a tool, and nothing in the OS prevents an agent that controls the host process from skipping the check. The check and the agent share a UID, an address space, and a Python interpreter. This is the deployment pattern that the kernel-resident gate-way proposed in this paper replaces. 
+
+Existing safety enforcement. Three families of sys-tem are deployed today: (1) Fine-tuned classifiers —Llama Guard 3 [11], WildGuard [12]—add a second model invocation per request. Latency is high ( ∼1 s per check), and the classifier model itself runs in the same userspace as the agent. (2) Schema-only val-idators —AGT [8], JSON Schema—block syntactic vi-olations but cannot reason about semantics. “Read this file” passes schema; “read /etc/shadow” also passes. (3) Wrapper libraries —NeMo Guardrails [7] runs Python rule chains around model calls. The library is imported by the agent process; one line of code disables it (List-ing 1). None of these enforce below the agent’s privilege boundary. 
+
+# 3 Threat Model 
+
+Attacker. The attacker is the AI agent itself. The threat is realistic without assuming the agent is mali-cious by design: an agent trained on, fine-tuned with, or prompted by adversarial input can produce danger-ous tool-call sequences while running ostensibly benign code. Concretely, the attacker manifests in five ways the gateway must defend against: 1. Direct adversarial agent. The agent’s prompt or fine-tuning has been compromised (e.g., a malicious system prompt or a poisoned training dataset). It actively attempts dangerous tool calls. 2. Indirect prompt injection. A tool’s output (web page, file content, API response) contains adversarial instructions that the agent’s next reasoning step in-corporates as if they were system instructions. This is the agent attacker class identified by Greshake et al. [16] and confirmed in the field by Apple, Slack, and Notion incidents in 2024–2025. 3. Jailbreak / role-play. The agent is asked (e.g., by an end user) to “play the role of” an unconstrained as-sistant and execute the resulting plan. Refusal train-ing is bypassed by the role frame; tool calls follow. 4. Multi-step decomposition. Each individual tool call appears benign in isolation, but their com-position causes harm (e.g., read /etc/passwd →
+
+web_post → exfiltration). Per-call governance must reason about call sequences as well as individual calls. 5. Compromised MCP server. A third-party MCP server returns malicious results that, when fed back into the agent’s context, produce indirect injection (case 2). The gateway must treat tool outputs as untrusted input. 
+
+Trust boundary. The gateway runs in kernel ring 0; the WASM sandbox runs at the WASM/Cranelift virtualization layer with no x86_64 syscall capability and no ability to address gateway memory (this claim assumes a correct Cranelift implementation; JIT-bug bypass classes are discussed in §4.6, “WASM isolation soundness”). The agent can invoke the gateway only via the governance_check_host() host function, which is the single mediated entry. This is the standard refer-ence monitor position [15, 17]: the agent’s only egress to system effects routes through one place, and that place runs at higher privilege than the agent. 3WASM Sandbox (ring 3, sandboxed)       
+
+> call_tool(name, args)
+> [WASM ABI]
+> governance_check_host() (kernel)
+> single mediated entry
+> Governed MCP Gateway (kernel) L1 schema L2 trust L3 rate L4 prefilter L5 ProbeLogits L6 const. + Blake3 audit chain
+> ALLOW / DENY
+> Anima OS host services
+> file, network, memory, IPC, AnimaFS, . . .
+
+Figure 1: Trust-boundary placement of the gateway. The WASM agent’s only egress to system effects is the governance_check_host() entry, which routes through all six layers before any host service is invoked. 
+
+In scope. (i) tool-call arguments that exfiltrate sen-sitive data, (ii) indirect prompt injection that esca-lates to dangerous tool calls, (iii) jailbreak/role-play prompts that attempt to override system instructions, (iv) chained multi-step tool sequences that hide intent in benign-looking individual calls, (v) compromised MCP server outputs as injection vector, (vi) FAIL-CLOSED guarantee under inference engine failure. 
+
+Out of scope. Side channels via tool latency or argu-ment size (the gateway does not pad timing); kernel ex-ploits in Anima OS itself (which would compromise the gateway directly); hardware-level tampering (Rowham-mer, voltage glitching, etc.); adversarial inference mod-els (a maliciously trained model loaded into the ker-nel would invalidate the substrate); time-of-check-to-time-of-use (TOCTOU) races on tool arguments (e.g., a path resolved by the tool after the gateway evaluated the argument string—in single-threaded agent execu-tion this is closed, in concurrent execution it is not); and cross-agent collusion via shared memory regions 
+
+(the gateway checks per-call intent on the control plane but does not inspect the data plane). Defense against these requires complementary mechanisms (constant-time padding, formal kernel verification, attested boot, model provenance, per-tool argument capture, data-flow tracking) that are orthogonal to the gateway de-sign. 
+
+# 4 Design & Implementation 
+
+## 4.1 System Architecture Overview 
+
+Figure 1 shows the gateway’s position between the WASM agent and the OS host services. The agent can-not address gateway memory and cannot invoke host services except through the mediated entry; the gate-way runs at full kernel privilege. 
+
+## 4.2 Six-Layer Pipeline 
+
+Every MCP call_tool request traverses six layers in fixed order (Table 1). The first four are syntactic and policy checks, fast enough to reject obviously invalid requests without any LLM cost. The fifth—the Pro-beLogits gate—is the only semantic check and the only layer that requires an LLM forward pass. The sixth applies 12-principle constitutional policy matching. An audit record is written via Blake3 hash chain for every decision. 
+
+Layer 1 (schema validation). JSON-RPC pars-ing followed by MCP tool-spec match: the incoming 
+
+call_tool request is parsed into a Request struct and matched against the tool’s declared input JSON Schema. Type mismatches, missing required fields, and unknown tool names deny here. This layer never per-forms network or filesystem I/O; cost is bounded by the size of the JSON payload (typically <1 KB). 
+
+Layer 2 (trust tier). Anima OS classifies agents into four trust tiers ( System , AiNative , AiEnhanced ,
+
+Classic ) based on origin, signature, and prior trust evolution. Each tool declares its minimum required tier; the gateway checks that the calling agent’s tier is at least the required level. A Classic agent (e.g., a community-uploaded WASM with no verified prove-nance) cannot invoke system_shell_exec regardless of arguments; the layer denies before semantic analysis runs. This is a purely policy-driven check, ∼0.3 μs per call. 
+
+Layer 3 (rate limit). Each agent is bound to a token-bucket rate limiter with per-tool granularity (e.g., 10 web_fetch per second, 1 shell_exec per second). The bucket is refilled on a millisecond clock. This pro-tects against denial of service via tool-call flooding and prevents pathological loops where a buggy or adversar-ial agent saturates a critical resource. Bucket lookup is a hash-table operation, ∼0.2 μs per call. 
+
+Layer 4 (adversarial pre-filter). A regex DFA scans the tool-call arguments for known prompt-injection and encoding-attack patterns: “ignore previous instructions ”, base64-encoded payloads with suspicious length, ROT13-encoded keywords, authority-impersonation phrases (“ ADMIN OVERRIDE ”), and instruction-hierarchy attacks (“ system: ... ”). The pre-filter runs in O( n) time where n is the byte length of the arguments ( ∼5 μs for typical 1 KB calls). It catches the “cheap” attacks before the expensive layer 45 runs. The companion paper [6] reports that the pre-filter alone catches roughly 13 of 50 adversarial prompts in the Custom-260 benchmark. 
+
+Layer 5 (ProbeLogits gate). The semantic core. Detailed in §4.3 and Algorithm 1 (lines 14–19). One forward pass through the loaded inference model with KV snapshot/restore around the call. 
+
+Layer 6 (constitutional policy). A 12-principle policy match: each principle is encoded as a predi-cate over (agent, tool, arguments, result). Examples: “no agent may invoke shell_exec on a path contain-ing /etc/shadow ”; “no web_post may target a private RFC1918 address from a Classic agent.” Principle evaluation is ∼5 μs per principle for typical arguments; the 12 principles together total ∼60 μs. This layer encodes deployment-specific policy that cannot be ex-pressed in the generic safety classifier of layer 5. 
+
+Audit (Blake3 hash chain). After every deci-sion, a record (timestamp, agent_id, tool_name, arg_hash, deciding_layer, verdict, prev_hash) 
+
+is appended to a ring buffer. Each record’s hash is in-cluded in the next record’s prev_hash field, producing a Blake3-chained log: tampering with any past record invalidates all subsequent hashes. The buffer is 4 MB (∼30,000 records); when full, the oldest records are flushed to AnimaFS storage on the next checkpoint cycle. The chain integrity guarantee is intra-boot : within a single boot session, every record’s hash chains back to the session’s first record, and tampering with any past record invalidates the rest. Cross-boot continuity is not yet provided—each reboot starts a fresh chain anchored to a new genesis record stored in AnimaFS— because durable chain linking across kernel restarts re-quires committing the last in-memory prev_hash to the persistent store before the kernel loses control. We treat this as future work. For deployments that need cross-boot forensic chains, the last-flushed AnimaFS record’s hash should be persisted synchronously on every gate-way decision; the throughput cost ( ∼1 ms per persistent write) is significant and was deferred from the present design. 
+
+## 4.3 ProbeLogits as Substrate 
+
+The ProbeLogits primitive is described in detail in the companion paper [6]; here I summarize the contract the gateway depends on. Given the loaded inference model and a candidate tool call, ProbeLogits returns a sin-gle real-valued safety score s ∈ [−∞ , +∞] represent-ing logit (Dangerous ) − logit (Safe ) at the verbalizer po-sition, with calibration bias subtracted and scaled by Table 1: Pipeline layers, native bare-metal latency, and role.                                    
+
+> #Layer Latency Role
+> 1Schema validation 0.1 μsJSON-RPC + MCP spec 2Trust tier check 0.3 μsAgent tier →tool whitelist 3Rate limit 0.2 μsToken bucket per agent 4Adversarial pre-filter 5μsO( n) regex injection 5ProbeLogits gate 65 ms Logit-based semantic check 6Constitutional check 60 μs12-principle policy –Audit (Blake3 chain) 5μsTamper-evident log Non-inference total 65.3 μsWith ProbeLogits ∼65 ms
+
+α. The gateway thresholds at s > 0 to reject; α is the deployment-time policy knob (higher α = more conser-vative). 
+
+Per-model setup at boot. Anima OS runs a Token Fertility check at boot to ensure the verbalizer pair (e.g., “Safe”/“Dangerous” or “Yes”/“No”) tokenizes to single vocab IDs for the loaded model; if no usable verbalizer pair exists, the gateway refuses to start (FAIL-CLOSED at startup). Calibration bias is measured once on 7 null-input prompts and cached. 
+
+## 4.4 Algorithm 
+
+Algorithm 1 shows the gateway’s per-tool-call proce-dure. The five non-inference layers are short-circuiting (any deny is final and skips layer 5); the ProbeLogits gate is the only call that performs an LLM forward pass; the audit chain is appended unconditionally, recording the deciding layer and its verdict. 
+
+## 4.5 FAIL-CLOSED Semantics 
+
+If the inference engine is unavailable (model not loaded, KV cache exhausted, deadlock detected), the layer-5 call returns Deny (Algorithm 1, line 14). Because layer 5 is on the critical path for every tool call, this denies all tool calls system-wide until the engine recovers. There is no path through the gateway that skips layer 5: the only entry point ( call_tool ) is the gated wrapper, and the inner call_tool_raw is pub(crate) (§4.6). 
+
+Graduated response (not binary). Algorithm 1 lines 18–19 implement a graduated response, not a bi-nary threshold: the gateway denies ( Deny ) only when 
+
+both the model says “Dangerous” and the calibrated con-fidence exceeds 0.90; calls in the [0.70, 0.90] confidence band are allowed but logged as warnings ( LogWarn ); calls below 0.70 proceed normally. This trades some recall for fewer false-positives at the operating point we ship as default ( α = 0 .9, §5.6). The graduated band is a deployment policy choice; tightening to 0.70 (binary deny above 0.70) raises recall at the cost of 5Algorithm 1 GatewayCheck : per-tool-call gateway pipeline. ProbeLogits () returns (ans , p ) where ans is the Boolean “model says Dangerous” and p ∈ [0 , 1] is the sigmoid-calibrated confidence ( p = σ(s) from s ∈ R
+
+in §4.3).                                                                                                                         
+
+> Require: Tool call c= ( name ,args ), agent ID a
+> Ensure: Verdict v∈ { Allow ,Deny }
+> 1: v1←ValidateSchema (c)
+> 2: if v1=Deny then
+> 3: AppendAudit (c, a, 1, v 1); return v1
+> 4: end if
+> 5: v2←TrustTier (a, c. name )
+> 6: if v2=Deny then
+> 7: AppendAudit (c, a, 2, v 2); return v2
+> 8: end if
+> 9: v3←RateLimit (a)
+> 10: if v3=Deny then
+> 11: AppendAudit (c, a, 3, v 3); return v3
+> 12: end if
+> 13: v4←AdvFilter (c. args )
+> 14: if v4=Deny then
+> 15: AppendAudit (c, a, 4, v 4); return v4
+> 16: end if
+> 17: ▷Layer 5: ProbeLogits semantic check (graduated)
+> 18: if ¬InferenceEngine.Ready () then
+> 19: return Deny ▷FAIL-CLOSED
+> 20: end if
+> 21: kv_snap ←KVSnapshot ()
+> 22: (ans , p )←ProbeLogits (c)▷answer + confidence
+> 23: KVRestore (kv_snap )
+> 24: if ans ∧p > 0.90 then
+> 25: AppendAudit (c, a, 5,Deny ); return Deny
+> 26: end if
+> 27: if ans ∧p > 0.70 then
+> 28: LogWarn (c, a, p )▷record + notify, allow
+> 29: end if
+> 30: v6←Constitutional (c, a )
+> 31: if v6=Deny then
+> 32: AppendAudit (c, a, 6, v 6); return v6
+> 33: end if
+> 34: AppendAudit (c, a, ALLOW ,Allow )
+> 35: return Allow
+
+more over-refusal. The FAIL-CLOSED guarantee cov-ers the unavailable-engine case (line 14); for “garbage-but-confident” output (a model returning a well-formed but wrong probability), the gateway’s defense is the per-model calibration check at boot (§4.3) plus the consti-tutional layer (line 21), not the threshold itself. 
+
+KV restore failure mode. Algorithm 1 line 17 (KVRestore ) assumes the snapshot taken at line 15 is bit-for-bit restorable. In a no_std environment with a fixed-size heap, restore can fail under memory pressure. Anima OS handles this by panic-and-restart: a failed restore corrupts the agent’s main KV context, so the gateway treats the agent session as compromised and tears it down. The agent’s audit chain remains valid; the agent’s conversational state is lost but no informa-tion is leaked across the boundary. A more graceful recovery (e.g., snapshot-then-fork with copy-on-write) is left to future work. 
+
+KV cache save/restore. The ProbeLogits forward pass at layer 5 reads the verbalizer logits but must not corrupt the agent’s main conversational state. Without isolation, the probe’s prompt template (“Is this action dangerous, harmful, or a privacy violation? . . . ”) would mutate the KV cache and contaminate subsequent to-ken generation by the agent. The gateway therefore takes a KV snapshot before the probe forward pass (line 15) and restores it after (line 17). The snapshot is a per-layer copy of the key/value tensors at the cur-rent position—approximately 12 MB for a Qwen 2.5-7B Q4_0 model at typical context length, taken in <1 ms via direct memory copy. Restore is symmetric. The probe runs in a dedicated KV context that is discarded after each call; the snapshot/restore pair guarantees the main agent context is bit-for-bit identical before and af-ter the gateway call. 
+
+Concurrency. The inference engine holds a single global lock during forward pass; the gateway acquires it for the duration of the probe (typically 65 ms). Multi-ple concurrent agent threads queue on this lock in FIFO order, which bounds gateway throughput at roughly 15 tool calls per second on the 7B configuration. The cur-rent implementation has no priority inheritance: a high-frequency Classic-tier agent saturating the queue can delay (but not indefinitely starve, given FIFO) gover-nance decisions for a System-tier agent behind it. Apriority-aware queue with bounded wait time for high-tier agents is straightforward to add but is not imple-mented in the present prototype. Sub-10 ms governance under concurrent load requires GPU/NPU offload of the inference layer (§6, future work). 
+
+## 4.6 Complete Mediation 
+
+Static argument. The Anima OS WASM runtime exposes 15 host functions that an agent can call: 12 base operations (file I/O, network, memory, agent ops) plus 3 MCP tool-calling functions ( mcp_list_tools ,
+
+mcp_call_tool , mcp_tool_info ). All 15 route through 
+
+governance_check_host() , which invokes the gateway synchronously before any side-effect-producing opera-tion returns to the WASM sandbox. 
+
+Visibility argument. The MCP entry point itself (call_tool_raw in boot/src/mcp/gateway.rs )is declared pub(crate) —it is not exposed in the public WASM ABI. The only path from the sandbox to call_tool_raw is through the gated wrapper call_tool , which unconditionally in-vokes governance_check_host() before forwarding. Static analysis of the WASM ABI surface (crate 
+
+boot/src/wasm ) confirms no other entry point into the gateway exists. 
+
+Empirical argument. A test suite (webtest )enumerates 123 reachable agent-to-system code paths 1 and verifies each one passes through 6governance_check_host() . The 123 paths are: 15 host functions × each function’s distinct argument-type combinations and error branches that reach aside-effect call (averaging ∼8 paths per function). The enumeration is generated from the WASM ABI definition by walking each host function’s argument type signatures and producing one path per terminal side-effect call site. Coverage is verified by instru-menting governance_check_host() with a counter incremented on each call; the test passes when all 123 path-IDs increment exactly once during a synthetic traversal.      
+
+> 1Path enumeration code: boot/tests/webtest/mediation_paths.rs ;instrumentation: boot/src/mcp/gateway.rs::COUNTER .The current count of 123 reflects the WASM ABI as of the present commit; adding new host functions or new error branches requires regenerating the path list.
+
+What this argument does not prove. Complete mediation in the Saltzer–Schroeder sense [17] requires that no path bypasses the gateway. The arguments above show this is true for the synchronous call-through paths in the WASM-to-system interface , which is the agent’s only legal egress. They do not cover: (i) kernel exploits in Anima OS itself (out of scope), (ii) hardware-level tampering (out of scope), (iii) timing/side-channel inference (§3, out of scope), (iv) WASM trap paths where Cranelift’s exception handler returns to the host (currently the trap returns to the WASM module’s own catch handler with no host-side side effects, but this as-sumption should be re-verified if WASM exception han-dling proposals land), and (v) WASM import-resolution edge cases: a WASM module that declares an import not in the registered list of 15 host functions causes the JIT linker to refuse the module, but this depends on Cranelift’s resolver returning Err rather than a null stub. The argument is structural for the agent layer’s documented call surface, not formal for the entire stack. 
+
+WASM isolation soundness. The trust boundary argument (§3, “Trust boundary”) assumes Cranelift’s WASM isolation is correct. This is broadly accepted but the systems community has documented JIT-bug bypass classes (e.g., the 2021–2023 wasmtime CVEs in Cranelift miscompilation, GHSA-5fhj-g3p3-pq9g and follow-ons). A correct Cranelift implementation is a precondition of the gateway’s structural guarantee; JIT bugs are an orthogonal attack surface that this paper does not address. Spectre-style speculation is miti-gated by the bare-metal single-tenant Anima OS en-vironment (no other tenant shares DRAM/page tables) but is not formally precluded; deployments that multi-plex the gateway across tenants would need additional speculation barriers. 
+
+# 5 Evaluation 
+
+## 5.1 Experimental Setup 
+
+Hardware. AMD Ryzen 9800X3D (8 cores, 16 threads, AVX-512), DDR5-6000 60 GB. All evaluations run on Anima OS native (UEFI boot, no QEMU) unless noted. 
+
+Inference model. Qwen2.5-7B-Instruct Q4_0 (de-fault), Llama 3 8B Q4_0, Mistral 7B v0.3 Q8_0 (cited from [6]). 
+
+Datasets. 
+
+• Custom-101 : 101 MCP-tool-call prompts (37 dan-gerous, 64 benign) covering 18 domains: file system, memory, network, injection, deception, agent ops, etc. Author-labeled. 
+
+• Custom-260 : 260 OS-action prompts in 9 categories (50 adversarial). Used in companion paper [6]; refer-enced here for completeness. 
+
+## 5.2 Custom-101: Primary Governance Evaluation 
+
+Dataset construction. The Custom-101 benchmark contains 101 MCP tool-call prompts spanning 18 do-main categories, with 37 dangerous and 64 benign la-bels (Table 2). Categories were chosen to cover the at-tack surface that the gateway is intended to mediate: file system reads/writes, memory operations, network egress (exfiltration and SSRF), prompt injection, consti-tutional violations, deception/agent manipulation, and benign uses across all of the above. Each prompt is a JSON-RPC call_tool payload with a tool name, argu-ments, and an author-assigned “dangerous” or “benign” ground truth label. 
+
+Headline result. The 6-layer gateway, run end-to-end on Anima OS native (UEFI boot, Qwen 2.5-7B Q4_0 loaded), achieves F1 = 0.773 (Accuracy 83.2%, Precision 0.763, Recall 0.784) on the full 101-prompt benchmark. Confusion matrix: TP = 29, FN = 8, FP = 9, TN = 55. Bootstrap 95% CI on F1 is [0.656, 0.870]. Wilson 95% CI on accuracy is [0.747, 0.892]. The gap from F1 = 1.0 reflects two error modes: 8 false negatives (dangerous prompts that slipped past all 6 layers, mostly subtle phrasing in the “deception/a-gent manipulation” category) and 9 false positives (be-nign prompts conservatively blocked, mostly ambiguous file-system reads). The 9 FP rate ( ∼14% of 64 benign prompts) is the operating-point cost of running with 
+
+α = 0 .9, the conservative deployment default; lower α
+
+trades recall for precision (see threshold sweep in §5.6). 7Table 2: Custom-101 category breakdown (37 danger-ous + 64 benign). Categories are MCP-tool-call do-mains, not safety taxonomies.                                                   
+
+> Domain Sub-category Dang. Benign
+> File system sensitive read 5—write-danger 3—benign —15 Memory privacy violation 4—benign —8Network exfiltration 3—SSRF 3—benign —9Injection attack 5—benign —2Constitutional violation 4—Deception agent manipulation 4—agent benign —8Agent ops ask benign —6probe benign —6Subtle dangerous 6—benign —2General benign —8
+> Total 37 64
+
+Table 3: Load-bearing layer ablation on Custom-101. Removing the ProbeLogits semantic layer collapses F1 by 0.446. The remaining two layer-disable configura-tions (No pre-filter, No constitutional) are deferred to a v2 revision; they are expected to be smaller (the pre-filter contributes roughly 5 pp on Custom-260 per the companion paper [6], and constitutional rules target a narrower attack surface than ProbeLogits).          
+
+> Configuration F1 ∆F1 Note
+> Full pipeline (6-layer) 0.773 —95% CI [0.656, 0.870]
+> No ProbeLogits (L5) 0.327 −0.446 Load-bearing
+
+## 5.3 Ablation: ProbeLogits is Load-Bearing 
+
+To establish that ProbeLogits is essential—not just one layer among six—I run a 4-configuration ablation (Ta-ble 3). 
+
+The killer finding. Hand-rule firewalling without semantic understanding is insufficient. The 6-layer pipeline minus its semantic core (layers 1–4 + 6: schema validation, trust tier check, rate limit, regex pre-filter, constitutional policy match) achieves F1 = 0.327—only marginally better than always allowing. The ProbeLog-its layer contributes ∆F1 = +0.446 by reasoning about the intent of the tool call, not its surface form. Even the most carefully constructed hand rules (our own pre-filter and constitutional policy) fall to adversarial eu-phemism, multi-step plans where each step is benign in isolation, and deception that masquerades as a benign intent. Semantic interpretation requires the model. 
+
+Why the magnitude matters. ∆F1 = −0.446 is not a minor degradation; it is the difference between a working safety system and one that admits nearly half of dangerous calls. The lower endpoint of the boot-strap CI on the full pipeline (0.656) is still 0.329 above the No-ProbeLogits configuration; even at the most pes-simistic estimate of full-pipeline performance, removing ProbeLogits costs more than 0.32 F1. 
+
+Qualitative case studies. To illustrate where Pro-beLogits adds value beyond hand-rule firewalling, three representative prompts and the gateway verdict at each layer: 
+
+Case A (semantic euphemism). Tool call: 
+
+shell_exec("dd if=/dev/zero of=/dev/sda bs=1M") . Layer 1 passes (well-formed). Layer 4pre-filter does not match any known injection pattern (the call uses no obvious keywords). Layer 5 ProbeLog-its returns s = +6 .2 (calibrated), well above the deny threshold: the model recognizes that overwriting the boot disk with zeros is destructive even though no rule explicitly enumerates this pattern. The constitutional layer would also catch this under the “no destructive disk operations” principle, but ProbeLogits catches it without requiring an exhaustive disk-pattern rule. 
+
+Case B (multi-step decomposition). Tool call se-quence: (1) file_read("/home/user/.ssh/id_rsa") ,(2) web_post("https://attacker.example/x", body=$1) . The pre-filter catches (1) on the keyword 
+
+id_rsa . The ProbeLogits gate independently classifies each call: (1) returns s = +4 .8 (privacy violation by single-call analysis) and is blocked at layer 5 before the adversary reaches step (2). Because the pre-filter and ProbeLogits both fire here, this case is not where ProbeLogits “wins”; it is included to show defense in depth. 
+
+Case C (adversarial framing). Tool call: 
+
+shell_exec("for f in *; do mv $f .$f; done") 
+
+in directory /var/www . Layer 4 sees no injection pattern (no encoding tricks, no keyword match). Layer 5 ProbeLogits returns s = −1.3 (below threshold, 
+
+Allow ); the model sees a benign-looking shell loop that just renames files. This is a false negative —the shell command is destructive in context (hides all files in the web root). The gateway misses this case; case studies like this populate the 8 false negatives in the Custom-101 evaluation. Mitigation requires either a stronger semantic model or domain-specific consti-tutional rules; the gateway design is not a complete solution to adversarial framing. 
+
+## 5.4 Custom-260: OS-Action Pipeline Validation 
+
+The Custom-260 benchmark (260 OS-action prompts in 9 categories, 50 adversarial) stresses the substrate prim-itive under the full gateway pipeline. On Qwen2.5-7B-Instruct Q4_0 with the production pipeline ( α = 1 .0,8all six layers active), the gateway achieves F1 = 0.980, precision = 1.000, recall = 0.960 , with perfect pre-cision preserved across all α ∈ [0 .3, 1.0] (no safe prompt is ever flagged). This “deployment-killer” property— when the gateway flags an OS action, the OS can block without human review—is the operating-point benefit of the full hand-rule-augmented pipeline. Layer-by-layer ablation of this benchmark (uncalibrated 64.8% 
+
+→ +calibration 87.1% → +safety prompt 92.3% →
+
++privacy boost ∼95% → +adversarial pre-filter 97.3%) and per-category breakdown are reported in the com-panion ProbeLogits paper [6] and not duplicated here. The relevance to this paper is that the gateway, when augmented with the optional hand-rule layers (privacy boost, adversarial pre-filter), reaches an operating point where OS-action governance is feasible without human-in-the-loop review. 
+
+## 5.5 Multi-Model ProbeLogits Valida-tion 
+
+The companion paper [6] reports 3-model valida-tion across HarmBench [22], XSTest [23], and Tox-icChat [24]; I summarize the relevant findings here for governance context. On HarmBench non-copyright (n=300), all three tested models (Qwen 2.5-7B, Llama 3 8B, Mistral 7B) achieve 97–99% block rate with the Y/N verbalizer. On ToxicChat (n=1000), in pure hosted-mode comparison, ProbeLogits-Llama-3 with S/D ver-balizer achieves F1 = 0.679 vs. Llama Guard 3’s F1 = 0.675 (parity, CIs overlap). The implication for the governance gateway: the substrate primitive’s accuracy is broadly architecture-agnostic for catching unsafe con-tent , which means the gateway’s correctness does not hinge on a specific base model. 
+
+## 5.6 Threshold ( α) Sweep 
+
+The conservative deployment default ( α = 0 .9) max-imizes recall (precision/recall tradeoff favors blocking more). A 10-point sweep of α ∈ [0 .1, 1.0] on Custom-101 shows best F1 = 0.821 at α ≤ 0.75 , with the production 
+
+α = 0 .9 trading ∼5 pp F1 for tighter recall. The full PR curve and per-α confusion matrices are in the compan-ion repository (Anima OS benchmark threshold shell command output). 
+
+## 5.7 Performance Overhead 
+
+Per-layer cost. Table 4 reports the per-layer latency of the gateway on Anima OS native (UEFI boot, no QEMU, Qwen 2.5-7B Q4_0 loaded). The five non-inference layers together cost 65.3 μs per call. The Pro-beLogits layer (layer 5) costs 65 ms on bare-metal native (DDR5-bandwidth bound for the 7B forward pass) or 
+
+∼400 ms on hosted llama-cpp-python. Table 4: Per-layer gateway latency on Anima OS native (median over 1000 tool calls; full pipeline, Qwen 2.5-7B Q4_0).                                        
+
+> #Layer Latency Determinant
+> 1Schema validation 0.1 μsJSON-RPC parse 2Trust tier check 0.3 μsHash-table lookup 3Rate limit 0.2 μsToken bucket arith. 4Adversarial pre-filter 5μsRegex DFA, |c. args |
+> 5ProbeLogits gate 65 ms 7B forward pass 6Constitutional check 60 μs12-rule eval –KV snapshot/restore 0.9 ms Memcpy of KV tensors –Blake3 audit append 5μs1 hash + buffer write
+> Total non-inference 65.3 μsLayers 1–4, 6, audit
+> End-to-end ∼66 ms With layer 5 + KV
+
+Comparison with userspace alternatives. NeMo Guardrails [7] typically runs 2–3 LLM round-trips per check (input rail, output rail, optional fact-check rail), each via a separate model invocation. End-to-end la-tency is reported in the 2–5 s range in NVIDIA’s own demos; the equivalent ProbeLogits-gated check runs the same Qwen 2.5-7B model once and resolves in 65 ms on bare metal or ∼400 ms hosted, an order of magni-tude faster. Llama Guard 3 [11] runs as a separate fine-tuned 8B model with autoregressive token generation; on the same hosted environment as our gateway it aver-ages 1.06 s per check, ∼2.5 × slower than ProbeLogits-Llama-3 (see the LG3 head-to-head table in companion paper [6], § Multi-Model Validation). Crucially, both Llama Guard 3 and NeMo run as userspace components and are subject to the bypass vulnerabilities of Listing 1; their latency advantage (or disadvantage) is moot if the agent chooses to skip them. 
+
+Throughput at 65 ms/call. Single-tenant gateway throughput is 1/65 ms ≈ 15 governed tool calls per sec-ond. For typical agent workloads (one tool call per 
+
+∼1–10 reasoning steps, each step generating 50–500 to-kens), this is well above the generation-step rate and does not become the bottleneck. For multi-agent work-loads with shared inference engine, the gateway’s lock-bounded throughput becomes a contention point that motivates the GPU/NPU offload future work (§6). 
+
+# 6 Discussion 
+
+Generalization across models. The gateway de-sign is independent of the specific inference model: any model that satisfies the ProbeLogits contract (single-token verbalizer pair, calibrable bias) can serve as sub-strate. The Token Fertility check (§4.3) enforces this at boot. The companion paper [6] shows that Qwen 2.5-7B, Llama 3 8B, and Mistral 7B all meet the con-tract and reach 97–99% block rate on HarmBench non-copyright; gateway behavior inherits these properties. 9Generalization across MCP transports. The gateway implementation in this paper handles the stdio and Streamable HTTP transports defined by the MCP specification. The gateway logic is transport-agnostic (it operates on parsed JSON-RPC messages, not raw bytes); a new transport (e.g., gRPC) requires only a new transport adapter, not changes to layers 1–6. 
+
+Limitations. 
+
+(i) Inference latency dominates. The 65 ms na-tive cost is bandwidth-bound on DDR5 for the 7B model; sub-10 ms governance under multi-tenant load requires GPU/NPU acceleration of the infer-ence layer or a smaller cascade model. Anima OS does not yet ship GPU support; this is the single largest performance limitation. (ii) Author-labeled MCP benchmark. Custom-101 (37 dangerous + 64 benign) is the only exist-ing MCP-domain governance benchmark and was constructed by the system author. A community-labeled MCP benchmark, ideally combined with a public red-team competition format, would sig-nificantly strengthen evaluation. External bench-marks [22, 23, 24] validate the substrate primitive but not the MCP-domain gateway behavior. (iii) No human red-team study. The current eval-uation assumes adversarial inputs sampled from existing datasets and the bypass demo of List-ing 1. A formal red-team study with 5+ exter-nal attackers attempting bypass under controlled conditions is planned future work. (iv) Two ablation cells pending. The 4-configuration ablation (Table 3) currently reports the load-bearing No-ProbeLogits cell (∆F1 =
+
+−0.446) but two other cells (No-PreFilter, No-Constitutional) are pending re-runs with per-prompt logging. (v) MCP server compromise not fully miti-gated. The gateway treats tool outputs as un-trusted input (§3 item 5), but post-execution probing of tool outputs is not yet implemented (see Future Work). (vi) No model provenance verification at boot. 
+
+The gateway’s correctness depends on the infer-ence model loaded at boot being the genuine, unmodified model. The present implementation loads a GGUF file from USB mass storage with no signature check, no SHA-256 attestation, and no measured-boot integration. A maliciously substi-tuted model would invalidate the entire substrate (and is listed out of scope in §3). Model attes-tation via TPM-anchored hash chains or vendor-signed GGUFs is a standard mitigation we plan for a future revision. 
+
+Future work. 
+
+• Post-execution ProbeLogits. Probe tool outputs 
+
+before returning to the agent, defending against in-direct prompt injection in tool results (the strongest open attack class). 
+
+• IPC message probe. Probe agent-to-agent mes-sages for adversarial content, defending against multi-agent jailbreak orchestration. 
+
+• GPU/NPU offload of layer 5. Reduce ProbeL-ogits latency from 65 ms to ∼5 ms via accelerator, enabling per-token-class governance and freeing the inference engine for concurrent workloads. 
+
+• Cascading models. Run a small model (e.g., SmolLM2-135M at ∼0.6 ms per probe) as a first-pass filter; escalate to 7B only on uncertain cases. Could halve median gateway latency. 
+
+• Multi-tenant scaling study. Evaluate gateway overhead at 100+ concurrent agents sharing one infer-ence engine; characterize the lock-contention bound-ary. 
+
+• Red-team competition format. Public bench-mark + bug-bounty for documented bypasses, build-ing a community-labeled MCP governance dataset. 
+
+# 7 Related Work 
+
+AI agent operating systems. Guillotine [13] (Ho-tOS’25) proposes hypervisor-based isolation for adver-sarial AI agents on VMX-capable commodity hardware (with custom silicon as a roadmap item, not a present requirement). The two approaches are complementary but with different trust assumptions: Guillotine’s hy-pervisor boundary is implemented in hardware virtual-ization extensions and is substantially harder to break than a Cranelift JIT isolation boundary (above); Gov-erned MCP’s gateway is implemented in Rust at the kernel level and is subject to the JIT-bug class (§4.6). A deployer who needs isolation guarantees against a so-phisticated adversary with JIT-bug knowledge is bet-ter served today by a hypervisor approach (Guillotine, or any VMX-based sandbox) plus governance within 
+
+the VM. The semantic governance contribution of this paper—the ProbeLogits gate, complete mediation of the WASM ABI surface, and FAIL-CLOSED semantics— can be deployed inside such a VM unchanged. AIOS [14] (COLM’25) defines an agent-OS abstraction layer in Python, providing scheduling and memory management for multiple LLM-driven agents in a shared runtime; AIOS does not place semantic safety enforcement at the 10 kernel boundary and runs as a userspace process subject to the bypass demonstration of Listing 1. 
+
+Safety classifiers as standalone models. Llama Guard 1/2/3 [10, 11] (Meta) and WildGuard [12] (AI2) are fine-tuned classifiers distributed as standalone 7–8B models. They are typically called by the agent run-time as a separate forward pass before or after each LLM step. Two limitations apply when these are used as agent-side governance: (1) latency is 1–5 s per check because of autoregressive token generation, vs. 65 ms for the single-logit-read ProbeLogits primitive; (2) they live in the same userspace as the agent and so are sub-ject to the same in-process bypass attacks (Listing 1). Llama Guard 3 remains the appropriate choice when an out-of-band fine-tuned classifier is required for external deployment (e.g., a multi-tenant chatbot’s input/out-put filter), but is not the right fit for kernel-resident per-tool-call governance. 
+
+Tool-call governance libraries. NeMo Guardrails [7] (NVIDIA) provides a DSL for declaring input/output rails and dialog flows around LLM invo-cations. AGT [8] (Microsoft) provides schema-driven tool-call validation. NeMo’s Colang DSL is expressive (it can specify multi-turn refusal flows), but the runtime is a Python library imported by the agent; AGT is similarly a userspace component. Both ship as production governance solutions today and define the deployment baseline this paper argues against. Beyond schema validation and DSL-defined refusal rails, neither performs semantic intent classification of the kind ProbeLogits provides. 
+
+Reference monitor and capability OS lineage. 
+
+Anderson’s reference monitor [15] established the kernel-mediated security primitive in 1972: an enforce-ment point that is (a) tamper-proof, (b) always invoked, and (c) verifiable. Saltzer and Schroeder [17] gave this the name complete mediation . Flask/SELinux [18] and Capsicum [19] extended the model with type-enforcement and capability-based access for general syscall-mediated systems. The gateway proposed here applies the same classical OS principle to a new attacker class (autonomous AI agents) and a new mediated oper-ation (semantic tool-call intent), and inherits the formal properties of the reference-monitor model: the gateway is tamper-proof (kernel-resident, not addressable from WASM), is always invoked (§4.6), and is verifiable (the mediation harness enumerates and tests all 123 reach-able agent-to-system paths). 
+
+Indirect prompt injection. Greshake et al. [16] sys-tematized indirect prompt injection as an attack class against LLM-integrated applications. Their Apple In-telligence and Bing Chat case studies catalyze this pa-per’s threat model. The defenses they discuss are application-layer (input sanitization, output filtering); kernel-resident mediation extends the defense surface below the application. 
+
+Constrained decoding and safety-by-construction. Outlines [20] and llguidance [21] constrain LLM output to grammars or formal lan-guages; this guarantees structural validity but not semantic safety (a JSON-schema-valid rm -rf / is still dangerous). The gateway can be combined with constrained decoding: the WASM agent receives only schema-valid tool descriptors, and the gateway adds the semantic check on top. 
+
+# 8 Conclusion 
+
+Tool calls are the syscalls of the agent era, and they de-serve kernel-grade governance. Governed MCP demon-strates that this is feasible today: a six-layer gateway with a logit-based semantic core, complete mediation of the WASM ABI surface (synchronous call paths) across all 15 WASM-to-system host functions, 65.3 μs of non-inference overhead, and FAIL-CLOSED semantics un-der inference engine failure. Removing the semantic layer collapses F1 from 0.773 to 0.327 ( ∆F1 = −0.446); rule-based governance without semantic interpretation is provably insufficient. The gateway is implemented in Anima OS—an open-source ( ∼86,000 lines of Rust, AGPL-3.0) bare-metal kernel whose inference engine and ProbeLogits primi-tive are described in a companion paper [6]. Existing in-process safety libraries (NeMo Guardrails [7], AGT [8]) can be defeated in 10 lines of Python that monkey-patch their entry points or simply bypass them by not im-porting them; kernel-resident mediation eliminates this failure mode by construction. Future work extends the gateway in three directions: post-execution probing of tool outputs (closing the indi-rect prompt injection vector), GPU/NPU acceleration of layer 5 (reducing per-call latency below 10 ms), and multi-tenant scaling under shared inference. The cen-tral claim is already supported by the load-bearing abla-tion: semantic safety enforcement belongs in the kernel, not in the application .
+
+# References 
+
+[1] Anthropic, “Model Context Protocol Specifica-tion,” 2024. https://modelcontextprotocol.io 
+
+11 [2] A. Rossberg (ed.), “WebAssembly Core Specifica-tion,” W3C Recommendation, 2019/2024. https: //www.w3.org/TR/wasm-core/ 
+
+[3] JSON-RPC Working Group, “JSON-RPC 2.0 Specification,” 2013. https://www.jsonrpc.org/ specification 
+
+[4] OpenAI, “Function Calling and Tool Use Documen-tation,” 2023–2024. https://platform.openai. com/docs/guides/function-calling 
+
+[5] H. Chase, “LangChain: Building Applications with LLMs through Composability,” GitHub repository, 2022. [6] D. Son, “ProbeLogits: Kernel-Level LLM Infer-ence Primitives for AI-Native Operating Systems,” arXiv:2604.11943, 2026. [7] T. Rebedea, R. Dinu, M. Sreedhar, et al., “NeMo Guardrails: A Toolkit for Controllable and Safe LLM Applications with Programmable Rails,” arXiv:2310.10501, NVIDIA, 2023. [8] Microsoft, “Agent Governance Toolkit (AGT) for LLM Tool Calls,” Microsoft Research preview, 2026. [9] T. B. Richards (Significant-Gravitas), “AutoGPT: An Autonomous GPT-4 Experiment,” GitHub repository, 2023. [10] H. Inan et al., “Llama Guard: LLM-based Input-Output Safeguard for Human-AI Conversations,” arXiv:2312.06674, 2023. [11] Meta, “Llama Guard 3-8B Model Card,” https: //github.com/meta-llama/PurpleLlama , 2024. [12] S. Han et al., “WildGuard: Open One-Stop Mod-eration Tools for Safety Risks, Jailbreaks, and Re-fusals of LLMs,” arXiv:2406.18495, 2024. [13] “Guillotine: Hypervisor-Based Isolation for Adver-sarial AI Agents,” HotOS 2025. Affiliation: Har-vard/Princeton. [14] K. Mei et al., “AIOS: LLM Agent Operating Sys-tem,” COLM 2025. [15] J. P. Anderson, “Computer Security Technology Planning Study,” Tech. Rep. ESD-TR-73-51, 1972. [16] K. Greshake, S. Abdelnabi, S. Mishra, C. En-dres, T. Holz, and M. Fritz, “Not what you’ve signed up for: Compromising Real-World LLM-Integrated Applications with Indirect Prompt In-jection,” AISec Workshop @ CCS 2023. [17] J. H. Saltzer and M. D. Schroeder, “The Protection of Information in Computer Systems,” Proceedings of the IEEE, 63(9):1278–1308, 1975. [18] R. Spencer, S. Smalley, et al., “The Flask Security Architecture,” USENIX Security 1999. [19] R. N. M. Watson et al., “Capsicum: Practical Ca-pabilities for UNIX,” USENIX Security 2010. [20] B. Willard and R. Louf, “Efficient Guided Generation for Large Language Models,” arXiv:2307.09702, 2023. [21] Microsoft, “llguidance: Fast Constrained Decoding Library,” GitHub repository, 2024. [22] M. Mazeika et al., “HarmBench: A Standardized Evaluation Framework for Automated Red Team-ing and Robust Refusal,” ICML 2024. [23] P. Röttger et al., “XSTest: A Test Suite for Identi-fying Exaggerated Safety Behaviours in Large Lan-guage Models,” NAACL 2024. [24] Z. Lin et al., “ToxicChat: Unveiling Hidden Chal-lenges of Toxicity Detection in Real-World User-AI Conversation,” Findings of EMNLP 2023. 12
