@@ -1,0 +1,1796 @@
+Title: ReaLB: Real-Time Load Balancing for Multimodal MoE Inference
+
+URL Source: https://arxiv.org/pdf/2604.19503v1
+
+Published Time: Wed, 22 Apr 2026 01:10:08 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# ReaLB: Real-Time Load Balancing for Multimodal MoE Inference 
+
+Yingping Wang 1 Yi Wu 1 Xiangyu Wu 1 Junwei Cui 1 Weilin Cai 1 Zhijiang Guo 1 Jiayi Huang 1
+
+Abstract 
+
+Mixture-of-Experts (MoE) architectures are widely used in modern large language models and multimodal models. However, inference ef-ficiency is often limited by highly dynamic and skewed expert workloads across different modal-ities. During the prefill stage with large batch sizes, vision tokens frequently dominate the input sequences. Under expert parallelism (EP), this leads to severe load imbalance, where a subset of devices becomes overloaded, reducing overall system throughput. We propose ReaLB, a real-time load balancing method for multimodal MoE (MMoE) inference that introduces zero scheduling overhead. Re-aLB dynamically adjusts the computation preci-sion of MoE experts at runtime on a per-EP-rank basis. For ranks dominated by vision-heavy ex-perts, ReaLB assigns lower-precision computa-tion to improve execution efficiency by exploiting FP4 Tensor Cores. ReaLB does not require re-dundant experts or additional memory allocation. Instead, it performs layer-wise expert precision transformation on the fly and hides the associ-ated overhead within the dispatch phase before MoE computation. Experiments on representative MMoE models show that ReaLB achieves 1.29× layer-level speedup while limiting accuracy loss to within 1.2%. 
+
+1. Introduction 
+
+Mixture-of-Experts (MoE) models are widely adopted in modern generative models (DeepSeek-AI et al., 2025; Wu et al., 2024b; Du et al., 2025). From text generation to vision language tasks, MoE supports parameter-efficient scaling by activating only a subset of experts per token. However, sparse activation and input-dependent routing naturally lead to load imbalance across experts. Under expert parallelism 
+
+> 1
+
+The Hong Kong University of Science and Technology (Guangzhou), China. Correspondence to: Yingping Wang 
+
+<ywang770@connect.hkust-gz.edu.cn >.
+
+Preprint. April 22, 2026. …
+
+Embedding Vision Encoder 
+
+VL Adapter 
+
+Attention Layer 
+
+MoE Layer 
+
+Multimodal MoE  
+
+> Gate
+> ×L
+> Hot Device
+> Vision token Text token
+> …
+> …Generated token:
+> Which character from Marvel is shown in the picture?
+> Input Prompt:
+> Input Image:
+> There are three Spider-Men in the picture…
+> Expert Parallelism
+> Hot Expert
+> Concat multimodal tokens
+
+(a) Text-Image to text generation workflow of an MMoE model. 100 200 300 400 500 600 
+
+Iteration 
+
+> 0
+> 1
+> 2
+> 3
+> 4
+> 5
+> 6
+> 7
+> Top-1 Hot Rank Index
+> 1000
+> 2000
+> 3000
+> 4000
+> 5000
+> 6000
+> #Token
+> >
+> >
+> >
+> >
+> >
+> ity poral local m. Limited te 1
+> 2. Hot-spot shift
+
+(b) Dynamics of expert selection across eight devices over infer-ence iterations. 
+
+Figure 1. Motivation for real-time load balancing in multimodal MoE inference. 
+
+(EP), skewed expert selection causes significant inefficiency in both training and inference. This problem is more severe in multimodal MoE (MMoE) inference (Team, 2025c). Most prior work focuses on mitigating load imbalance dur-ing MoE training. At the model level, auxiliary balancing losses (William et al., 2022; Dai et al., 2024) and device-constrained routing (DeepSeek-AI et al., 2024) regulate gat-ing behavior to improve expert utilization. These methods, however, are not directly applicable to inference (DeepSeek-AI et al., 2025). At the system level, FasterMoE (He et al., 2022) introduces shadow experts that replicate overloaded experts across devices, at the cost of extra memory us-age and communication. EPLB (DeepSeek-AI, 2025; Xiao et al., 2025) extends similar ideas to inference, but relies on 1
+
+> arXiv:2604.19503v1 [cs.DC] 21 Apr 2026 ReaLB: Real-Time Load Balancing for Multimodal MoE Inference
+
+prediction-based scheduling, which adapts poorly to rapidly changing routing patterns. Figure 1b shows the highly dynamic nature of expert se-lection during MMoE inference (Du et al., 2025). Unlike the strong temporal locality observed in training (He et al., 2022), expert activation frequencies in inference fluctuate significantly across iterations. This behavior makes strag-glers transient and difficult to predict. As a result, an ef-fective load balancing strategy must satisfy two stringent requirements: ① reacting to fast-changing routing dynamics in real time; ② incurring minimal additional overhead to remain effective in practical deployment .To meet these requirements, we propose ReaLB , alightweight, real-time load balancing strategy for large-scale MMoE inference. Our design is motivated by the observation that, compared to text tokens, vision tokens exhibit higher redundancy along the forward pass (Chen et al., 2024b; Xing et al., 2025). We further observe that EP stragglers are often dominated by vision-heavy experts (Section 3). ReaLB dynamically balances workloads by switching such experts to lower-precision computation at runtime, reducing their execution latency while preserving accuracy for text tokens. Instead of storing pre-converted weights, ReaLB performs MoE precision switching on the fly while keeping original high-precision weights intact. The lightweight transformation cost is fully hidden through pipeline orchestration in the execution flow. As a result, Re-aLB achieves device-level load balance without additional memory footprint or latency overhead. We implement ReaLB on top of vLLM (vLLM Project, 2025) and evaluate it on large-scale multimodal MoE mod-els, including Kimi-VL (Du et al., 2025), Qwen3-VL (Team, 2025c), and ERNIE4.5-VL (ERNIE Team, 2025), using an 8× RTX 5090 cluster with EP. Results show that ReaLB improves MoE-layer performance by 1.29 × and end-to-end throughput by up to 1.53 ×, while maintaining accuracy comparable to BF16 baselines. Our main contributions are summarized as follows: • We identify and quantify real-time load imbalance in multimodal MoE inference, highlighting its modality-driven dynamics. • We propose ReaLB , a modality-aware, precision-adaptive MoE scheduling mechanism for inference-time load balancing. • We design a pipeline orchestration method that over-laps online precision switching with all-to-all dispatch, hiding transformation latency from the critical path. • We implement ReaLB in vLLM and demonstrate con-sistent performance gains on large multimodal MoE models without accuracy loss. Vision-Experts   
+
+> Gate-v
+> Text-Experts
+> Gate-t
+> Vision Encoder
+> MLP Projector
+> Vision Encoder
+> MLP Projector
+> Multimodal Self-Attn
+> Gate
+> Experts
+> Multimodal Self-Attn
+> (a) Modality-fused MMoE (b) Modality-isolated MMoE
+> Figure 2. Model architecture of multimodal MoE.
+
+2. Background & Related Work 
+
+2.1. Multimodal MoE 
+
+Multimodal large language models (MLLMs) integrate text and vision processing within a unified architecture. Com-pared to dense feed-forward layers, MoE layers provide higher capacity and better scalability for multimodal work-loads. Most existing MMoE architectures combine a Vi-sion Transformer (ViT), a vision language adapter, and an MoE-augmented LLM backbone. Figure 2 illustrates two representative designs: (1) Modality-fused MMoE: in this design (Du et al., 2025; Team, 2025c; Dai et al., 2024; Wang et al., 2025b; Guo et al., 2025), tokens from different modalities are processed jointly by MoE layers. A shared gating module routes all tokens to a common pool of ex-perts without explicit modality separation. This design is easy to train and benefits from modular reuse of pretrained ViT and LLM backbones. (2) Modality-isolated MMoE: 
+
+more recent models build MLLMs in a native manner (Wang et al., 2025c; Chen et al., 2024a; Wang et al., 2025a; Lin et al., 2024; ERNIE Team, 2025), introducing modality-isolated experts within MoE layers. The expert pool is partitioned into text experts and vision experts, allowing modality-specific learning and reducing cross-modal inter-ference. 
+
+2.2. MoE Load Balancing Systems 
+
+Sparse activation and input-dependent routing make load im-balance inherent in distributed MoE inference under expert parallelism (EP). In practice, imbalance arises across multi-ple system dimensions and directly limits throughput. We summarize two main sources of load imbalance in EP-based MoE systems. 
+
+Computation. Routing decisions in MoE are highly skewed across experts and vary across inputs and modali-ties. With static expert-to-GPU mapping under EP, this skew translates into uneven compute load. The problem is ampli-fied in extremely sparse settings where each GPU hosts a 2ReaLB: Real-Time Load Balancing for Multimodal MoE Inference #Tokens  91%        
+
+> Rank-0
+> 45%
+> Rank-1
+> 68%
+> Rank-2
+> 56%
+> Rank-3
+> 49%
+> Rank-4
+> 77%
+> Rank-5
+> 66%
+> Rank-6
+> 77%
+> Rank-7
+> 010 20 30 40 50 60
+> Expert ID
+> #Tokens
+> 93%
+> 62%
+> 58%
+> 79%
+> 31%
+> 83%
+> 84% 72%
+> Device-level Ideal Load
+> Text Tokens per Rank
+> Vision Tokens per Rank
+> Expert-level Idea Load
+> Text Tokens per Expert
+> Vision Tokens per Expert
+
+Figure 3. Load imbalance across devices, experts, and modalities. 
+
+single expert. During inference, especially in large-batch prefill for multimodal models, vision tokens often dominate routing, creating persistent stragglers. Most existing load balancing methods target training-time optimization (Zhai et al., 2023; Jin et al., 2025; Wu et al., 2024a), such as auxil-iary routing losses (Dai et al., 2024) or capacity-based token dropping (William et al., 2022), and are not suitable for inference. Runtime approaches based on expert replication or replacement (He et al., 2022; Nie et al., 2023; DeepSeek-AI, 2025; Huang et al., 2023; Liu et al., 2025) attempt to rebalance load, but rely on prediction-based scheduling and introduce extra communication due to expert weight migra-tion. Recent work, LPLB (DeepSeek-AI, 2025), extends EPLB by adopting a similar prediction-based hot expert identification mechanism, and further leverages linear pro-gramming (LP) to redistribute token traffic more evenly across experts. However, when invoked at high frequency to approximate real-time load balancing, its additional schedul-ing overhead can outweigh the gains from improved balance, potentially leading to performance degradation. 
+
+Communication. EP requires all-to-all communication for token dispatch and result combination. Compute imbal-ance leads to synchronization stalls, where faster GPUs wait for straggling ranks. Prior work reduces communication cost through overlap and kernel fusion (Cai et al., 2025; Qin et al., 2025), but these techniques assume balanced computation. 
+
+3. Motivation 
+
+3.1. High Dynamics of MMoE Routing 
+
+We study routing dynamics during MMoE inference by collecting layer-wise routing statistics (e.g., layer 9) from Kimi-VL running on 8 GPUs, profiled with MMMU (Yue et al., 2023) over 500 iterations. Here, each iteration cor-responds to a single model forward pass under a colocated deployment setting, where prefill and decode are not sepa-0 100 200 300 400 500  
+
+> Iteration
+> 2
+> 4
+> 6
+> 8
+> 10
+> Load Imbalance (max / mean)
+> Expert-level Imbalance Device-level Imbalance
+
+Figure 4. Dynamics of imbalance severity across iterations. 
+
+rated into distinct instances. Under the continuous batching mechanism in vLLM, each batch may contain a mixture of prefill and decode requests. However, in large-batch iter-ations, which represent the main regime where MoE load imbalance tends to become the dominant bottleneck, decode tokens typically account for a small fraction (usually no more than 10%). Additional routing statistics and batching patterns are provided in Appendix B and C. 
+
+Routing Dynamics across Devices and Modalities. Fig-ure 3 shows that several ranks (e.g., Rank 0, Rank 1, and 
+
+Rank 2) process more tokens than others. Under EP execu-tion, such load skew directly leads to stragglers, since MoE computation is globally synchronized across ranks. At the expert level, the imbalance is further amplified: hot experts such as E4 and E5 on Rank 0 handle 5 ∼ 6× more tokens than the average expert. This imbalance is largely driven by modality composition of the input. In typical vision language tasks, high-resolution images produce a large number of vision tokens, while text prompts remain relatively short. However, the proportion of vision tokens varies significantly across devices. For instance, more than 90% of tokens on Rank 0 are vision tokens, whereas on Rank 1 and Rank 4, this ratio stays be-low 50%. The heterogeneity is even more pronounced at the expert level. Across different ranks, the top-1 hot ex-pert exhibits widely varying modality composition, with the fraction of vision tokens ranging from 31% to 93%. This indicates that modality-induced skew exhibits strong device-level dynamics, driven by highly variable routing behaviors at finer granularity. Overall, this highlights two key observa-tions: ① vision tokens dominate the overall workload during multimodal inference, and their distribution is highly un-even across devices; ② stragglers are primarily determined by which ranks aggregate vision-heavy experts. 
+
+Routing Dynamics across Iterations. Figure 4 shows that load imbalance fluctuates rapidly during inference. 3ReaLB: Real-Time Load Balancing for Multimodal MoE Inference Rank-0   
+
+> Rank-1
+> Rank-2
+> Rank-3
+> Rank-4
+> Rank-5
+> Rank-6
+> Rank-7
+> Top-1 rank per iter
+> Top-1 expert per iter Predicted Top-1 hot expert
+> Observed Top-1 hot expert Predicted Top-1 hot rank
+> Observed Top-1 hot rank
+> Record Historical
+> cted Predi
+> debserv O
+> !ch Mismat >
+
+Figure 5. Dynamics of the top-1 hot device and top-1 hot expert across iterations, illustrating mismatch in history-based load pre-dictions. 
+
+Within a short window, the ratio of the most-loaded expert to the average expert ranges from 2 × to 12 ×. At the device level, the peak load often exceeds the average by more than 2×, and in some cases, over 3 ×. This device-level imbal-ance becomes more pronounced as the EP scale increases, since distributing experts across more devices leads to more skewed routing and amplifies the straggler effect. Unlike MoE training, which exhibits strong temporal locality (He et al., 2022), inference routing is highly dynamic across iterations. This behavior makes future load distribution dif-ficult to predict, thereby limiting the effectiveness of static or prediction-based load-balancing strategies. 
+
+3.2. Limitations of Prediction-based LB 
+
+We analyze the limitations of prediction-based load balanc-ing for MoE inference, using EPLB (DeepSeek-AI, 2025) as a representative example. 
+
+Prediction Accuracy. EPLB uses a sliding window over past iterations to maintain a global view of expert loads and periodically rebalances experts across EP ranks. For example, with a window size of 200 and a rebalancing in-terval of 300 iterations, hot devices are identified from the average load in recent iterations, and overloaded experts are replicated accordingly. However, as shown in Figure 5, such history-based predictions fail to track the highly dy-namic load in MMoE inference. While E33 and Rank 3 are top-1 hot spots during the first 200 iterations, in the subse-quent 300 iterations, Rank 1 and E11 become the hottest. These rapid fluctuations invalidate historical statistics, caus-ing delayed or ineffective rebalancing that leaves residual stragglers. 
+
+Communication Overhead. Each rebalancing step re-quires expert redistribution across devices, incurring additional communication. Let ExpertM ap before and 
+
+ExpertM ap after denote expert-to-device mappings before and after rebalancing. If K expert replicas are migrated, the communication volume is K × Size expert , which scales linearly with the number of replicas. In large-scale EP deployments across multiple nodes, this cost becomes sig-nificant, especially when rebalancing is triggered frequently to track fast-changing inference workloads. 
+
+Memory Overhead. Prediction-based approaches also in-crease memory consumption due to redundant expert repli-cas. The memory overhead can be expressed as: 
+
+Overhead mem = L × Bytes expert × (Eoriginal + Eredundant )
+
+NEP 
+
+,
+
+where L is the number of MoE layers, Bytes experts is the memory footprint of a single expert, Eoriginal and Eredundant 
+
+denote the numbers of original and redundant experts, re-spectively, and NEP is the number of EP ranks. For DeepSeekV3, adding just one redundant expert per EP rank results in approximately 2.4 GB of additional memory foot-print (vLLM Documentation, 2025), which directly limits the achievable batch size and overall inference throughput. 
+
+3.3. Demands for Real-time Load Balancing 
+
+The rapid and unpredictable routing dynamics in MMoE in-ference create strong demands for real-time load balancing. Hot experts and overloaded devices can shift within a few steps, causing stragglers to move quickly across layers or even between consecutive forward passes (iterations). This volatility makes historical predictions unreliable. Notely, in-creasing the frequency of prediction does not necessarily im-prove accuracy under such dynamics, while each invocation incurs non-trivial overhead. As a result, prediction-based approaches face fundamental difficulty in achieving efficient real-time load balancing. An effective strategy must there-fore adapt online and react to the actual routing pattern at every step, immediately before each MoE layer forward. Furthermore, real-time balancing must remain lightweight. Complex scheduling or frequent expert migrations can easily negate performance gains, particularly in large-scale EP deployments. Consequently, the balancing mechanism must introduce negligible overhead to ensure it improves overall inference throughput without adding to the critical path. 
+
+4. Design 
+
+4.1. System Overview 
+
+The overall workflow of ReaLB is illustrated in Figure 6. ReaLB integrates into existing multimodal LLM inference frameworks such as vLLM (vLLM Project, 2025) and SGLang (Zheng et al., 2025), and performs online load balancing at the granularity of EP ranks during MMoE in-ference. On each EP rank, the inference pipeline proceeds through the following stages: 4ReaLB: Real-Time Load Balancing for Multimodal MoE Inference NVFP4 MoE GEMM 
+
+Attn 
+
+> E0
+
+Gate 
+
+> E1
+
+Attn 
+
+> E2
+
+Gate 
+
+> E3
+
+Attn 
+
+> E4
+
+Gate 
+
+> E5
+
+Attn 
+
+> E6
+
+Gate       
+
+> E7
+> EP Rank-0 EP Rank-1 EP Rank-2 EP Rank-3
+> Communication
+> BF16 MoE GEMM
+> Communication
+> ReaLB ①Modality-aware LB Scheduler
+> ②Pipeline Orchestrator
+> MMoE Computation
+
+Figure 6. The system overview of ReaLB. 
+
+① Routing and Profiling: Input tokens are processed by the attention and gating modules on the local rank. This stage produces real-time expert routing decisions and token-level load statistics. 
+
+② Modality-aware LB Scheduling: The real-time modality-aware LB scheduler analyzes device-level imbalance based on the current routing results. It iden-tifies overloaded ranks dominated by vision-heavy ex-perts and generates a scheduling plan that specifies device-level GEMM precision (§4.2), enabling strag-gling ranks to accelerate execution via low-precision hardware units. 
+
+③ Pipeline Orchestration: The orchestrator executes the scheduling plan by collecting metadata and performing online MoE precision transformations (e.g., BF16 to FP4). These operations are specifically overlapped with inter-device communication (e.g., All-to-All Dispatch ) to hide the transformation latency from the critical path (§4.3). 
+
+④ Balanced MoE Execution: Each EP rank executes the MMoE computation according to the generated plan, leveraging high-efficiency FP4 Tensor Cores for vision-heavy stragglers to rebalance total execution time across ranks. 
+
+4.2. Real-time Modality-aware LB Scheduling 
+
+To mitigate modality-induced load imbalance under expert parallelism, ReaLB performs modality-aware load balanc-ing online before each MoE layer. The scheduler operates at the granularity of EP ranks and makes decisions solely based on the current routing results, avoiding reliance on historical statistics or offline predictions. This design en-ables ReaLB to react promptly to highly dynamic routing patterns while maintaining a controllable trade-off between efficiency and accuracy. ReaLB reduces computation pressure on overloaded devices through device-level low-precision GEMM execution. Let 
+
+Load d denote the total token load observed on device d, and let Ideal d denote a reference load, such as the average load E12 E13 E14 E15 E11 E10          
+
+> FLOPS ×4
+> TC
+> E0E1E2E3
+> EP Rank-0
+> E4E5E6E7
+> EP Rank-1 Text tokens Vision tokens
+> Vision-heavy device
+> Hot Device
+> W4A4 GEMM W16A16 GEMM
+> E8E9
+> EP Rank-2 EP Rank-3 Hot Device
+> W16A16 GEMM
+> Text-heavy device
+> W16A16 GEMM
+> NVFP4 MoE GEMM BF16 MoE GEMM
+> Accelerated
+> Protected
+
+Figure 7. Modality-aware, layer-wise scheduling for device-level load balancing in MMoE. 
+
+across all EP ranks. A device d is identified as a hot device if  
+
+> Load d
+> Ideal d
+
+> C , where C > 1 is a user-defined capacity factor. As discussed in Section 3, multimodal inference is typi-cally dominated by vision tokens. To capture this modal-ity skew, ReaLB characterizes each device using the ratio 
+
+Rvd = Nvd  
+
+> Nvd +Ntd
+
+, where Nvd and Ntd denote the numbers of vision and text tokens routed to device d, respectively. If 
+
+Rvd > M d, where Md is a predefined threshold, the device is classified as vision-heavy . All experts hosted on such devices are designated as compressible and scheduled for execution with low-precision GEMM kernels. To illustrate the effect of the thresholding mechanism, we consider a representative example: as shown in Fig-ure 7, both Rank 1 and Rank 2 are identified as hot devices. However, Rank 1 is dominated by vision tokens, whereas 
+
+Rank 2 processes a more balanced mixture of modalities. With Md = 0 .7, ReaLB classifies Rank 1 as vision-heavy and assigns it to W4A4 GEMM execution on FP4 Ten-sor Cores. This configuration delivers approximately 4×
+
+higher throughput than BF16/FP16 execution on RTX 5090 GPUs (NVIDIA Corporation, 2025), while other EP ranks maintain their original precision. Since computation im-balance in MMoE inference is primarily caused by con-centrated routing of vision tokens, targeting these hotspots yields the largest system-level gains with minimal impact on text token accuracy. 
+
+4.3. Online Precision Transformation Pipeline 
+
+To support real-time precision switching without increas-ing memory footprint, ReaLB performs on-the-fly precision transformation . Each expert stores only its original high-precision weights alongside precomputed scaling factors required for low-precision conversion. When the scheduler assigns a new precision configuration, the selected expert groups are quantized online to the target precision and im-5ReaLB: Real-Time Load Balancing for Multimodal MoE Inference Attn       
+
+> Dispatch GMMoE Combine TS
+> Naive LB Orchestrator Overhead
+> (a) Sequential pipeline. Attn
+> Dispatch
+> GMMoE
+> Combine
+> T
+> ReaLB Orchestrator
+> S
+> (b) Overlapping pipeline.
+> Figure 8. Pipeline orchestration in ReaLB to fully hide load bal-ancing overhead.
+
+mediately launched for computation. This design eliminates the need for maintaining multiple precision copies of expert weights, which would otherwise significantly increase the memory overhead in large-scale MMoE models. While online transformation introduces additional compu-tation, ReaLB is designed to mask this overhead entirely. ReaLB manages two primary sources of runtime latency: ①
+
+Scheduling Metadata: Routing statistics are synchronized across EP ranks via a lightweight allgather . ② Quan-tization Latency: The transformation latency of weights from high to low precision (e.g., BF16 to FP4). Under the standard DP attention and EP MoE deployment, tokens are dispatched to their target devices after gating, and MoE com-putation is then executed sequentially. This conventional execution flow is illustrated in Figure 8a, where precision transformation and communication are serialized with com-putation. To prevent these overheads from offsetting the benefit of load balancing, ReaLB adopts a pipelined execution design that overlaps scheduling ( S) and weight transformation ( T)with communication, effectively removing them from the critical path. Specifically, routing statistics are collected after gating and straggling experts are identified. Weight quantization for these experts is triggered concurrently with token Dispatch , which dominates communication latency. Unlike weight quantization, activation quantization depends on the received tokens and therefore cannot be performed in advance. ReaLB addresses this dependency by fusing activation quantization directly into the expert computation kernels, introducing negligible additional cost. As shown in Figure 8b, this overlapping pipeline fully hides both schedul-ing and quantization overhead, enabling real-time load bal-ancing without adding latency to the MoE forward pass. 
+
+4.4. Adaptive ReaLB Activation 
+
+ReaLB is designed to operate only when MoE inference enters a compute-bound regime. For small batch sizes, MoE # 
+
+> Compute-bound
+> Enable ReaLB
+> Non-Compute-bound
+> Figure 9. ReaLB is enabled only in the compute-bound regime with large batch sizes.
+
+latency is dominated by non-GEMM operations, such as token alignment, activation functions, reduction, and ker-nel launch overhead. In this regime, load imbalance across EP ranks has a negligible impact on overall latency; conse-quently, enabling load balancing offers diminishing returns. Figure 9 illustrates this behavior for Kimi-VL on RTX 5090. When the per-rank token count is below 256, GEMM exe-cution accounts for a small fraction of the total MoE layer latency. However, as the batch size grows from 256 to 16k, GEMM increasingly dominates, and straggler ranks with heavier token loads directly dictate the layer latency. Modality-induced skew, where vision tokens concentrate on specific ranks, is amplified in these scenarios and becomes the primary system bottleneck. To avoid unnecessary scheduling logic, ReaLB introduces a global batch size threshold and activates only when the total number of input tokens across all EP ranks exceeds this predefined limit. Since each rank may receive a different number of tokens, using a global threshold ensures that ReaLB is triggered simultaneously for all ranks, preventing execution inconsistency that could break synchronization. In our implementation, we set this threshold at the point where MoE latency begins to scale linearly with token load, signaling the transition into a compute-bound state. 
+
+5. Evaluation 
+
+5.1. Setup Testbed. We implement ReaLB on vLLM v0.13.0 (vLLM Project, 2025), with mixed-precision MMoE execution built using LLM Compressor (vLLM Project, 2025) and NVFP4 GEMM kernels from FlashInfer (Ye et al., 2025). Communi-cation and computation are overlapped via CUDA streams. The system is implemented in PyTorch and Triton, and experiments are conducted on eight NVIDIA RTX 5090 GPUs under combined data and expert parallelism. Since load imbalance is negligible for small batches, we focus on compute-bound scenarios with large batch sizes, en-abling ReaLB only when a batch exceeds a specified global 
+
+batch threshold = 2048 (256 × 8 ranks ). We set the 6ReaLB: Real-Time Load Balancing for Multimodal MoE Inference 100 125 150 175 200 
+
+Iteration  
+
+> 6.0 6.5 7.0 MoE Latency (ms)
+> ReaLB Baseline EPLB
+> ReaLB: 1.14x EPLB: 1.05x
+
+(a) Kimi-VL 100 12 0 14 0 16 0 180 20 0
+
+Iteration   
+
+> 468MoE Latency (ms)
+> ReaLB Baseline EPLB
+> ReaLB: 1.29x EPLB: 0.81x
+
+(b) Qwen-VL 100 125 150 175 200   
+
+> Iteration
+> 2.5 3.0 3.5 4.0 4.5 MoE Latency (ms)
+> ReaLB Baseline EPLB
+> ReaLB: 1.27x EPLB: 0.92x
+
+(c) ERNIE-VL 
+
+Figure 10. Comparison of a single MMoE layer (i.e., layer-17) latency. 0 2 4 6     
+
+> Rank Index
+> 0246Mean Latency (ms)  1.17x 1.06x Baseline ReaLB EPLB
+> 1357
+
+(a) Kimi-VL 0 2 4 6Rank Index 012345Mean Latency (ms)  1.30x 0.95x Baseline ReaLB EPLB 1 3 5 7 (b) Qwen-VL 0 2 4 6Rank Index 0123     
+
+> MoE Latency (ms)
+> 1.26x 0.86x
+> Baseline ReaLB EPLB
+> 1357
+
+(c) ERNIE-VL 
+
+Figure 11. Comparison of MMoE layer latency across EP ranks at a representative iteration (i.e., layer-17, iter-110). 
+
+capacity factor C = 1 and the modality threshold to 0.7. 
+
+Models. We evaluate three recent open-source multimodal MoE models: Kimi-VL-A3B-Instruct (Du et al., 2025) (Kimi-VL), Qwen3-VL-30B-A3B-Instruct (Team, 2025c) (Qwen3-VL), and ERNIE-4.5-VL-27B-A3B (ERNIE Team, 2025) (ERNIE-VL). For modality-isolated MMoEs such as ERNIE-VL, where each layer contains separate text and vision experts, ReaLB is applied exclusively to the vision MoE layers because the number of text tokens is typically much smaller than vision tokens in standard VL tasks. In these cases, the modality threshold is not required. This special-case configuration demonstrates ReaLB’s flexibility and applicability across different MMoE architectures. To study performance and balance trade-offs, we com-pare the following configurations: (1) Baseline: Standard W16A16 GEMM execution for all MoE layers without load balancing. (2) FP4-All: W4A4 NVFP4 GEMM ex-ecution for all MoE layers. (3) EPLB: A history - based expert -placement method (following (DeepSeek-AI, 2025)) configured with 8 redundant experts, a window size of 100, and an interval of 100. (4) Async EPLB: An asyn-chronous version of EPLB that overlaps weight transfers to reduce replacement overhead. (5) ReaLB: Our pro-posed modality - aware real -time load -balancing scheme with on -the -fly precision transformation and overlapping pipeline execution. (6) ReaLB-seq: A sequential variant of ReaLB that disables pipeline overlapping. 
+
+Metrics. We evaluate accuracy on vision-language tasks us-ing lmms-eval (EvolvingLMMs-Lab, 2025). The selected six benchmarks cover diverse modality compositions, in-cluding single-image and multi-image settings. Efficiency is measured by MoE-layer speedup (via CUDA events) and end-to-end inference throughput using the vLLM benchmark. 
+
+5.2. MMoE Layer Speedup 
+
+We benchmark the MMoE layer latency under different LB strategies over several hundred iterations, and sample 100 consecutive iterations from stable execution periods. The MoE latency excludes the dispatch and combine communi-cation phases. And the inputs are randomly generated, with each request containing a text prompt of 256 tokens and 2 images of resolution 1024 ×728 ×1. 
+
+Average Speedup of MMoE Layers across Iterations. 
+
+From Figure 10, we observe the following trends. For Kimi-VL, the Baseline latency is around 6.6 ms, while EPLB exhibits larger fluctuations between 6 ms to 7 ms, with a no-ticeable drop after iteration 120 due to a LB adjustment. In contrast, ReaLB consistently stays below 6 ms. For Qwen-VL, both Baseline and ReaLB latencies remain stable across the sampled iterations, with ReaLB achieving an average speedup of 1.29×. EPLB shows larger variability, initially reaching 9 ms, but it approaches baseline performance after replacement . For ERNIE-VL, ReaLB consistently outper-forms both baseline and EPLB. However, both methods 7ReaLB: Real-Time Load Balancing for Multimodal MoE Inference Baseline EPLB Async_EPLB ReaLB-seq ReaLB   
+
+> 10000
+> 20000
+> 30000
+> 40000
+> 50000
+> 60000
+> Throughput (tokens/s)
+> 34971.1 34470.0 34769.9
+> 44565.6
+> 53603.6
+> Speedup: 1.53x
+
+(a) Kimi-VL Baseline EPLB Async_EPLB ReaLB-seq ReaLB   
+
+> 10000
+> 20000
+> 30000
+> 40000
+> 50000
+> Throughput (tokens/s)
+> 36247.8
+> 31824.1 32023.9
+> 36823.0
+> 43385.6
+> Speedup: 1.20x
+
+(b) Qwen-VL Baseline EPLB Async_EPLB ReaLB-seq ReaLB     
+
+> 10000
+> 20000
+> 30000
+> 40000
+> Throughput (tokens/s)  36690.2 33616.6 34001.1 36491.2
+> Speedup: 1.06x
+> 38830.9
+
+(c) ERNIE-VL 
+
+Figure 12. Comparison of End-to-End throughput with 5000 multimodal requests. 
+
+show latency spikes: for EPLB, these likely result from extreme load imbalance due to its limited adjustment granu-larity and redundant budget constraints; for ReaLB, spikes may arise when modality-threshold filtering protects text-heavy hot devices, temporarily limiting acceleration. 
+
+MoE Latency Distribution across EP Ranks. Figure 11 illustrates the rank-level MMoE latency at a representative iteration. EPLB shows unstable speedups, because its expert replacement is based on historical token statistics, inaccu-rate hot-spot predictions can cause some ranks to experience worse load imbalance in practice. In contrast, ReaLB lever-ages low-precision tensor-core acceleration to significantly speed up straggler ranks that meet the criteria. For example, in Qwen-VL, FP4 GEMM acceleration on Rank 7 shifts the slowest rank from Rank 7 to Rank 4 (which was the third fastest in the baseline), resulting in an overall 1.30× speedup. In ERNIE-VL, ranks 2, 5, 6, and 7 are accelerated while the remaining ranks retain their original precision, leading to a full-layer speedup of 1.26×. These results demonstrate that ReaLB effectively mitigates device-level latency peaks. 
+
+5.3. End-to-End Throughput Improvement 
+
+We evaluate end-to-end throughput using 5k vision-text to text generation requests. Each request contains a short text prompt and two images, and the decode length is set to 8. This configuration reflects a typical VL task’s setting. Since the interconnect bandwidth between RTX 5090 GPUs is limited and not representative of server-grade hardware, we profile communication latency using high-bandwidth inter-connects such as NVLink on H20 GPUs to better expose load imbalance effects under realistic conditions. As shown in Figure 12, ReaLB achieves end-to-end through-put speedups ranging from 1.06× to 1.53× across the three models. In contrast, ReaLB-seq provides much smaller gains, as the lack of pipeline orchestration limits the ability to overlap computation and benefit from straggler acceler-ation. EPLB shows little improvement over the baseline, mainly due to poor routing locality under highly dynamic inference workloads. Async EPLB exhibits nearly iden-tical performance to EPLB, as expert replacement incurs substantial cross-rank weight transfer that is difficult to hide. 
+
+5.4. Accuracy Performance 
+
+Table 1 compares accuracy across multiple vision-language benchmarks under different load balancing strategies. EPLB is omitted since it only reassigns experts for computation without affecting accuracy. Across all three models, FP4-All consistently degrades ac-curacy on numerically sensitive benchmarks, with the most pronounced drops observed on MMMU, confirming that uniformly applying low-precision GEMM is harmful. In contrast, ReaLB limits the average accuracy loss to within 1.2 points of the baseline, and in some cases recovers or even improves task accuracy, showing that modality-aware precision control is effective. More specifically, ReaLB pre-serves MMMU accuracy by retaining BF16 computation on critical modalities, while FP4-All suffers large drops. On RealWorldQA, both FP4-All and ReaLB exhibit a similar accuracy reduction of around 3 points, suggesting that Re-aLB reduces but does not fully eliminate the exposure of text tokens to low-precision computation. 
+
+5.5. Sensitivity Study and Trade-off Analysis Experimental setup. We study the sensitivity of ReaLB to the modality threshold Md using MMMU (Yue et al., 2023), DynaMath (Zou et al., 2025), and MathVista (Lu et al., 2024) on Kimi-VL. We compare BF16, FP4-All, and ReaLB under three threshold settings ( Md = 0 , Md = 0 .7,and Md = 0 .9). We report end-to-end (E2E) speedup and accuracy loss relative to BF16. FP4-All applies uniform low-precision across all MoE layers, while ReaLB ( Md = 0 )disables modality-aware control on hot ranks, serving as a reference to isolate the effect of execution-only scheduling. 
+
+Sensitivity to modality threshold. Across all bench-marks, the three ReaLB variants achieve similar speedup (1.28 ×–1.30 ×), indicating that performance is largely in-sensitive to the choice of Md within this range. In con-trast, accuracy shows a clear dependence on Md. Both 
+
+Md = 0 .7 and Md = 0 .9 consistently reduce accuracy loss compared to Md = 0 , showing the benefit of modality-8ReaLB: Real-Time Load Balancing for Multimodal MoE Inference     
+
+> Table 1. Accuracy comparison across load balancing strategies (ReaLB: Md= 0 .7, global batch threshold = 2048 ).
+
+Model - RealWorldQA AI2D InfoVQA TextVQA MMMU MMBench AVG Kimi-VL Baseline 65.88 83.52 83.63 88.67 52.22 82.13 76.00 FP4-All 64.44 83.00 81.85 87.44 48.00 81.62 74.39 ReaLB 65.10 83.29 82.14 88.74 52.44 82.47 75.70 Qwen-VL Baseline 66.14 86.04 81.28 83.45 50.78 86.85 75.76 FP4-All 63.13 85.26 81.29 83.21 49.44 86.77 74.85 ReaLB 63.40 86.10 81.74 83.24 50.78 87.37 75.35 ERNIE-VL Baseline 68.60 85.00 63.78 84.71 51.89 82.89 72.81 FP4-All 67.45 83.13 61.86 76.07 50.01 77.06 69.26 ReaLB 67.71 83.94 64.19 82.51 52.67 78.61 71.61                                                
+
+> Table 2. Sensitivity study on Mdand trade-off analysis between efficiency and accuracy across different strategies. Baseline EPLB FP4-All ReaLB ( Md=0 )ReaLB ( Md=0 .7)ReaLB ( Md=0 .9)
+> MMMU ∆Acc 0.00 0.00 -4.22 -2.22 0.00 -0.66 E2E Speedup 1.00 0.91 1.39 1.29 1.29 1.28
+> DynaMath ∆Acc 0.00 0.00 -8.19 -2.40 -2.00 -0.30 E2E Speedup 1.00 0.96 1.41 1.30 1.29 1.29
+> MathVista ∆Acc 0.00 0.00 -2.00 -1.50 -1.10 -0.20 E2E Speedup 1.00 0.95 1.40 1.29 1.28 1.29
+
+aware control. For example, on DynaMath, accuracy loss decreases from -2.40 ( Md = 0 ) to -2.00 ( Md = 0 .7) and -0.30 ( Md = 0 .9), and on MathVista from -1.50 to -1.10 and -0.20. On MMMU, Md = 0 .7 achieves no accuracy loss (0.00), while Md = 0 .9 introduces a small drop (-0.66), indicating a mild trade-off across tasks. Overall, higher Md
+
+tends to better protect precision-sensitive computation while preserving similar efficiency. 
+
+Trade-off analysis. Compared to FP4-All, which achieves higher speedup (1.39 ×–1.41 ×) at the cost of significant accuracy degradation (e.g., -8.19 on DynaMath), ReaLB provides a more balanced trade-off. It maintains speedup close to the execution-only variant ( Md = 0 ) while substan-tially reducing accuracy loss across all benchmarks. These results show that introducing modality-aware precision con-trol improves accuracy stability with minimal impact on efficiency, leading to a more favorable operating point than uniform low-precision execution. 
+
+6. Discussion and Future Work 
+
+ReaLB is motivated by a key limitation of prior prediction-based load balancing methods such as EPLB. These ap-proaches rely on indirect signals (e.g., historical token counts) to approximate current workload, which can lead to a mismatch with the actual execution time at the MoE layer. In contrast, ReaLB directly targets execution-time im-balance and achieves real-time balancing with a lightweight mechanism, bypassing the need for explicit token-level re-distribution. This design simplifies the control logic while aligning optimization with the true system bottleneck. 
+
+Scalability and broader applicability. The benefit of Re-aLB is expected to become more pronounced at larger EP scales, as each device hosts fewer experts. In this regime, stragglers are more likely to emerge, and execution-time im-balance directly impacts overall throughput. In contrast, the overhead of ReaLB remains lightweight and does not scale with the EP degree, leading to a more favorable cost–benefit trade-off at larger scales. In addition, the design of Re-aLB is not limited to vision-language models. It can be extended to more general multimodal MoE systems that in-clude video, audio, or other modalities, where heterogeneity across modalities is even stronger. 
+
+Deployment scenarios. In large-scale LLM serving sys-tems, prefill–decode (PD) disaggregation is commonly adopted. Under this setting, ReaLB mainly applies to pre-fill workers, where computation is more intensive and load imbalance is more evident. This suggests that the practical speedup of ReaLB may be higher in production deployments than in colocated settings, since prefill often dominates the critical path in multimodal workloads. 
+
+Adaptive parameter tuning. Currently, the modality threshold ( Md) is manually configured. Although the results show that ReaLB is relatively stable across a range of values, more dynamic strategies could further improve robustness 9ReaLB: Real-Time Load Balancing for Multimodal MoE Inference 
+
+under diverse workloads. Future work will explore adaptive tuning mechanisms that adjust Md based on runtime signals, such as Additive Increase Multiplicative Decrease (AIMD), to achieve better efficiency–accuracy trade-offs. 
+
+Precision design space. ReaLB is currently built on FP4 as the lowest supported precision for hardware-accelerated GEMM. As hardware evolves, more aggressive low-precision formats may become available. This opens up a larger design space where different precision levels can be assigned across EP ranks to balance execution time. In the extreme case, it may be possible to fully replace uniform high-precision execution with a mixture of low-precision formats. More broadly, ReaLB suggests a new perspective: leveraging the latency differences introduced by mixed-precision computation as a mechanism to improve system-level efficiency in distributed MMoE inference. 
+
+7. Conclusion 
+
+We propose ReaLB , a real-time, modality-aware load bal-ancing approach for multimodal MoE inference. Unlike prior prediction-based methods, ReaLB directly targets execution-time imbalance at the MoE layer, enabling ac-curate and timely load balancing without relying on indirect workload estimation. By selectively applying low-precision execution based on modality, ReaLB mitigates stragglers caused by dynamic and skewed routing patterns. An over-lapped execution design further hides scheduling and preci-sion conversion overhead, ensuring low runtime cost. Ex-periments across multiple multimodal MoE models show that ReaLB reduces MoE latency while preserving accuracy, demonstrating the practicality of real-time load balancing for multimodal inference. 
+
+References 
+
+Baidu. Ernie-4.5-vl-28b-a3b-pt. https://huggingface. co/baidu/ERNIE-4.5-VL-28B-A3B-PT , 2025. Hug-ging Face model repository. Cai, W., Jiang, J., Qin, L., junweicui, Kim, S., and Huang, J. Shortcut-connected expert parallelism for accelerat-ing mixture of experts. In Forty-second International Conference on Machine Learning , 2025. URL https: //openreview.net/forum?id=GKly3FkxN4 .Chen, J., Guo, L., Sun, J., Shao, S., Yuan, Z., Lin, L., and Zhang, D. Eve: Efficient vision-language pre-training with masked prediction and modality-aware moe, 2024a. URL https://arxiv.org/abs/2308.11971 .Chen, L., Zhao, H., Liu, T., Bai, S., Lin, J., Zhou, C., and Chang, B. An image is worth 1/2 tokens after layer 2: Plug-and-play inference acceleration for large vision-language models, 2024b. URL https://arxiv.org/ abs/2403.06764. 
+
+Dai, D., Deng, C., Zhao, C., Xu, R. X., Gao, H., Chen, D., Li, J., Zeng, W., Yu, X., Wu, Y., Xie, Z., Li, Y. K., Huang, P., Luo, F., Ruan, C., Sui, Z., and Liang, W. Deepseekmoe: Towards ultimate expert specialization in mixture-of-experts language models, 2024. URL https: //arxiv.org/abs/2401.06066 .DeepSeek-AI. Expert parallelism load balancer (eplb), 2025. URL https://github.com/deepseek-ai/EPLB .DeepSeek-AI. Linear-programming-based load bal-ancer (lplb). https://github.com/deepseek-ai/ LPLB , 2025. GitHub repository. DeepSeek-AI, Liu, A., Feng, B., Wang, B., Wang, B., et al. Deepseek-v2: A strong, economical, and effi-cient mixture-of-experts language model, 2024. URL 
+
+https://arxiv.org/abs/2405.04434. 
+
+DeepSeek-AI, Liu, A., Feng, B., Xue, B., Wang, B., et al. Deepseek-v3 technical report, 2025. URL https: //arxiv.org/abs/2412.19437. 
+
+Du, A., Yin, B., Xing, B., Qu, B., Wang, B., et al. Kimi-vl technical report, 2025. URL https://arxiv.org/abs/ 2504.07491. 
+
+ERNIE Team, B. Ernie4.5, 2025. URL https://github. com/PaddlePaddle/ERNIE .EvolvingLMMs-Lab. lmms-eval: The evaluation suite of large multimodal models, 2025. URL https://github. com/EvolvingLMMs-Lab/lmms-eval . Accessed: 2025-09-22. Face, H. and LMMs-Lab. Ai2d, 2024. URL https: //huggingface.co/datasets/lmms-lab/ai2d . Ac-cessed: 2025-09-21. Guo, D., Wu, F., Zhu, F., Leng, F., Shi, G., Chen, H., Fan, H., Wang, J., Jiang, J., Wang, J., Chen, J., Huang, J., Lei, K., Yuan, L., Luo, L., Liu, P., Ye, Q., Qian, R., Yan, S., Zhao, S., Peng, S., Li, S., Yuan, S., Wu, S., Cheng, T., Liu, W., Wang, W., Zeng, X., Liu, X., Qin, X., Ding, X., Xiao, X., Zhang, X., Zhang, X., Xiong, X., Peng, Y., Chen, Y., Li, Y., Hu, Y., Lin, Y., Hu, Y., Zhang, Y., Wu, Y., Li, Y., Liu, Y., Ling, Y., Qin, Y., Wang, Z., He, Z., Zhang, A., Yi, B., Liao, B., Huang, C., Zhang, C., Deng, C., Deng, C., Lin, C., Yuan, C., Li, C., Gou, C., Lou, C., Wei, C., Liu, C., Li, C., Zhu, D., Zhong, D., Li, F., Zhang, F., Wu, G., Li, G., Xiao, G., Lin, H., Yang, H., Wang, H., Ji, H., Hao, H., Shen, H., Li, H., Li, J., Wu, J., Zhu, J., Jiao, J., Feng, J., Chen, J., Duan, J., Liu, J., Zeng, J., Tang, J., Sun, J., Chen, J., Long, J., Feng, J., Zhan, J., Fang, J., Lu, J., Hua, K., Liu, K., Shen, K., Zhang, K., 10 ReaLB: Real-Time Load Balancing for Multimodal MoE Inference 
+
+Shen, K., Wang, K., Pan, K., Zhang, K., Li, K., Li, L., Li, L., Shi, L., Han, L., Xiang, L., Chen, L., Chen, L., Li, L., Yan, L., Chi, L., Liu, L., Du, M., Wang, M., Pan, N., Chen, P., Chen, P., Wu, P., Yuan, Q., Shuai, Q., Tao, Q., Zheng, R., Zhang, R., Zhang, R., Wang, R., Yang, R., Zhao, R., Xu, S., Liang, S., Yan, S., Zhong, S., Cao, S., Wu, S., Liu, S., Chang, S., Cai, S., Ao, T., Yang, T., Zhang, T., Zhong, W., Jia, W., Weng, W., Yu, W., Huang, W., Zhu, W., Yang, W., Wang, W., Long, X., Yin, X., Li, X., Zhu, X., Jia, X., Zhang, X., Liu, X., Zhang, X., Yang, X., Luo, X., Chen, X., Zhong, X., Xiao, X., Li, X., Wu, Y., Wen, Y., Du, Y., Zhang, Y., Ye, Y., Wu, Y., Liu, Y., Yue, Y., Zhou, Y., Yuan, Y., Xu, Y., Yang, Y., Zhang, Y., Fang, Y., Li, Y., Ren, Y., Xiong, Y., Hong, Z., Wang, Z., Sun, Z., Wang, Z., Cai, Z., Zha, Z., An, Z., Zhao, Z., Xu, Z., Chen, Z., Wu, Z., Zheng, Z., Wang, Z., Huang, Z., Zhu, Z., and Song, Z. Seed1.5-vl technical report, 2025. URL https://arxiv.org/abs/2505.07062 .He, J., Zhai, J., Antunes, T., Wang, H., Luo, F., Shi, S., and Li, Q. Fastermoe: modeling and optimizing training of large-scale dynamic pre-trained models. In Proceedings of the 27th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming , New York, NY, USA, 2022. Association for Computing Machinery. ISBN 9781450392044. doi: 10.1145/3503221.3508418. URL 
+
+https://doi.org/10.1145/3503221.3508418 .Huang, H., Ardalani, N., Sun, A., Ke, L., Lee, H.-H. S., Sridhar, A., Bhosale, S., Wu, C.-J., and Lee, B. Towards moe deployment: Mitigating inefficiencies in mixture-of-expert (moe) inference, 2023. URL https://arxiv. org/abs/2303.06182 .Jin, C., Jiang, Z., Bai, Z., Zhong, Z., Liu, J., Li, X., Zheng, N., Wang, X., Xie, C., Huang, Q., Heng, W., Ma, Y., Bao, W., Zheng, S., Peng, Y., Lin, H., Liu, X., Jin, X., and Liu, X. Megascale-moe: Large-scale communication-efficient training of mixture-of-experts models in production, 2025. URL https://arxiv.org/abs/2505.11432 .Lab, L. Mmbench. https://huggingface.co/datasets/ lmms-lab/MMBench , 2024a. Hugging Face dataset repos-itory. Lab, L. Realworldqa. https://huggingface.co/ datasets/lmms-lab/RealWorldQA , 2024b. Hugging Face dataset repository. Lin, X. V., Shrivastava, A., Luo, L., Iyer, S., Lewis, M., Ghosh, G., Zettlemoyer, L., and Aghajanyan, A. Moma: Efficient early-fusion pre-training with mixture of modality-aware experts, 2024. URL https://arxiv. org/abs/2407.21770 .Liu, T., Peng, T., Yang, P., Zhao, X., Lu, X., Huang, W., Liu, Z., Chen, X., Liang, Z., Xiong, J., Jin, D., Zhang, M., Guo, J., Deng, Y., Zhang, X., Dong, X., Wang, S., Wu, S., Wu, Y., Tang, Z., Zeng, Y., Wang, Y., Liu, J., Kang, M., Li, M., Wang, Y., Liu, Y., Ma, X., Wang, Y., Zhang, Y., Yin, J., Zheng, K., Yin, J., Zhang, J., Wang, Z., Lin, X., Liu, L., Lan, L., Liu, Y., Peng, C., Liu, H., Ren, S., Wang, X., Shen, Y., Wang, Y., Liu, G., Chen, H., Yang, T., Yang, H., Li, J., Ding, G., and Zhang, K. xllm technical report, 2025. URL https://arxiv.org/abs/2510.14686 .Lu, P., Bansal, H., Xia, T., Liu, J., Li, C., Hajishirzi, H., Cheng, H., Chang, K.-W., Galley, M., and Gao, J. Mathvista: Evaluating mathematical reasoning of foun-dation models in visual contexts, 2024. URL https: //arxiv.org/abs/2310.02255 .Mathew, M., Karatzas, D., Manmatha, R., and Jawa-har, C. Docvqa: A dataset for vqa on document images. corr abs/2007.00398 (2020). arXiv preprint arXiv:2007.00398 , 2020. Nie, X., Miao, X., Wang, Z., Yang, Z., Xue, J., et al. Flex-moe: Scaling large-scale sparse pre-trained model train-ing via dynamic device placement. 1(1), May 2023. doi: 10.1145/3588964. URL https://doi.org/10.1145/ 3588964 .NVIDIA Corporation. NVIDIA RTX Blackwell GPU Archi-tecture . NVIDIA, 2025. URL https://images.nvidia. com/aem-dam/Solutions/geforce/blackwell/ nvidia-rtx-blackwell-gpu-architecture.pdf .Qin, L., Cui, J., Cai, W., and Huang, J. Chimera: Commu-nication fusion for hybrid parallelism in large language models. In Proceedings of the 52nd Annual Interna-tional Symposium on Computer Architecture , ISCA ’25, pp. 498–513, New York, NY, USA, 2025. Association for Computing Machinery. ISBN 9798400712616. doi: 10.1145/3695053.3731025. URL https://doi.org/10. 1145/3695053.3731025 .Singh, A., Natarajan, V., Shah, M., Jiang, Y., Chen, X., Batra, D., Parikh, D., and Rohrbach, M. Towards vqa models that can read. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition ,pp. 8317–8326, 2019. Team, M. A. Kimi-vl-a3b-instruct. https://huggingface. co/moonshotai/Kimi-VL-A3B-Instruct , 2025a. Hug-ging Face model repository. Team, Q. Qwen3-vl: A multimodal large lan-guage model series. https://huggingface.co/Qwen/ Qwen3-VL-235B-A22B-Instruct , 2025b. Accessed: 2025-10-29. Team, Q. Qwen3-vl: A multimodal large lan-guage model series. https://huggingface.co/Qwen/ 
+
+11 ReaLB: Real-Time Load Balancing for Multimodal MoE Inference 
+
+Qwen3-VL-30B-A3B-Instruct , 2025c. Accessed: 2025-10-29. vLLM Documentation. Expert parallel load bal-ancer (eplb) parameters. https://docs.vllm. ai/en/latest/serving/expert parallel deployment/#eplb-parameters , 2025. URL 
+
+https://docs.vllm.ai/en/latest/serving/ expert parallel deployment/#eplb-parameters .Accessed: 2025-10-07. vLLM Project. Llm-compressor. https://github. com/vllm-project/llm-compressor , 2025. Accessed: 2025-09-22. vLLM Project. vllm: A high-throughput and memory-efficient inference and serving engine for large lan-guage models, 2025. URL https://github.com/ vllm-project/vllm .Wang, D., Wang, S., Li, Z., Wang, Y., Li, Y., Tang, D., Shen, X., Huang, X., and Wei, Z. Moiie: Mixture of intra- and inter-modality experts for large vision language models, 2025a. URL https://arxiv.org/abs/2508.09779 .Wang, W., Gao, Z., Gu, L., Pu, H., Cui, L., Wei, X., Liu, Z., Jing, L., Ye, S., Shao, J., Wang, Z., Chen, Z., Zhang, H., Yang, G., Wang, H., Wei, Q., Yin, J., Li, W., Cui, E., Chen, G., Ding, Z., Tian, C., Wu, Z., Xie, J., Li, Z., Yang, B., Duan, Y., Wang, X., Hou, Z., Hao, H., Zhang, T., Li, S., Zhao, X., Duan, H., Deng, N., Fu, B., He, Y., Wang, Y., He, C., Shi, B., He, J., Xiong, Y., Lv, H., Wu, L., Shao, W., Zhang, K., Deng, H., Qi, B., Ge, J., Guo, Q., Zhang, W., Zhang, S., Cao, M., Lin, J., Tang, K., Gao, J., Huang, H., Gu, Y., Lyu, C., Tang, H., Wang, R., Lv, H., Ouyang, W., Wang, L., Dou, M., Zhu, X., Lu, T., Lin, D., Dai, J., Su, W., Zhou, B., Chen, K., Qiao, Y., Wang, W., and Luo, G. Internvl3.5: Advancing open-source multimodal models in versatility, reasoning, and efficiency, 2025b. URL https://arxiv.org/abs/2508.18265 .Wang, W., Lv, Q., Yu, W., Hong, W., Qi, J., Wang, Y., Ji, J., Yang, Z., Zhao, L., Song, X., Xu, J., Chen, K., Xu, B., Li, J., Dong, Y., Ding, M., and Tang, J. Cogvlm: visual expert for pretrained language models. In Proceedings of the 38th International Conference on Neural Information Processing Systems , NIPS ’24, Red Hook, NY, USA, 2025c. Curran Associates Inc. ISBN 9798331314385. William, F., Barret, Z., and Noam, S. Switch transformers: scaling to trillion parameter models with simple and effi-cient sparsity. J. Mach. Learn. Res. , 23(1), January 2022. ISSN 1532-4435. Wu, Y., Qu, W., Tao, T., Wang, Z., Bai, W., Li, Z., Tian, Y., Zhang, J., Lentz, M., and Zhuo, D. Lazarus: Resilient and elastic training of mixture-of-experts models with adaptive expert placement, 2024a. URL https://arxiv. org/abs/2407.04656 .Wu, Z., Chen, X., Pan, Z., Liu, X., et al. Deepseek-vl2: Mixture-of-experts vision-language models for advanced multimodal understanding, 2024b. URL https://arxiv. org/abs/2412.10302. 
+
+Xiao, A., He, B., Zhang, B., Baoxing Huai, B. W., et al. xdeepserve: Model-as-a-service on huawei cloudma-trix384, 2025. URL https://arxiv.org/abs/2508. 02520. 
+
+Xing, L., Huang, Q., Dong, X., Lu, J., Zhang, P., Zang, Y., Cao, Y., He, C., Wang, J., Wu, F., and Lin, D. Pyramid-drop: Accelerating your large vision-language models via pyramid visual redundancy reduction, 2025. URL 
+
+https://arxiv.org/abs/2410.17247 .Ye, Z., Chen, L., Lai, R., Lin, W., Zhang, Y., Wang, S., Chen, T., Kasikci, B., Grover, V., Krishnamurthy, A., and Ceze, L. Flashinfer: Efficient and customizable attention engine for llm inference serving, 2025. URL 
+
+https://arxiv.org/abs/2501.01005 .Yue, X., Ni, Y., Zhang, K., Zheng, T., Liu, R., Zhang, G., Stevens, S., Jiang, D., Ren, W., Sun, Y., et al. Mmmu: A massive multi-discipline multimodal understanding and reasoning benchmark for expert agi. arXiv preprint arXiv:2311.16502 , 2023. Zhai, M., He, J., Ma, Z., Zong, Z., Zhang, R., and Zhai, J. SmartMoE: Efficiently training Sparsely-Activated models through combining offline and online paral-lelization. In 2023 USENIX Annual Technical Con-ference (USENIX ATC 23) , pp. 961–975, Boston, MA, July 2023. USENIX Association. ISBN 978-1-939133-35-9. URL https://www.usenix.org/conference/ atc23/presentation/zhai .Zheng, L., Yin, L., Xie, Z., Sun, C., Huang, J., Yu, C. H., Cao, S., Kozyrakis, C., Stoica, I., Gonzalez, J. E., Bar-rett, C., and Sheng, Y. Sglang: efficient execution of structured language model programs. In Proceedings of the 38th International Conference on Neural Informa-tion Processing Systems , NIPS ’24, Red Hook, NY, USA, 2025. Curran Associates Inc. ISBN 9798331314385. Zou, C., Guo, X., Yang, R., Zhang, J., Hu, B., and Zhang, H. Dynamath: A dynamic visual benchmark for evalu-ating mathematical reasoning robustness of vision lan-guage models, 2025. URL https://arxiv.org/abs/ 2411.00836 .12 ReaLB: Real-Time Load Balancing for Multimodal MoE Inference 
+
+A. Implementation Details 
+
+Models. Our primary target is large-scale multimodal MoE models, such as Qwen3-VL-235B-A22B (Team, 2025b). However, due to GPU memory constraints (8 GPUs with 32 GB each), we evaluate ReaLB on relatively lightweight yet representative multimodal MoE models: Kimi-VL-A3B-Instruct (Team, 2025a), Qwen3-VL-30B-A3B-Instruct (Team, 2025c), and ERNIE-4.5-VL-28B-A3B-PT (Baidu, 2025). These models retain key characteristics of large-scale multimodal MoE systems, including sparse expert routing and mixed-modality token distributions. 
+
+Testbed. Our target deployment environment is large-scale server-grade GPU clusters based on the Blackwell architecture (e.g., multi-node B100 or B200 systems), where large expert parallelism (EP) exacerbates device-level load imbalance. Due to hardware availability, all experiments are conducted on a single node with 8 NVIDIA RTX 5090 GPUs (64 GB/s). As RTX 5090 is a consumer-grade GPU with limited interconnect bandwidth, MoE inference end-to-end performance in this setting is heavily communication-bound compared to server-class GPUs. To better emulate server deployment, we measure the communication latency on NVIDIA H20 GPUs using NVLink (4 TB/s) and replace the communication component in the 5090 end-to-end measurements with these high-bandwidth values. This approach preserves the computation characteristics of the 5090 setup while providing an estimate of e2e performance under high-bandwidth interconnects. The software and hardware configurations are summarized in Table 3.  
+
+> Table 3. Software and hardware configuration for experiments.
+
+Component Configuration 
+
+vLLM 0.13.0 Lmms-eval 0.5 Python 3.12 PyTorch 2.8.0 CUDA 12.8 OS Ubuntu 22.04 GPU 8 × NVIDIA RTX 5090 (32 GB each) Interconnect Gen5 PCIe, 64 GB/s per GPU CPU 100 vCPU Intel Xeon Platinum 8470Q 
+
+Datasets. We evaluate multimodal MoE models on six vision-language benchmarks using lmms-eval (EvolvingLMMs-Lab, 2025). The selected benchmarks cover diverse modality compositions: (1) RealWorldQA (Lab, 2024b): text-heavy question answering with minimal visual content; (2) AI2D (Face & LMMs-Lab, 2024): single-image diagram understanding; (3) 
+
+InfoVQA (Mathew et al., 2020): single-image information graphics reasoning; (4) TextVQA (Singh et al., 2019): single-image text understanding via OCR; (5) MMMU (Yue et al., 2023): multi-image reasoning, requiring cross-image integration; (6) MMBench (Lab, 2024a): single-image multimodal QA with a mix of perception, reasoning, and common-sense tasks. This selection spans single-image, multi-image, and relatively text-heavy scenarios, enabling evaluation of model accuracy across a variety of cross-modal reasoning challenges and ensuring that our load balancing and precision strategies are tested under diverse multimodal conditions. 
+
+B. Routing Statistics 
+
+Device-level load imbalanceness. Figure 13 shows device-level load imbalance (1× to 3×) for Kimi-VL under EP=8, measured on the MMMU dataset. 
+
+Dynamics of load distribution across devices, experts, and modalities. Figure 14 shows several representative MoE layers, illustrating how the load distribution of each device and the most selected expert (top-1 hot expert) evolve over iterations. The plots also indicate the proportion of different modality tokens, highlighting workload skew, modality imbalance, and the persistence of hotspots during inference. 
+
+Similar routing patterns across models and datasets. Figure 15 illustrates the generality of the observed routing dynamics across different models and datasets. Despite variations in model architecture and input distributions, we consistently observe similar patterns, including skewed expert selection and load fluctuations across iterations. This suggests that the routing imbalance is not specific to a particular workload, but rather an inherent property of MMoE inference. 13 ReaLB: Real-Time Load Balancing for Multimodal MoE Inference 0 100 200 300 400 500 
+
+Iteration 
+
+1.5 
+
+2.0 
+
+2.5 
+
+> Rank-level Load Imbalance (max/mean)
+
+(a) Layer 12 0 100 200 300 400 500 
+
+Iteration 
+
+1.5 
+
+2.0 
+
+2.5 
+
+3.0  
+
+> Rank-level Load Imbalance (max/mean)
+
+(b) Layer 13 0 100 200 300 400 500 
+
+Iteration 
+
+1.5 
+
+2.0 
+
+2.5 
+
+3.0 
+
+> Rank-level Load Imbalance (max/mean)
+
+(c) Layer 14 0 100 200 300 400 500 
+
+Iteration 
+
+1.5 
+
+2.0 
+
+2.5 
+
+3.0  
+
+> Rank-level Load Imbalance (max/mean)
+
+(d) Layer 15 0 100 200 300 400 500 
+
+Iteration 
+
+1.5 
+
+2.0 
+
+2.5 
+
+> Rank-level Load Imbalance (max/mean)
+
+(e) Layer 16 0 100 200 300 400 500 
+
+Iteration 
+
+1.5 
+
+2.0 
+
+2.5  
+
+> Rank-level Load Imbalance (max/mean)
+
+(f) Layer 17 0 100 200 300 400 500 
+
+Iteration 
+
+1.5 
+
+2.0 
+
+2.5 
+
+3.0 
+
+> Rank-level Load Imbalance (max/mean)
+
+(g) Layer 18 0 100 200 300 400 500 
+
+Iteration 
+
+1
+
+2
+
+3
+
+4 
+
+> Rank-level Load Imbalance (max/mean)
+
+(h) Layer 19 0 100 200 300 400 500 
+
+Iteration 
+
+1.0 
+
+1.5 
+
+2.0 
+
+2.5 
+
+3.0 
+
+> Rank-level Load Imbalance (max/mean)
+
+(i) Layer 20 0 100 200 300 400 500 
+
+Iteration 
+
+1
+
+2
+
+3
+
+4 
+
+> Rank-level Load Imbalance (max/mean)
+
+(j) Layer 21 
+
+Figure 13. Dynamics of device-level load imbalance across MoE layers 12-21. 
+
+14 ReaLB: Real-Time Load Balancing for Multimodal MoE Inference 0
+
+2000 
+
+4000 
+
+> #Tokens
+
+65% 
+
+Rank-0 
+
+67% 
+
+Rank-1 
+
+79% 
+
+Rank-2 
+
+69% 
+
+Rank-3 
+
+78% 
+
+Rank-4 
+
+66% 
+
+Rank-5 
+
+62% 
+
+Rank-6 
+
+64% 
+
+Rank-7 
+
+0 10 20 30 40 50 60 
+
+Expert ID 
+
+0
+
+500 
+
+1000 
+
+1500 
+
+> #Tokens
+
+61% 
+
+52% 
+
+89% 
+
+86% 
+
+94% 54% 
+
+77% 42% 
+
+Device-level Ideal Load 
+
+Text Tokens per Rank 
+
+Vision Tokens per Rank 
+
+Expert-level Idea Load 
+
+Text Tokens per Expert 
+
+Vision Tokens per Expert 
+
+(a) Layer 12 0
+
+5000 
+
+> #Tokens
+
+57% 
+
+Rank-0 
+
+74% 
+
+Rank-1 
+
+74% 
+
+Rank-2 
+
+67% 
+
+Rank-3 
+
+73% 
+
+Rank-4 
+
+77% 
+
+Rank-5 
+
+46% 
+
+Rank-6 
+
+73% 
+
+Rank-7 
+
+0 10 20 30 40 50 60 
+
+Expert ID 
+
+0
+
+500 
+
+1000 
+
+1500 
+
+2000 
+
+2500 
+
+> #Tokens
+
+40% 
+
+81% 
+
+92% 
+
+65% 
+
+72% 89% 
+
+70% 76% 
+
+Device-level Ideal Load 
+
+Text Tokens per Rank 
+
+Vision Tokens per Rank 
+
+Expert-level Idea Load 
+
+Text Tokens per Expert 
+
+Vision Tokens per Expert (b) Layer 13 0
+
+2500 
+
+5000 
+
+> #Tokens
+
+62% 
+
+Rank-0 
+
+72% 
+
+Rank-1 
+
+64% 
+
+Rank-2 
+
+70% 
+
+Rank-3 
+
+83% 
+
+Rank-4 
+
+64% 
+
+Rank-5 
+
+60% 
+
+Rank-6 
+
+73% 
+
+Rank-7 
+
+0 10 20 30 40 50 60 
+
+Expert ID 
+
+0
+
+500 
+
+1000 
+
+1500 
+
+2000 
+
+2500 
+
+3000 
+
+> #Tokens
+
+55% 
+
+79% 
+
+64% 
+
+82% 85% 
+
+69% 
+
+43% 
+
+71% 
+
+Device-level Ideal Load 
+
+Text Tokens per Rank 
+
+Vision Tokens per Rank 
+
+Expert-level Idea Load 
+
+Text Tokens per Expert 
+
+Vision Tokens per Expert 
+
+(c) Layer 14 0
+
+5000 
+
+> #Tokens
+
+60% 
+
+Rank-0 
+
+55% 
+
+Rank-1 
+
+73% 
+
+Rank-2 
+
+81% 
+
+Rank-3 
+
+68% 
+
+Rank-4 
+
+71% 
+
+Rank-5 
+
+77% 
+
+Rank-6 
+
+62% 
+
+Rank-7 
+
+0 10 20 30 40 50 60 
+
+Expert ID 
+
+0
+
+500 
+
+1000 
+
+1500 
+
+2000 
+
+2500 
+
+3000 
+
+> #Tokens
+
+63% 
+
+58% 
+
+73% 93% 73% 
+
+73% 
+
+86% 53% 
+
+Device-level Ideal Load 
+
+Text Tokens per Rank 
+
+Vision Tokens per Rank 
+
+Expert-level Idea Load 
+
+Text Tokens per Expert 
+
+Vision Tokens per Expert (d) Layer 15 0
+
+2000 
+
+4000 
+
+> #Tokens
+
+69% 
+
+Rank-0 
+
+71% 
+
+Rank-1 
+
+68% 
+
+Rank-2 
+
+61% 
+
+Rank-3 
+
+84% 
+
+Rank-4 
+
+70% 
+
+Rank-5 
+
+63% 
+
+Rank-6 
+
+69% 
+
+Rank-7 
+
+0 10 20 30 40 50 60 
+
+Expert ID 
+
+0
+
+250 
+
+500 
+
+750 
+
+1000 
+
+1250 
+
+1500 
+
+> #Tokens
+
+78% 
+
+72% 
+
+67% 
+
+51% 91% 
+
+71% 
+
+81% 
+
+76% 
+
+Device-level Ideal Load 
+
+Text Tokens per Rank 
+
+Vision Tokens per Rank 
+
+Expert-level Idea Load 
+
+Text Tokens per Expert 
+
+Vision Tokens per Expert 
+
+(e) Layer 16 0
+
+2000 
+
+4000 
+
+> #Tokens
+
+63% 
+
+Rank-0 
+
+64% 
+
+Rank-1 
+
+70% 
+
+Rank-2 
+
+71% 
+
+Rank-3 
+
+60% 
+
+Rank-4 
+
+81% 
+
+Rank-5 
+
+72% 
+
+Rank-6 
+
+73% 
+
+Rank-7 
+
+0 10 20 30 40 50 60 
+
+Expert ID 
+
+0
+
+500 
+
+1000 
+
+1500 
+
+2000 
+
+> #Tokens
+
+56% 
+
+59% 74% 
+
+69% 
+
+62% 
+
+96% 77% 79% 
+
+Device-level Ideal Load 
+
+Text Tokens per Rank 
+
+Vision Tokens per Rank 
+
+Expert-level Idea Load 
+
+Text Tokens per Expert 
+
+Vision Tokens per Expert (f) Layer 17 0
+
+2500 
+
+5000 
+
+> #Tokens
+
+70% 
+
+Rank-0 
+
+72% 
+
+Rank-1 
+
+71% 
+
+Rank-2 
+
+67% 
+
+Rank-3 
+
+73% 
+
+Rank-4 
+
+66% 
+
+Rank-5 
+
+66% 
+
+Rank-6 
+
+67% 
+
+Rank-7 
+
+0 10 20 30 40 50 60 
+
+Expert ID 
+
+0
+
+1000 
+
+2000 
+
+3000 
+
+> #Tokens
+
+26% 
+
+71% 
+
+68% 
+
+70% 
+
+80% 
+
+57% 69% 76% 
+
+Device-level Ideal Load 
+
+Text Tokens per Rank 
+
+Vision Tokens per Rank 
+
+Expert-level Idea Load 
+
+Text Tokens per Expert 
+
+Vision Tokens per Expert 
+
+(g) Layer 18 0
+
+2500 
+
+5000 
+
+> #Tokens
+
+74% 
+
+Rank-0 
+
+73% 
+
+Rank-1 
+
+71% 
+
+Rank-2 
+
+75% 
+
+Rank-3 
+
+73% 
+
+Rank-4 
+
+65% 
+
+Rank-5 
+
+49% 
+
+Rank-6 
+
+70% 
+
+Rank-7 
+
+0 10 20 30 40 50 60 
+
+Expert ID 
+
+0
+
+500 
+
+1000 
+
+1500 
+
+2000 
+
+2500 
+
+> #Tokens
+
+79% 
+
+74% 
+
+75% 
+
+77% 
+
+69% 
+
+61% 
+
+78% 
+
+79% 
+
+Device-level Ideal Load 
+
+Text Tokens per Rank 
+
+Vision Tokens per Rank 
+
+Expert-level Idea Load 
+
+Text Tokens per Expert 
+
+Vision Tokens per Expert (h) Layer 19 
+
+Figure 14. Overloaded devices and experts across iterations for layer 12-19, with token proportions for different modalities. 
+
+15 ReaLB: Real-Time Load Balancing for Multimodal MoE Inference 0
+
+500 
+
+1000 
+
+> #Tokens
+
+81% 
+
+Rank-0 
+
+45% 
+
+Rank-1 
+
+77% 
+
+Rank-2 
+
+83% 
+
+Rank-3 
+
+88% 
+
+Rank-4 
+
+79% 
+
+Rank-5 
+
+49% 
+
+Rank-6 
+
+58% 
+
+Rank-7 
+
+0 10 20 30 40 50 60 
+
+Expert ID 
+
+0
+
+100 
+
+200 
+
+300 
+
+400 
+
+> #Tokens
+
+94% 
+
+13% 
+
+92% 
+
+100% 
+
+93% 
+
+48% 
+
+95% 
+
+100% 
+
+Device-level Ideal Load 
+
+Text Tokens per Rank 
+
+Vision Tokens per Rank 
+
+Expert-level Idea Load 
+
+Text Tokens per Expert 
+
+Vision Tokens per Expert 
+
+(a) Kimi-VL: Routing distribution on AI2D. 0 100 200 300 400 500 600 700 800 
+
+Iteration 
+
+2
+
+4
+
+6
+
+8
+
+10 
+
+> Load Imbalance (max / mean)
+
+Expert-level Imbalance Device-level Imbalance (b) Kimi-VL: Dynamics of imbalanceness on AI2D. 0
+
+500 
+
+> #Tokens
+
+87% 
+
+Rank-0 
+
+72% 
+
+Rank-1 
+
+88% 
+
+Rank-2 
+
+90% 
+
+Rank-3 
+
+89% 
+
+Rank-4 
+
+87% 
+
+Rank-5 
+
+77% 
+
+Rank-6 
+
+79% 
+
+Rank-7 
+
+0 10 20 30 40 50 60 
+
+Expert ID 
+
+0
+
+50 
+
+100 
+
+150 
+
+200 
+
+> #Tokens
+
+82% 
+
+94% 
+
+96% 
+
+100% 
+
+86% 
+
+93% 
+
+96% 
+
+98% 
+
+Device-level Ideal Load 
+
+Text Tokens per Rank 
+
+Vision Tokens per Rank 
+
+Expert-level Idea Load 
+
+Text Tokens per Expert 
+
+Vision Tokens per Expert 
+
+(c) Kimi-VL: Routing distribution on RealWorldQA. 0 100 200 300 400 500 600 700 
+
+Iteration 
+
+1
+
+2
+
+3
+
+4
+
+5
+
+6
+
+7
+
+8
+
+> Load Imbalance (max / mean)
+
+Expert-level Imbalance Device-level Imbalance (d) Kimi-VL: Dynamics of imbalanceness on RealWorldQA. 0
+
+250 
+
+500 
+
+> #Tokens
+
+86% 
+
+Rank-0 
+
+88% 
+
+Rank-1 
+
+91% 
+
+Rank-2 
+
+83% 
+
+Rank-3 
+
+89% 
+
+Rank-4 
+
+90% 
+
+Rank-5 
+
+84% 
+
+Rank-6 
+
+87% 
+
+Rank-7 
+
+0 20 40 60 80 100 120 
+
+Expert ID 
+
+0
+
+50 
+
+100 
+
+150 
+
+200 
+
+250 
+
+> #Tokens
+
+87% 
+
+69% 
+
+88% 
+
+84% 
+
+86% 
+
+98% 
+
+98% 
+
+83% 
+
+Device-level Ideal Load 
+
+Text Tokens per Rank 
+
+Vision Tokens per Rank 
+
+Expert-level Idea Load 
+
+Text Tokens per Expert 
+
+Vision Tokens per Expert 
+
+(e) Qwen3-MoE-VL: Routing distribution on AI2D. 0 100 200 300 400 500 600 700 800 
+
+Iteration 
+
+2
+
+4
+
+6
+
+8
+
+10 
+
+12 
+
+14 
+
+> Load Imbalance (max / mean)
+
+Expert-level Imbalance Device-level Imbalance (f) Qwen3-MoE-VL: Dynamics of imbalanceness on AI2D. 0
+
+250 
+
+500 
+
+> #Tokens
+
+88% 
+
+Rank-0 
+
+87% 
+
+Rank-1 
+
+90% 
+
+Rank-2 
+
+85% 
+
+Rank-3 
+
+79% 
+
+Rank-4 
+
+86% 
+
+Rank-5 
+
+90% 
+
+Rank-6 
+
+80% 
+
+Rank-7 
+
+0 20 40 60 80 100 120 
+
+Expert ID 
+
+0
+
+25 
+
+50 
+
+75 
+
+100 
+
+125 
+
+150 
+
+> #Tokens
+
+95% 
+
+98% 
+
+99% 
+
+100% 
+
+95% 100% 99% 
+
+71% 
+
+Device-level Ideal Load 
+
+Text Tokens per Rank 
+
+Vision Tokens per Rank 
+
+Expert-level Idea Load 
+
+Text Tokens per Expert 
+
+Vision Tokens per Expert 
+
+(g) Qwen3-MoE-VL: Routing distribution on RealWorldQA. 0 100 200 300 400 500 600 700 800 
+
+Iteration 
+
+2
+
+4
+
+6
+
+8
+
+10 
+
+> Load Imbalance (max / mean)
+
+Expert-level Imbalance Device-level Imbalance 
+
+(h) Qwen3-MoE-VL: Dynamics of imbalanceness on Real-WorldQA. 
+
+Figure 15. Routing characteristics across models and datasets. 16 ReaLB: Real-Time Load Balancing for Multimodal MoE Inference 
+
+C. Batching pattern 
+
+Mixed prefill and decode scheduling. Mixing prefill and decode tokens within a batch naturally arises from the continuous batching mechanism in vLLM under a colocated deployment setting. In this setup, prefill and decode requests are not separated into distinct instances. Instead, the scheduler dynamically forms batches from incoming requests at each step. Moreover, chunked prefill further splits long prefill requests into smaller segments, allowing them to be scheduled together with decode requests within the same batch. This design improves overall utilization and avoids decode starvation. Under this setting, we define an iteration as one continuous batching step, corresponding to a single model forward pass. 
+
+Comparison with disaggregated deployment. In contrast, prefill/decode-disaggregated deployment assigns prefill and decode workloads to different instances, typically requiring duplicated resources. Under such settings, ReaLB mainly applies to prefill workers, where the majority of computation and routing decisions occur. 
+
+Prefill-dominated batches. Although batches may contain mixed prefill and decode tokens, they are strongly dominated by prefill tokens in our workload. With max-num-seqs=12 , a mixed batch contains at most 11 decode tokens (one per request), while prefill tokens occupy the remaining capacity. In practice, decode tokens account for less than 10% of the total tokens per batch, as shown in Figure 16. As a result, under our colocated deployment (used due to limited GPU resources), the observed routing dynamics are largely dominated by prefill tokens, providing a close approximation to a prefill-only setting without explicitly separating prefill and decode execution. 0.0 0.2 0.4 0.6 0.8 1.0       
+
+> Share
+> #Vision tokens / #Total tokens
+> Vision tokens share
+> 0100 200 400 500 600 300 0.0 0.2 0.4 0.6 0.8 1.0
+> Share
+> Prefill tokens and decode tokens share of (P+D)
+> Prefill / (P+D) Decode / (P+D)
+> Token ratios over iter
+> Iterations
+> Iterations
+
+Figure 16. Token composition in continuous batching. 
+
+D. MoE layer Speedup under various batch sizes and image numbers 
+
+Table 4 reports the MoE layer speedup under different batch sizes and numbers of images. We fix the text input length to 256 tokens. For Qwen-VL, each image with resolution 1024 × 728 is tokenized into 736 vision tokens. All results are measured at MoE layer 17 over 100 iterations. 
+
+Table 4. Speedup under Different Batch Sizes and Numbers of Images 
+
+Batch size 4K 4K 8K 8K 8K 8K Num. images 2 3 4 5 6 7Speedup 1.29 1.32 1.36 1.35 1.35 1.36 17

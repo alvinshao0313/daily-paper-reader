@@ -1,0 +1,1056 @@
+Title: TensorHub: Rethinking AI Model Hub with Tensor-Centric Compression
+
+URL Source: https://arxiv.org/pdf/2604.17104v1
+
+Published Time: Tue, 21 Apr 2026 00:53:59 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# TensorHub : Rethinking AI Model Hub with Tensor-Centric Compression 
+
+## Tingfeng Lan 
+
+University of Virginia 
+
+## Zirui Wang 
+
+University of Virginia 
+
+## Yunjia Zheng 
+
+Harvard University 
+
+## Zhaoyuan Su 
+
+University of Virginia 
+
+## Juncheng Yang 
+
+Harvard University 
+
+## Yue Cheng 
+
+University of Virginia 
+
+## Abstract 
+
+Modern model hubs now store tens of petabytes of large lan-guage models (LLMs), with fine-tuned variants overwhelm-ingly dominating storage footprint. While delta compression is a natural fit for reducing redundancy, existing approaches fail in practice: model lineage metadata is often missing or unreliable, and naive pairing strategies lead to poor compres-sion quality. Our analysis of real-world repositories reveals two fundamental findings: effective compression requires data-driven pairing rather than metadata-based heuristics, and redundancy emerges at the fine-grained tensor level rather than the model level. This paper presents TensorHub , a tensor-centric storage system that rethinks model storage compression by treat-ing tensors—not models—as the first-class citizen for delta compression. TensorHub decomposes models into tensors, predicts tensor-pairwise compressibility using compact bit-level fingerprints that capture tensor content, and incremen-tally organizes tensors into multi-center clusters that adapt as new models arrive. Together, these components form an end-to-end model compression pipeline that continuously uncovers cross-tensor redundancy at scale. Evaluations on a real-world trace of 2,890 randomly sampled Hugging Face models show that TensorHub reduces storage footprint by 70.5%, 37% lower than state-of-the-art design. Meanwhile, it achieves 22.9 GB/s compression and 28.4 GB/s decompres-sion throughput, which are 3.86 × and 1.49 × faster than the next-best system, respectively. 
+
+## 1 Introduction 
+
+Large language models (LLMs) have become foundational infrastructure across modern AI applications [ 47 , 63 , 65 –67 ]. As open-source development accelerates, model hubs such as Hugging Face [ 29 ] now host millions of LLMs and are growing at an exponential rate [ 91 ]. The cumulative storage footprint for all publicly available models on Hugging Face has surged from 0.28 PB in 2023 to over 76 PB by the end of 2025 [ 42 ]. Including private models, this trajectory suggests that its model storage could exceed 1 EB by the end of 2027. A defining characteristic of this growth is that fine-tuned derivatives [ 12 , 51 , 80 ]—not base models—dominate both the Overall Storage Footprint         
+
+> 0.00x
+> 0.20x
+> 0.40x
+> 0.60x
+> 0.80x
+> 1.00x
+> Normalized Storage (x)
+> 1.00x
+> 0.78x
+> 0.67x
+> 0.59x
+> 0.47x
+> 0.35x
+> 0.29x
+> 010 20
+> Compression Throughput (GB/s)
+> 0
+> 5
+> 10
+> 15
+> 20
+> 25
+> 30
+> Decomp. Throughput (GB/s)
+> ZipNN
+> FM-Delta
+> OpenZL
+> ZipLLM
+> TensorHub-FM++
+> TensorHub-TX
+> Better
+> Full OpenZL ZipNN FM-Delta ZipLLM TensorHub-TX TensorHub-FM++
+
+Figure 1. Left : Normalized storage relative to uncompressed (Full = 1.00 × 40.11TB of randomly sampled Hugging Face models). Ten-sorHub reduces total storage cost by 3.39 ×, achieving substantially lower storage footprint than state-of-the-art baselines. Right : Ten-sorHub achieves high compression and decompression throughput. 
+
+model count and total storage footprint: by 2025, fine-tuned models account for 99.1% of total storage and 99.6% of all models (Fig. 2). These derivatives proliferate rapidly as users specialize models for diverse downstream tasks, producing highly heterogeneous collections of closely related but struc-turally divergent variants. As a result, storage growth is driven not by a few large base models, but by vast fami-lies of fine-tuned models that differ subtly yet occupy full model size. This trend is further amplified by model devel-opment practices: large-scale training pipelines often retain numerous intermediate checkpoints, each storing full model weights and the optimizer state. For example, recent reports indicate that production training workflows may persist all checkpoints for traceability [ 89 ], significantly compounding the overall storage burden. Delta compression (i.e., storing only the difference be-tween a fine-tuned model and a reference base) is a natu-ral solution to reduce storage footprint. Recent works have demonstrated that it significantly outperform direct com-pression of model weights [ 71 , 91 ]. However, deploying delta compression at real-world scale exposes three fundamental limitations of existing approaches: 
+
+Missing Lineage Metadata. ZipLLM [ 91 ] relies on Hugging Face model-card metadata to determine model lineage for delta compression. However, model cards are optional. Our analysis of over 2.7M Hugging Face models on March 2026 shows that only 25.8% contain usable base-model metadata. 
+
+1 
+
+> arXiv:2604.17104v1 [cs.DC] 18 Apr 2026 Conference’17, July 2017, Washington, DC, USA Tingfeng Lan, Zirui Wang, Yunjia Zheng, Zhaoyuan Su, Juncheng Yang, and Yue Cheng
+
+When metadata is unavailable, ZipLLM falls back to brute-force pairwise bit distance—computing the exact Hamming distance over model pairs—to infer model similarity. This requires reading every byte of every candidate pair, incurring I/O cost that grows quadratically with the size of the model hub, making it impractical for real-world deployment. 
+
+Model Pair Sensitivity. Even with accurate lineage, as-signing all tensors in a fine-tuned model to a single base is fundamentally suboptimal. Fine-tuning induces continuous parameter drift, causing tensors to move progressively far-ther from any fixed base model. This drift is amplified by the proliferation of specialized variants: models fine-tuned for reasoning, safety, coding, alignment, or multilingual tasks exhibit significantly different parameter shifts [ 20 , 35 , 46 ]. As a result, compression effectiveness becomes highly sensitive to the choice of base: closely related pairs yield low-entropy deltas and high reduction, while pairing based on a fixed pre-trained base or user-provided metadata often leads to significantly lower compression. 
+
+Compression Granularity. Model storage redundancy ex-ists at the fine-grained tensor level, not the model level. Different tensors within the same model (e.g., embeddings, attention projections, MLP layers) follow distinct training dynamics and thus exhibit different similarity relationships across derivatives. For many tensors, the best bases for delta compression [ 91 , 98 ] do not come from the model’s declared base, or even from the same variant; instead, they are scat-tered across different models. This mismatch imposes an in-herent upper bound on coarse-grained model-level delta com-pression: forcing all tensors to share a single base leads to sys-tematically suboptimal pairings, limiting achievable reduc-tion ratios even under ideal conditions. Model-level compres-sion therefore obscures substantial cross-model redundancy— a coarse, single-base assignment fails to exploit the rich, tensor-level similarity structure present in real-world large-scale model storage. To this end, we present TensorHub , a first-of-its-kind, loss-less, tensor-centric model storage system that departs from model-level designs and instead uncovers and exploits hidden cross-tensor relationships across models , treating tensors as the first-class citizen for delta compression. 
+
+TensorHub has four components. First, TensorSketch is a compression-aware fingerprint that captures bit-level struc-ture and enables efficient similarity estimation without ac-cessing full tensor contents. Second, a lightweight regressor that predicts the compressibility of tensor pairs using Ten-sorSketch without reading full tensor data or performing actual compression. Third, FlexSplit , a scalable clustering algorithm that identifies the best tensor bases incrementally and adaptively as new models are uploaded. Fourth, an opti-mized codec that performs high-performance compression and decompression. Together, these components enable scal-able compression planning that adapts to the heterogeneous and evolving structure of real-world model hubs. 2019 2021 2023 2025     
+
+> Year
+> 0
+> 1000
+> 2000
+> 3000
+> Cumulative Size (TB)
+> FT 72.4%
+> 7 TB
+> FT 89.7%
+> 48 TB
+> FT 99.1%
+> 2902 TB
+> 2023
+> 40
+> 48
+> TB
+> Base
+> Fine-tuned
+> 2019 2021 2023 2025
+> Year
+> 0
+> 100
+> 200
+> 300
+> 400
+> Cumulative Count (K)
+> FT 93.2%
+> 3K FT 98.1%
+> 43K
+> FT 99.6%
+> 377K
+> 2023
+> 42
+> 44
+> K
+> Base
+> Fine-tuned
+
+Figure 2. Cumulative storage size ( left ) and model count ( right ) on Hugging Face from 2019 to 2025. Fine-tuned models (blue) dominate both metrics, accounting for 99.1% of storage and 99.6% of model count by 2025, while base models (red) remain a small fraction. 
+
+This paper makes the following contributions: 
+
+• This is, to our knowledge, the first work that shows LLM storage redundancy fundamentally emerges at the tensor level, not the model level nor traditional chunk level. 
+
+• We introduce a novel fingerprint metric, TensorSketch , to captures both the numerical distribution and coarse struc-tural layout of each tensor, enabling scalable and efficient similarity estimation. 
+
+• We design a regression model to predict model compress-ibility based on TensorSketch without reading the full tensor or performing compression. 
+
+• We design a scalable, incremental clustering algorithm that enable continuous model ingestion by discovering multi-center tensor clusters and selecting high-quality base–delta pairs. 
+
+• We implement and optimize two compression codecs that enable high-performance and compression ratio. Together, these components form TensorHub .
+
+• Evaluated on 2,890 randomly sampled models from Hug-ging Face, TensorHub reduces storage footprint by 70.5%, 37% lower than state-of-the-art design (ZipLLM (Fig. 1)). Meanwhile, it achieves 22.9 GB/s compression and 28.4 GB/s decompression throughput, 3.86 × and 1.49 × faster than the next best system, respectively. 
+
+## 2 Background and Related Work 
+
+This section reviews existing storage reduction techniques. A high-level comparison of these methods is summarized in Fig. 3. 
+
+2.1 Traditional Storage Reduction General-purpose Compression. General-purpose com-pressors such as Zstandard [ 18 ] and Brotli [ 1 ] are employed in storage reduction to exploit local byte-level redundancy via dictionary-based [ 92 , 101 ] and entropy coding [ 25 , 28 , 39 ,62 , 73 , 87 ]. Further gains are possible when the data type is known, e.g., run-length encoding for low-entropy data [ 79 ], delta encoding for versioned files [ 59 , 85 ], and specialized codecs for columnar and time-series workloads [ 13 , 14 , 50 ,52, 57, 88].    
+
+> 2TensorHub: Rethinking AI Model Hub with Tensor-Centric Compression Conference’17, July 2017, Washington, DC, USA Model Storage Reduction Lossy Compression Cross-Model
+> ZipLLM, FM-Delta
+> TensorHub
+> ELF Model-Centric Tensor-Centric
+> Parameter Re-Mapping
+> DeltaZip NeurStore QStore
+> Quantization Pruning
+> Lossless Compression
+> Single-Model
+> ZipNN Generic Compressor (OpenZL)
+
+Figure 3. The design scope of TensorHub .
+
+Lossy methods such as ZFP [ 27 , 56 ] and SZ [ 26 , 54 , 83 ] are effective for scientific data but cannot guarantee exact re-covery. Likewise, inference-time quantization [ 24 , 30 , 55 , 95 ,99 , 100 ] is a user-driven, task-specific choice orthogonal to storage design. Model hubs require lossless compression that preserves full floating-point precision to ensure correctness and reproducibility. 
+
+Data Deduplication. Deduplication eliminates storage re-dundancy by retaining only unique data blocks and replacing duplicates with pointers. Traditional general-purpose imple-mentations, such as Git LFS [ 34 ], rely on file-level hashing. However, this approach treats files as atomic units, such that a minor modification alters the global hash completely, ren-dering the system unable to detect shared content between slightly different versions. To capture redundancy in finer granularity, Content-Defined Chunking (CDC) [ 68 ] emerges. This method employs a sliding window to calculate rolling hashes over the byte stream and deduplicates reordered data segments within the file, adopted in NetApp ONTAP [ 69 , 70 ], Dell EMC Data Domain [ 23 ], FastCDC [ 93 ] and TiDedup [ 72 ]. ZipLLM [ 91 ] introduces tensor-level deduplication, content-hashing each tensor and storing it once, which captures exact duplicates across fine-tuned variants sharing identical layers without the metadata overhead of variable-sized chunking. 
+
+2.2 Model-aware Storage Reduction Single-model Compression. Intra-model compression re-duces the storage footprint of individual models by exploiting redundancy in their floating-point parameters. ELF [ 81 ] elim-inates exponent bits by mapping weights into a normalized range, but it is inherently lossy and unsuitable for model hubs that require exact recovery. ZipNN [ 38 ] improves com-pressibility by reordering float bytes to isolate compressible fields like sign and exponent bits, enabling more effective entropy coding. However, these methods only capture local, single-tensor redundancy and cannot exploit shared patterns across models. 
+
+Cross-model Delta Compression. Delta compression re-duces storage by encoding a model’s weights relative to a chosen base model. Given two aligned models or tensors, the system computes their element-wise difference—typically via subtraction for floating-point data or XOR for byte-level representations—producing a delta that often exhibits much Top 20% 20–40% 40–60% 60–80% Bottom 20% Overall    
+
+> Download rank (quintile)
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> Percentage of models (%)
+> 54.3% 47.8%
+> 85.6% 88.1% 95.1%
+> 74.2%
+> No metadata
+> Has metadata
+
+Figure 4. Distribution of Hugging Face model lineage metadata by download rank. Most models (74.2% overall) lack this information. 
+
+lower entropy than the original. A general-purpose compres-sor is then applied to this delta to obtain the final stored rep-resentation. FM-Delta [ 71 ] compresses the arithmetic resid-uals between base models and their variants. However, FM-Delta [ 71 ] offers limited throughput and lacks pairing guid-ance over model lineage, making it difficult to scale to large model hubs with millions of models. ZipLLM [ 91 ] applies bitwise XOR delta compression to scale storage optimiza-tion across large model hubs. DeltaZip [ 98 ] further prunes the delta matrix with quantization. NeurStore [ 94 ] and QS-tore [ 76 ] explore cross-model redundancy via lossy quan-tization and approximate sharing. In contrast, TensorHub 
+
+preserves exact recovery and targets fine-grained tensor-level redundancy through lossless compression. 
+
+2.3 Vector Similarity Search 
+
+A key in delta compression is to find the most similar pair to compress, which shares similarity with vector search. High-dimensional vector search relies on Approximate Nearest Neighbor (ANN) algorithms to address the scaling limits of exact retrieval, including hashing-based [ 5 , 21 , 32 , 77 ], graph-based [ 31 , 58 , 61 , 90 ], tree-based [ 11 , 78 ], and quantization-based [ 6, 49 ] methods. Clustering-based methods, such as the Inverted File Index (IVF), improve speed by partitioning the dataset and scanning only relevant centroids [ 49 ]. Currently, graph-based indices offer the best balance between search speed and accuracy. Algorithms such as Hierarchical Naviga-ble Small World (HNSW) [ 60 ] construct multi-layered graph structures that exploit “small world” navigation properties. By enabling greedy routing through a hierarchy of proxim-ity graphs, HNSW achieves logarithmic search complexity. Vector search is often designed for small vectors, e.g., up to 3,072 dimensions; however, tensors can have millions of elements (dimensions). Directly using existing vector search algorithms will be computationally prohibitive. 
+
+## 3 Problem Formulation and Challenges 
+
+3.1 Empirical Insights into LLM Delta Compression 
+
+While prior works [71, 91] demonstrate that delta compres-sion can be highly effective in reducing storage footprint, real-world model hubs exhibit more complex and heteroge-neous structures than those in controlled experiments. 
+
+> 3
+
+Conference’17, July 2017, Washington, DC, USA Tingfeng Lan, Zirui Wang, Yunjia Zheng, Zhaoyuan Su, Juncheng Yang, and Yue Cheng 
+
+Observation #1 (missing lineage): Model lineage infor-mation is often missing or unreliable in real-world model repositories. Existing systems assume model family information is available (e.g., via model cards [ 40 ]); however, such information is often missing or unreliable on the Hug-ging Face model hub. As shown in Fig. 4, we analyzed all 2,751,212 Hugging Face model repositories as of March 2026 and found that only 25.8% are tagged with model-family in-formation. Even the top 20% hot models by download count already have a 54.3% missing rate for lineage metadata. For cold models below the 40 𝑡ℎ percentile in downloads, which make up the majority of the hub, the missing rate consistently exceeds 88%. Among those, the metadata is often incomplete or unreliable, as users frequently copy metadata from other repositories or manually modify fields in ways that break the true lineage [22, 53, 82]. Implications 
+
+It is nearly impossible to rely on model-family lineage as a reliable signal for delta compression in real-world model hubs due to missing and unreliable metadata. Base       
+
+> Coder Inst
+> Coder
+> Inst
+> UIGEN
+> Base Coder Inst
+> Coder
+> Inst
+> UIGEN
+> Fixed-Base Compression (ZipLLM) Empirical Best-Base Selection
+> 53%
+> 21% 21%
+> 21%
+> 53% 47% 66% 21%
+> Overall Reduction Ratio: 29% Overall Reduction Ratio: 47%
+
+Figure 5. Choosing the delta-compression base is crucial. Both panels show five Qwen2.5-3B variants. Edge labels denote the data-reduction ratio from delta-compressing each variant to its assigned base. Left: Fixed-base compression pairs each variant with the pre-trained base , achieving only 29% overall reduction. Right: Selecting the empirical best base per model raises overall reduction to 47%. 
+
+Observation #2 (pair sensitivity): Delta compression is highly sensitive to pair selection. Across LLM reposito-ries, we find that compression effectiveness is governed by the similarity between the target and its base: closely related models yield low-entropy deltas and high reduction, while pairing based on a fixed pre-trained base or user-provided metadata often leads to substantially lower reduction (Fig. 5). Consequently, pair selection becomes a first-order factor in determining storage efficiency, and naive pairing strategies can leave significant compression potential unrealized. Implications 
+
+Using pre-trained model as the base is insufficient; effective delta compression requires data-driven pairing that reflects true model weight similarity. 0 5 10 15 20 25 30 35 40 45 
+
+> Model Index
+> layer0.mlp.down
+> layer0.mlp.gate
+> layer0.mlp.up
+> layer0.attn.k
+> layer0.attn.o
+> layer0.attn.q
+> layer0.attn.v
+> embed_tokens
+> norm
+> Tensor
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> 1.0
+> Reduction Ratio
+
+Figure 6. Different tensors within a single model exhibit heteroge-neous storage-reduction ratios and the best bases vary. Each cell shows the reduction ratio when compressing a tensor (row) against the corresponding tensor in a candidate model (column). embed_tokens 
+
+Qwen-3B-Instruct Tensors 
+
+> layer0.self_attn.q_proj
+> ......
+> layer0.input_layernorm layer1.input_layernorm
+
+Best-Pair Tensors 
+
+> #3 -Qwen2.5-3B-RuoZhiBa-Instruct
+> #15 -Qwen2.5-3B-Instruct_CoT
+> #5-Qwen2.5-jailbreak
+> embed_tokens layer0.self_attn.q_proj layer0.input_layernorm
+> ......
+> #19-Qwen2.5-3B-Instruct-abliterated
+> layer1.input_layernorm
+> Best-Pair Tensors Scattered over Multiple Models
+> 87.6%
+> 87.4%
+> 92.6%
+> 79.2%
+
+Figure 7. Optimal compression pairing emerges at the tensor level. The best bases for different tensors in the same model often reside in a different model, rather than in a single shared base. 
+
+Observation #3 (compression granularity): The best compression unit is fine-grained—at the tensor level, not the model level. While prior systems typically apply delta encoding at the whole-model granularity [ 71 , 91 ], our analysis shows that the most effective compression pairing often emerges at the level of individual tensors. Within a single model, different tensors exhibit distinct training dy-namics: attention layers, MLP blocks, and embedding ma-trices drift in different ways as they adapt to data and task objectives. Fig. 6 shows that the tensors from a single model may exhibit different data reduction ratios when compressed against a chosen base model (each column). Meanwhile, the best model for each tensor is different (darkest in each row). Therefore, no single base model consistently serves as the best base for all tensors of a target model. Instead, the optimal pairing varies tensor by tensor, revealing that fine-grained tensor-level decisions are essential for maximizing delta com-pressibility. Fig. 7 shows that the best bases of four random 
+
+4TensorHub: Rethinking AI Model Hub with Tensor-Centric Compression Conference’17, July 2017, Washington, DC, USA 
+
+tensors from Qwen-3B-Instruct come from four entirely dif-ferent models. Implications 
+
+Model storage systems should apply delta compression at the tensor level to better capture cross-model redundancy. Choosing pairs per tensor, rather than per model, improves the data reduction ratio. 
+
+3.2 Problem Formulation Problem Definition. Minimizing model storage requires jointly choosing which tensors act as bases and which are stored as compressed deltas, a combinatorial optimization shaped by pairwise compressibility estimates that are them-selves costly to compute. We formulate this problem below and highlight three key challenges. 
+
+Optimization Objective. Storing a tensor as a base incurs its full size; storing it as a compressed delta reduces cost, but the reduction depends on the specific base it references. Formally, the optimization problem is: 
+
+min 
+
+> base selection
+
+∑︁ 
+
+𝑐𝑜𝑠𝑡 𝑏𝑎𝑠𝑒 +∑︁ 𝑐𝑜𝑠𝑡 𝑑𝑒𝑙𝑡𝑎 
+
+
+
+. 
+
+> pairing decisions
+> base storage cost comp. delta storage cost
+
+3.3 Optimization Challenges 
+
+The optimization objective is an instance of the facility-location problem [ 4, 8], which is NP-hard and typically re-quires heavy integer linear programming (ILP) solvers [ 9, 36 ,43]. Solving it at scale is challenging for three reasons: 
+
+Challenge #1 (C1): Estimating pairwise tensor similar-ity is expensive. Determining whether tensor 𝑡 𝑖 is simi-lar to tensor 𝑡 𝑗 requires loading both tensors in full—each ranging from millions to billions of parameters—making brute-force pairwise comparisons prohibitively costly at the model-hub scale. A natural alternative is approximate nearest-neighbor (ANN) search [ 21 , 31 , 61 , 90 ], but it suf-fers from the well-known curse of dimensionality [10 , 44 ]: as dimensionality grows into the millions, distance concentra-tion renders nearest-neighbor queries no more informative than random selection, and the memory overhead of index-ing billion-scale tensors as high-dimensional vectors is itself prohibitive. 
+
+Challenge #2 (C2): Similarity does not imply compress-ibility. Even with an efficient similarity measure, a fun-damental gap remains: standard distance metrics (e.g., 𝐿 2,cosine) operate at the value level and do not capture bit-level 
+
+patterns that govern delta compressibility. Two tensors that are close in 𝐿 2 space may still produce poorly compressible deltas because their byte-level entropy patterns differ. Mistral Llama Qwen 
+
+> User-uploaded Unknown Family
+
+# ... ModelHub Models                      
+
+> Metadata Annotation
+> LLMs Tensors
+> TensorID
+> (Dedup)
+> xxHash Bit-CountSketch TensorSketch
+> (Similarity)
+> - d8ee5fa4u - 7e5fe52ad - 7e5fe52ad
+> ✅❌
+> Metadata Layer
+> Storage Optimization Planner
+> Scattered Tensors Base Selection Problem
+> TensorPred
+> Compression Plans
+> Metadata Store
+> Comp. Plan Execution Compression Engine Blob Store
+> TensorSketch TensorID Compressed Tensors
+> FlexSplit Comp. Plan Generation 0.9 0.1 0.1 0.2 0.2 0.1 0.6
+> 0.1 0.1
+> Compression Plans
+> 0.2 0.2 0.1
+> Low-Entropy Delta
+> 000001
+> Disk/S3
+> 010101010100
+> Pluggable Codes
+> (§5.1) (§5.2) (§5.3)
+> 1
+> 2
+> 34
+> } dist: 0.9 } dist: 0.1
+
+Figure 8. TensorHub architecture and workflow. 
+
+Challenge #3 (C3): Selecting bases is combinatorial and dynamic. Even with accurate pairwise compressibility es-timates, choosing which tensors to serve as bases remains NP-hard [ 4, 8 ]. For example, a projection tensor in LLaMA2-7B can choose from over 120,000 possible base tensors. Ex-act solvers such as ILP [ 36 ] are computationally intractable beyond a few hundred tensors. Classical approximation al-gorithms, including primal-dual [ 45 ] and local-search meth-ods [ 7 ], offer theoretical guarantees but still require mate-rializing the full pairwise cost matrix and are designed for static inputs. Moreover, the tensors stored in real-world model hubs are dynamic: as new models arrive, previously selected bases may become suboptimal, triggering cascading reassignments that require recompressing and re-pairing of affected tensors. Together, these challenges call for a system that can effi-ciently estimate pairwise similarity without full-tensor ac-cess (C1), predict compressibility from similarity (C2), and select bases at scale in a dynamic, incremental fashion (C3). 
+
+## 4 TensorHub Design 
+
+4.1 System Overview Architecture. TensorHub treats tensors as first-class entities and explicitly reasons about cross-tensor relationships across a model hub, pairing each tensor with a similar base and delta-compressing it to minimize storage footprint. As shown in Fig. 8, TensorHub comprises four components: 1 a content-aware tensor metadata layer ( TensorID and TensorSketch ), 2 a compression planner ( TensorPred and FlexSplit ), 3 a compression engine ( TensorX and FM++ ), and 4 a storage layer for tensor blobs on generic backends such as local disk or cloud object stores (e.g., S3 [2], R2 [16]).  
+
+> 5Conference’17, July 2017, Washington, DC, USA Tingfeng Lan, Zirui Wang, Yunjia Zheng, Zhaoyuan Su, Juncheng Yang, and Yue Cheng
+
+Workflow. When a batch of models is uploaded, the meta-data layer 1 parses each model into individual tensors and assigns two types of metadata: a TensorID content hash for exact deduplication and a compact TensorSketch fingerprint for similarity estimation ( C1 ). The compression planner 2 then uses TensorPred to convert fingerprint distances into predicted storage reduction ratios ( C2 ), and FlexSplit to de-rive a base-delta clustering plan ( C3 ). The compression en-gine 3 materializes this plan by computing and compressing deltas, and writing blobs to the storage layer 4 . When a model is requested, the storage layer and compression en-gine cooperate to fetch bases, apply deltas, and reconstruct full tensors on demand. 
+
+Content-aware Tensor Metadata. TensorID is a hash [ 17 ]computed over raw bytes to detect exact duplicates. Ten-sorSketch is a compact CountSketch-based [ 15 ] fingerprint that captures the bit-level distribution of tensor data, en-abling efficient estimation of pairwise normalized Hamming distances (§4.2). 
+
+Compression Planner. The planner determines which ten-sors should be stored as bases and which should reference others via deltas, thereby achieving a low storage footprint for both bases and deltas. It relies on two methods: Tensor-Pred (§4.3), a lightweight regression model that converts 
+
+TensorSketch distances into predicted reduction ratios; and 
+
+FlexSplit (§4.4), an incremental clustering algorithm that uses these predictions to select bases and assign tensors. 
+
+Compression Engine. The compression engine carries out planner-generated compression plans by computing and compressing deltas (§5.2) to generate the final compressed blobs. The engine is fully decoupled from plan generation and can be executed in parallel. 
+
+Storage Layer. TensorID , TensorSketch , and model-tensor mappings are stored in a metadata database (PostgreSQL [ 74 ]) supporting fast deduplication checks and fingerprint-based similarity queries at ingestion time. Each tensor blob is stored in a safetensors-compatible format [ 41 ] extended with com-pression flags, unifying compressed and uncompressed ten-sors under the same format. 
+
+4.2 TensorSketch : Compression-aware Fingerprint 
+
+The goal of TensorSketch is to provide a compact fingerprint for each tensor that captures the bit-level numerical distri-bution and structural layout—the two aspects that jointly determine whether two tensors are good candidates for delta compression. 
+
+TensorSketch Design. Existing fingerprinting approaches fall short for our purpose. Standard CountSketch [ 15 ] oper-ates on floating-point values and preserves value distribution ,but delta compression works at the bit level : what matters is not numerical distance per se, but the fraction of bits that differ between two tensors, i.e., the normalized Hamming distance [ 37 ] over their raw binary representations. A finger-print that directly captures per-bit flip statistics is therefore a 15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 0                                 
+
+> 0001001000100100
+> Extract 1-bit positions, assign bucket index
+> and sign for each position
+> Fingerprint after :
+> [0] [1] [2] [3] …[w-1]
+> -1 021…0
+> ✓=−1 =+1+1=2 =+1
+> Loop for all elements in tensor
+> Loop for all hash functions
+> …
+
+n elements Tensor T              
+
+> bf16
+> Zoom-in example: element and hash
+> position:
+> 12
+> 9
+> 5
+> 2
+> update sign:
+> +1
+> −1
+> +1
+> +1
+> bucket index:
+> [2]
+> [0]
+> [2]
+> [3]
+> Initial Fingerprint :
+> [0] [1] [2] [3] …[w-1]
+> 0000…0
+> Update with element
+
+Figure 9. An example of TensorSketch fingerprinting. 
+
+more faithful proxy for delta compressibility than one based on scalar magnitudes. We therefore introduce TensorSketch ,a bit-level CountSketch construction that hashes each ele-ment’s individual bit positions into sketch buckets, capturing both bit distribution and layout in a compact, fixed-size fin-gerprint. 
+
+TensorSketch Construction. As shown in Alg. 1, TensorS-ketch addresses this by treating the tensor’s raw bytes as a flat bit sequence of 𝑝 ∗𝑛 bits, grouped into 𝑛 elements of 𝑝 bits each (e.g., 𝑝 =16 for float16 /bfloat16 , 𝑝 =32 for float32 ), and building a two-dimensional sketch table F ∈ R𝑑 ×𝑤 
+
+where 𝑑 is the depth (number of independent hash rows) and 
+
+𝑤 is the width (number of buckets per row). Crucially, each of the 𝑝 bit positions in every element is treated as an inde-pendent binary signal: for bit position 𝑘 ∈ { 0, . . . , 𝑝 −1} of element 𝑖 , a dedicated pair of hash functions (ℎ𝑟 , 𝑠 𝑟 )—seeded independently per row 𝑟 —maps the element–bit-position pair (𝑖, 𝑘 ) to a bucket and a sign. This per-bit hashing en-sures that structural differences at any bit position (exponent, mantissa, or sign) are reflected in the sketch, making Ten-sorSketch sensitive to the bit-level divergence that drives delta compression efficiency. 
+
+Hamming Distance Estimation. Given two fingerprints 
+
+F 𝑖 and F 𝑗 , the Hamming distance between the underlying tensors is estimated from the per-row squared ℓ2 norm of the difference F 𝑖 𝑟 − F 𝑗 𝑟 . Taking the median over all 𝑑 rows provides robustness against outlier hash collisions: 
+
+ˆH ( 𝑖, 𝑗 ) = median 𝑑 𝑟 =1 F 𝑖 𝑟 − F 𝑗 𝑟 
+
+> 22
+
+. (1)  
+
+> aggregation for robustness
+> sketch fingerprint
+> 6TensorHub: Rethinking AI Model Hub with Tensor-Centric Compression Conference’17, July 2017, Washington, DC, USA
+
+Algorithm 1: TensorSketch Fingerprinting 
+
+Input: Params: sketch depth 𝑑 ; sketch width 𝑤 
+
+Data: Tensor 𝑡 with (𝑒 0, . . . , 𝑒 𝑛 −1), each 𝑝 bits 
+
+Hash functions: hash families {ℎ𝑟 }𝑑 𝑟 =1 with ℎ𝑟 : [𝑛 ]× [𝑝 ] → [ 𝑤 ] and {𝑠 𝑟 }𝑑 𝑟 =1 with 𝑠 𝑟 : [𝑛 ]×[ 𝑝 ] → {− 1,+1}
+
+Output: TensorSketch F ∈ R𝑑 ×𝑤 . 
+
+> 1
+
+Initialize F [ 0..𝑑 − 1] [ 1..𝑤 ] ← 0; 
+
+> 2
+
+for 𝑖 ← 0 to 𝑛 − 1 do  
+
+> 3
+
+if 𝑒 𝑖 = 0 then  
+
+> 4
+
+skip ; // all bits zero  
+
+> 5
+
+end  
+
+> 6
+
+for 𝑟 ← 0 to 𝑑 − 1 do  
+
+> 7
+
+for each bit position 𝑘 where 𝑒 𝑖 [𝑘 ] = 1 do  
+
+> 8
+
+𝑗 ← ℎ𝑟 (𝑖, 𝑘 ) ; // bucket index  
+
+> 9
+
+𝜎 ← 𝑠 𝑟 (𝑖, 𝑘 ) ; // sign  
+
+> 10
+
+F [ 𝑟 ] [ 𝑗 ] ← F [ 𝑟 ] [ 𝑗 ] + 𝜎 ; 
+
+> 11
+
+end  
+
+> 12
+
+end  
+
+> 13
+
+end  
+
+> 14
+
+return F ;The normalized Hamming distance, ˆ𝑝 (𝑖, 𝑗 ) = ˆ𝐻 (𝑖, 𝑗 ) / ( 𝑝𝑛 ),lies in [0, 1]: near zero indicates near-identical bit patterns (highly compressible bit-level delta), while ≈ 0.5 indicates random divergence. 
+
+4.3 TensorPred : Reduction Ratio Prediction 
+
+TensorSketch estimates pairwise similarity, but the optimiza-tion formulation in §3 requires quantitative reduction ratios 
+
+to evaluate each base-delta assignment ( C2 ). TensorPred 
+
+bridges this gap with a lightweight regression model that converts TensorSketch distances into predicted reduction ratios without materializing any actual delta. 
+
+Key Observation. Under bit-level delta compression (de-tailed in §5.2), the fraction of differing bits between two tensors reflects the entropy of the resulting residuals and hence the achievable reduction ratio. The normalized Ham-ming distance ˆ𝑝 estimated by TensorSketch correlates with this fraction. However, the relationship between ˆ𝑝 and re-duction ratio is non-linear: at small ˆ𝑝 , a marginal increase in Hamming distance disproportionately raises the fraction of large-magnitude residuals, causing a sharp drop in reduction; at larger ˆ𝑝 , residuals are already broadly distributed and ad-ditional divergence has diminishing effect—reduction ratio approaches 0 (no gain). Binary entropy S( ˆ𝑝 ) = − ˆ𝑝 log 2 ˆ𝑝 −(1− ˆ𝑝 ) log 2 (1− ˆ𝑝 ), scaled as 𝜏 = 8 S( ˆ𝑝 ), captures the per-element bit uncertainty a compressor must resolve and natu-rally models this non-linear regime change. The interaction term ˆ𝑝 · 𝜏 further captures the joint effect of raw divergence and its entropic cost. 
+
+Model Formulation. Let ˆ𝑝 denote the normalized Hamming distance estimated by the TensorSketch distance estimator Phase I - Greedy Assignment  
+
+> b0 b2
+> tnew tensor
+
+R=0.31 R=0.45 R=0.75 
+
+assign to b* = b3 
+
+(highest )  
+
+> Goal: b* = argmax bᵢ
+> ∈BR(t, bᵢ)
+
+Phase II - New Center Splitting    
+
+> Before:
+> c
+> high R low R (drifted) split candidates
+> one cluster overall
+> avg. reduction ratio
+> Promote c →new base, reassign members
+> After:
+> high R
+> new base
+> high R
+> two cluster overall
+> avg. reduction ratio
+
+improved!      
+
+> b1
+> b2
+> b2 c
+> bbase tensor
+> member (high )
+> drifted (low )
+> = 0.45
+> = 0.62 = 0.74
+> : reduction ratio
+
+Figure 10. Example workflow of FlexSplit .
+
+(§4.2). We define the following auxiliary feature: 
+
+𝜏 = 8 S( ˆ𝑝 ), (2) where H (·) is the binary entropy function and the factor of 8 normalizes 𝑡 to the per-byte bit-uncertainty. The predicted reduction ratio is: 
+
+R ( ˆ𝑝 ) = 𝛼 ˆ𝑝 + 𝛽 𝜏 + 𝛾 ( ˆ𝑝 · 𝜏 ) + 𝜖 , (3)   
+
+> bit divergence entropy cost
+> nonlinear correction bias
+
+where (𝛼, 𝛽, 𝛾, 𝜖 ) are regression coefficients fitted offline on a corpus of real tensor pairs with their measured reduction ratios, and the result is clipped to [0, 1]. The three terms pro-vide complementary signals: ˆ𝑝 captures raw bit divergence, 
+
+𝑡 captures its information-theoretic cost, and ˆ𝑝 · 𝑡 models the nonlinear coupling between divergence magnitude and entropic uncertainty. (see Fig. 13) 
+
+4.4 FlexSplit : Adaptive Tensor Clustering and Cluster Splitting 
+
+Finding the best base is an NP-hard problem and ILP solvers are too slow for online systems. We design FlexSplit , a two-phase online algorithm that operates entirely on TensorS-ketch fingerprints and TensorPred estimates. First, it greedily assigns each arriving tensor to the cheapest existing base, then periodically splits overgrown clusters. 
+
+Phase I: Greedy Incremental Assignment. As new mod-els are uploaded to the model hub, TensorHub processes each model’s tensors in turn. The first tensor with unseen shape  
+
+> 7Conference’17, July 2017, Washington, DC, USA Tingfeng Lan, Zirui Wang, Yunjia Zheng, Zhaoyuan Su, Juncheng Yang, and Yue Cheng
+
+and name naturally seeds a new cluster as its initial base. For every subsequent tensor, FlexSplit determines which existing base yields the highest predicted reduction ratio and assigns the tensor to that base’s cluster. As illustrated in Fig. 10 (top), a new tensor 𝑡 is evaluated against three existing bases 𝑏 0,
+
+𝑏 1, 𝑏 2 with predicted reduction ratios 0.31 , 0.45 , and 0.75 ,respectively; FlexSplit assigns 𝑡 to 𝑏 2 because it offers the highest predicted reduction. Since all comparisons operate on compact TensorSketch fingerprints rather than raw ten-sor bytes, each assignment requires at most 𝑂 (𝑘 ) distance evaluations over the current base set B, where 𝑘 = |B| is typ-ically small. With approximate nearest-neighbor indexing, this cost further reduces to 𝑂 (log 𝑘 ) per tensor. 
+
+Improvement Opportunities from New Arrivals . Greedy assignment connects each tensor to the best base available at the time of ingestion . As new models arrive, however, they introduce tensors that may serve as better centers for ex-isting members. In other words, the new arriving tensors improve the solution space that the current static assign-ments do not reflect. Fig. 10 (Phase II, “Before”) illustrates this: the cluster around 𝑏 2 mixes well-matched members (green, high R) with poorly-matched ones (red, low R) that would compress better against a newly available center, drag-ging the cluster-wide average R down to 0.45 . To capture these improvement opportunities without rerunning global optimization, FlexSplit periodically revisits each cluster and asks whether promoting an existing member to a new base would reduce the projected storage cost. 
+
+Phase II: Multi-Center Splitting. Phase II revisits each cluster and asks whether promoting an existing member to a new base would improve the cluster-wide reduction ratio, defined as the total bytes saved by delta-encoding non-base tensors against their best base, divided by the total raw size of all members. Bases themselves are stored in full and contribute zero reduction. Initially each cluster has a single base, so the initial ratio serves as the baseline. 
+
+FlexSplit solves this greedily. Starting from the original base, it first identifies split candidates : tensors whose pre-dicted reduction ratio falls significantly below the cluster average reduction ratio, indicating poor alignment with the current center. For each candidate, it evaluates the gain of promoting that tensor to a new base. Promoting a candidate trades off its own delta savings (now stored in full) against higher reduction ratios for nearby tensors that better align with it. A split is committed only when the split benefit is positive. FlexSplit selects the candidate with the largest gain, promotes it to a new base, and reassigns all members whose reduction ratio improves under this new center. As shown in Fig. 10 (bottom, “After”), promoting candidate 𝑐 to a new base partitions the original cluster into two coherent sub-clusters—both now exhibit high R for all members, lifting the cluster-wide average from R = 0.45 to 0.68 .
+
+## 5 Implementation 
+
+TensorHub is implemented in roughly 12K lines of Python and 3K lines of optimized C/Rust, and integrates directly with Hugging Face safetensors model formats. This section de-scribes the two main implementation aspects: the metadata engine that organizes the metadata of base and delta tensors (§5.1), and the SIMD/AVX2-accelerated operators that make ingestion and decompression fast (§5.2). 
+
+5.1 Metadata Engine Metadata Schema. TensorHub maintains per-tensor meta-data in PostgreSQL for distributed deployments. Each tensor metadata entry stores: 
+
+(model_id, tensor_name, tensor_id, tensor_sketch, dtype, shape) 
+
+As the original safetensors format already includes dtype 
+
+and shape in its header, TensorHub extracts them at zero cost. These fields allow the planner to filter out structurally in-compatible candidates before computing any fingerprint dis-tances, reducing the search space for valid base-delta pairs. 
+
+Search Index. To efficiently retrieve the most similar base for a given tensor, TensorHub builds an HNSW [ 60 ] index 
+
+over TensorSketch fingerprints . At ingestion time, each new tensor’s sketch is inserted into the index; at query time, the planner performs an approximate nearest-neighbor lookup to identify candidate bases in 𝑂 (log 𝑛 ) time, avoiding ex-haustive pairwise comparisons across the full tensor pool. 
+
+5.2 High-Performance Codec 
+
+All compute-intensive operations in the ingestion and re-trieval paths are implemented as SIMD-accelerated kernels in C and Rust, enabling TensorHub to saturate memory band-width on modern hardware. 
+
+TensorID . Tensor deduplication hashes each tensor’s raw bytes using xxHash64 with AVX2 vectorization. 
+
+TensorSketch . The TensorSketch kernel (§4.2) is imple-mented in Rust as a fused single-pass streaming operator over zero-copy mmap buffers. Per-bit hash and sign lookups are SIMD-parallel, and sketch accumulation requires no in-termediate buffers. 
+
+Pluggable Codec Engine. TensorHub ’s compression en-gine exposes a pluggable codec interface, decoupling plan-ning from compression so that any lossless compressor can be used. We implement two codecs targeting different trade-offs: 
+
+• Throughput-oriented TensorX extends BitX [ 91 ] with chunk-level parallelism and byte-plane separation. Chunks are compressed independently in parallel; byte group-ing (e.g., first byte of different BF16 floats compressed together) is used to exploit the near-zero skew of fine-tuned weight deltas for better entropy coding. All kernels are SIMD/AVX2-accelerated.         
+
+> 8TensorHub: Rethinking AI Model Hub with Tensor-Centric Compression Conference’17, July 2017, Washington, DC, USA
+> Table 1. Evaluation dataset.
+> Models Total tensors Unique tensors Total size
+> 2,890 961,509 741,689 40.11 TB
+
+• Reduction-oriented FM++ is a lossless codec for fine-tuned models, extended from FM-Delta [ 71 ]. We add native 
+
+BF16 support and chunk-level parallel execution, improv-ing throughput from ∼100 MB/s to 9,821 MB/s (a ∼98 ×
+
+speedup) while retaining its higher reduction ratio over 
+
+TensorX .
+
+## 6 Evaluation 
+
+6.1 Experimental Setup Dataset. We evaluate TensorHub by reconstructing the random-sampled model trace used in ZipLLM [ 91 ]. The details are shown in Table 1. It spans a broad range of architectures: 968 models derived from Qwen2.5 [ 97 ], 151 from Qwen3 [ 96 ], 139 from Mistral [ 47 ], 114 from Llama-3 [ 63 ], 1,431 from 
+
+Llama-3.1 [64 ], 47 from Llama-3.2 [ 66 ], 135 from Gemma-2 [ 75 ], and 63 from Gemma-3 [84]. 
+
+TensorHub Configurations. TensorHub ’s compression en-gine exposes a pluggable codec interface, allowing different delta compressors to be swapped without changing the plan-ning pipeline. We evaluate two configurations: 
+
+• TensorHub-TX (FlexSplit + TensorX ) for optimized com-pression/decompression throughput. 
+
+• TensorHub-FM++ (FlexSplit + FM++) for optimized re-duction ratio. 
+
+Compression Planner Baselines. To evaluate the end-to-end storage reduction achieved by TensorHub ’s plan-ning pipeline ( TensorPred + FlexSplit ), we compare against production-grade systems: 
+
+• ZipLLM [ 91 ]: the state-of-the-art model-aware lossless storage reduction system. It clusters models using either (i) the base_model field from Hugging Face model cards (when available) or (ii) a bit-distance metric [ 91 ] that mea-sures the number of differing bits between the target model and candidate bases, and then applies XOR-based delta compression within each cluster. 
+
+• Default: since FM-Delta [ 71 ] lacks a planning component, we enhance it with Hugging Face base_model metadata to group models by family and apply delta compression within each group. To reflect real-world metadata availabil-ity, we randomly sample 25.8% of models in the ZipLLM trace to carry metadata; the remaining models fall back to ZipNN [38] for standalone compression. 
+
+Compression Codec Baselines. To isolate the effect of the delta codec, we compare TensorX and FM-Delta against alternative compressors applied to the same base-delta pairs: 
+
+• BitX [ 91 ]: XOR-based delta compression that serves as the foundation for TensorX .
+
+• FM-Delta [ 98 ] vanilla: which lacks BF16 support and runs single-threaded at ∼100 MB/s.             
+
+> Table 2. Tensor metadata statistics and overhead.
+> Method #Tensors Per tensor Total size
+> TensorID (xxHash128) 741,689 16 B 11.97 MB TensorSketch ( 𝑑 =2,𝑤 =1024 )741,689 8 KB 6.08 GB Metadata overhead 0.015%
+
+• ZipNN [ 38 ]: groups floating-point numbers by byte com-ponent for single-tensor compression. It does not perform cross-tensor deduplication or delta compression; we addi-tionally enable tensor-level deduplication ( TensorDedup )for a fair comparison. 
+
+• zstd [ 18 ]: a general-purpose lossless compressor widely used in storage systems, applied to raw deltas. 
+
+• OpenZL [ 19 ]: a high-throughput lossless compression library that aggregates multiple compression algorithms. 
+
+Setup. We conduct our experiments on an Amazon EC2 [ 3]
+
+c6a.48xlarge instance, equipped with a 96-core AMD EPYC 7R13 processor and 384 GB of DRAM. Table 2 quantifies 
+
+TensorHub ’s metadata overhead. 
+
+6.2 End-to-end Comparison 6.2.1 Data Reduction Ratio. To assess the end-to-end effectiveness of TensorHub , we run both TensorHub-TX and 
+
+TensorHub-FM++ over the ZipLLM-Trace dataset. To mimic real-world usage on model hubs such as Hugging Face— where models arrive continuously—we incrementally ingest models in creation order and record the cumulative data reduction ratio. Fig. 11(a) reports how storage savings evolve as the corpus grows. Both TensorHub variants consistently outperform all base-lines and continue improving as more models are ingested, with no signs of saturation. TensorHub-FM++ achieves the highest reduction ratio (70.5%) owing to FM-Delta’s stronger compression, while TensorHub-TX reaches 65.1% with sub-stantially higher throughput (§6.2.2). This sustained upward trend reflects TensorHub ’s ability to discover new cross-tensor delta compression opportunities even at scale, whereas ZipLLM plateaus at 51.9% and standalone codecs—FM-Delta (37.1%), ZipNN (33.3%), and OpenZL (21.9%)—remain flat without cross-model pairing. The comparison between ZipLLM and the standalone codecs highlights that TensorHub ’s gains stem from both 
+
+better planning and better compression: ZipLLM’s metadata-based clustering already lifts it well above standalone meth-ods, yet TensorHub ’s content-driven FlexSplit planning un-locks an additional 12–17 percentage points on top. Both 
+
+TensorHub variants remain robust because they do not rely on user-supplied model-card annotations. To better understand the source of these gains, we examine the per-tensor reduction distribution (Fig. 11(b)). TensorHub-FM++ concentrates most tensors in the 60–90% reduction range, while standalone codecs (FM-Delta, ZipNN) cluster at                       
+
+> 9Conference’17, July 2017, Washington, DC, USA Tingfeng Lan, Zirui Wang, Yunjia Zheng, Zhaoyuan Su, Juncheng Yang, and Yue Cheng 01000 2000 3000
+> (a) Cumulative Storage Reduction Ratio
+> 20%
+> 30%
+> 40%
+> 50%
+> 60%
+> 70%
+> Cumulative Reduction Ratio
+> Aug 2024
+> 56.9%
+> 51.3%
+> 43.9%
+> 39.0%
+> 21.0%
+> 33.1%
+> Feb 2025
+> 68.4%
+> 62.9%
+> 51.9%
+> 41.2%
+> 21.8%
+> 33.4%
+> 70.5%
+> 65.1%
+> 53.4%
+> 41.5%
+> 33.3%
+> 21.9%
+> 025 50 75 100
+> (b) Tensor-level Reduction CDF
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> CDF
+> Q2.5 Q3 M0.1 M0.3 G2 G3 L3 L3.1 L3.2 L3.1-I
+> (c) Reduction Distribution by Family
+> 0%
+> 25%
+> 50%
+> 75%
+> Model-level Reduction %
+> OpenZL ZipNN FM-Delta ZipLLM TensorHub-TX TensorHub-FM++
+
+Figure 11. (a) Cumulative data reduction ratio as models are ingested into the ZipLLM-Trace corpus (ordered by creation time). ( b) Per-tensor data reduction ratio CDF. ( c) Per-model reduction ratio distributions by model family (Q: Qwen, M: Mistral, L: Llama, G: Gemma, I: Instruct). 
+
+TensorHub-FM++ consistently achieves the highest median reduction across all ten families, followed by TensorHub-TX .
+
+fixed reduction levels ( ∼37% and ∼33%). The strong perfor-mance of TensorHub-FM++ is not solely due to the underly-ing FM-Delta codec. Rather, it is TensorHub ’s tensor-centric planning—enabled by TensorSketch and FlexSplit —that un-covers high-quality cross-tensor pairings, allowing even a strong standalone compressor to operate on substantially lower-entropy deltas. In contrast, when applied without Ten-sorHub ’s planning, FM-Delta achieves only moderate, fixed compression gains. This demonstrates that the primary ben-efit comes from exposing previously hidden cross-tensor redundancy, with the compression codec further amplifying these gains. 
+
+Per Family Compression Breakdown. To understand how compression effectiveness varies across different model lin-eages, we break down the results by ten representative base families. Fig. 11(c) reports the model-level reduction ratio for all fine-tuned derivatives of each family. Across families, TensorHub-FM++ consistently achieves the highest median reduction, followed by TensorHub-TX ,with both substantially outperforming ZipLLM. The largest gaps appear on Qwen2.5, Mistral-v0.1, and Gemma-3, where ZipLLM’s reduction drops below 50% while TensorHub-FM++ 
+
+stays above 65%—a 20-25 percentage-point advantage driven by TensorHub ’s tensor-level matching, which discovers bet-ter bases even when fine-tuned variants drift from the nomi-nal base model. For families like Qwen3 and Gemma-2, some individual models approach near-100% reduction, reflecting highly homogeneous derivatives where all methods perform well; yet even here the TensorHub variants’ wider violin “bellies” concentrate at higher ratios (75%+), indicating more consistent compression across the population. Overall, this per-family analysis demonstrates that Ten-sorHub is model-agnostic and robust regardless of the codec choice, providing large benefits when lineage structure is complex while still improving upon ZipLLM even for tightly clustered families. 
+
+Table 3. Data ingestion and retrieval throughput with 192 threads, measured with all data in memory (no storage I/O). 
+
+Method Ingestion (MB/s) Retrieval (MB/s) 
+
+ZipNN 1,473 9,575 ZipLLM 5,942 7,981 OpenZL 753 19,068 
+
+TensorHub-FM++ 9,821 8,494 
+
+TensorHub-TX 22,916 28,393 
+
+6.2.2 Throughput Performance. Table 3 reports end-to-end ingestion (deduplication + compression) and retrieval (decompression) throughput with 192 threads. 
+
+Data Ingestion Throughput. TensorHub ’s ingestion pipeline consists of three stages—xxHash64 deduplication, TensorS-ketch fingerprinting, and codec encoding—all implemented as SIMD-accelerated kernels over zero-copy mmap buffers (§5.2). Because every stage is embarrassingly parallel across tensors and free of dynamic allocation, TensorHub scales lin-early with thread count. TensorHub-TX sustains 22,916 MB/s aggregate ingestion throughput thanks to TensorX ’s light-weight byte-plane pipeline. TensorHub-FM++ trades through-put for higher compression, while still remaining substan-tially faster than ZipLLM. 
+
+Data Retrieval Throughput. Retrieval cost is dominated by decompression, which is incurred on every model download. 
+
+TensorHub-TX ’s TensorX decompresses each chunk indepen-dently and recombines byte planes in parallel, sustaining 28,393 MB/s—well above typical network and storage band-width, ensuring that decompression is never the retrieval bottleneck. TensorHub-FM++ achieves 8,494 MB/s, balancing decompression speed with its higher compression effective-ness. ZipLLM and ZipNN achieve 7,981 MB/s and 9,575 MB/s, respectively. In practice, TensorHub ’s ingestion and retrieval are un-likely to be compute-bound: with throughput well above  
+
+> 10 TensorHub: Rethinking AI Model Hub with Tensor-Centric Compression Conference’17, July 2017, Washington, DC, USA
+
+typical storage bandwidth, end-to-end performance is ex-pected to be limited by disk I/O rather than compression or decompression. 
+
+6.3 TensorSketch and Prediction Model Similarity Search Baselines. To evaluate TensorSketch ’s effectiveness in identifying compressible tensor pairs, we compare against alternative similarity search methods paired with the same downstream planner: 
+
+• Bit Distance [ 91 ]: computes the exact pairwise Hamming distance over raw tensor bytes via brute-force comparison. 
+
+• Raw Tensor HNSW [ 60 ]: builds an HNSW index directly over raw tensor bytes, treating each full tensor as a high-dimensional vector for nearest-neighbor search. 
+
+• LSH [ 33 ]: applies locality-sensitive hashing to raw tensor representations, projecting tensors into hash buckets so that similar tensors are likely to collide. 
+
+• RandProj 2048d [ 48 , 86 ]: applies a random linear projec-tion (Johnson–Lindenstrauss) to reduce each tensor to a 256-dimensional embedding, then builds an HNSW index over the projected vectors. 
+
+Sketch Method Comparison. We compare TensorSketch 
+
+(backed by HNSW, see §5.1) against Direct HNSW, LSH, and RandProj 2048d across three major model families (Qwen, Llama, Gemma). As shown in Fig. 12, TensorSketch domi-nates on all three metrics. On Recall@1 , TensorSketch achieves near-perfect recall (∼1.00) across all families, while Direct HNSW and LSH fluctuate between 0.60 and 0.81. On greedy reduction ratio ,
+
+TensorSketch consistently achieves the highest reduction, reaching approximately 60% on the Gemma family, demon-strating that its high recall directly translates to better com-pression planning. On end-to-end QPS , TensorSketch sustains over 25,000 QPS—500–800 × faster than Direct HNSW ( ∼31– 45 QPS)—because its compact sketch reduces the per-query data footprint from ∼35 MB (Direct HNSW) to only ∼8 KB, a 
+
+>4,000 × reduction in I/O. 
+
+Prediction Model Accuracy. Next, we evaluate the accu-racy of the reduction prediction model. Fig. 13(a) plots pre-dicted vs. real reduction ratio for 5.7M tensor pairs. The scatter tightly follows the diagonal (Pearson 𝑟 = 0.993 ), with a mean absolute error of only 1.11% and a median absolute er-ror of 0.79%. The close alignment across the full range—from 20% to near-perfect reduction—shows that the lightweight sketch-based predictor faithfully captures delta compress-ibility without requiring full-tensor compression. Fig. 13(b) presents the CDF of absolute prediction error. The model achieves a median error (P50) of 0.79%, meaning that half of all predictions differ from ground truth by less than one percentage point. Even at the tail, errors remain small: P90 = 2.32% and P99 = 6.03%. This level of accuracy is more than adequate for our use case: planning and clustering depend primarily on relative ordering among candidate bases rather than exact ratio magnitudes. The prediction model thus provides a lightweight yet effective mechanism for large-scale storage optimization. 
+
+6.4 FlexSplit Analysis Evaluating Solvers. To assess the scalability and quality of FlexSplit ’s heuristic base selection, we compare against exact and classical approximation solvers: 
+
+• ILP (Gurobi) [ 36 ]: an integer linear programming formu-lation solved by Gurobi, providing the global optimum but intractable beyond a few hundred tensors. 
+
+• Primal-Dual [ 45 ]: the classical 3-approximation algo-rithm using the primal-dual schema. It offers provable guarantees but requires the full pairwise cost matrix and assumes static inputs. 
+
+Scalability. We benchmark the end-to-end solving time of FlexSplit against ILP and Primal-Dual over up to 800 
+
+Qwen2.5-7B tensors using two representative tensor types (q_proj_weight and v_proj_weight ). The results highlight a sharp contrast in scalability (Fig. 14). As the number of ten-sors grows from 100 to 800, ILP’s solving time increases super-linearly (exceeding 70 s at 800 tensors), making it impractical for production-scale model hubs. Primal-Dual grows linearly but still increases with scale. In contrast, FlexS-plit maintains near-constant solving time across all scales, approaching zero even at 800 tensors. Its fingerprint-guided assignments and lightweight predictive splitting require only sketch-level distance evaluations, avoiding the expensive global cost computation that dominates the baselines. Despite this vastly lower solve time, FlexSplit achieves a 
+
+near-optimal reduction ratio—stable at 0.60-0.75 and consis-tently within a few percentage points of the ILP optimum— demonstrating that the algorithm is both compute-efficient and high quality. This scalability enables TensorHub to con-tinuously ingest large model families while retaining ILP-level compression effectiveness. 
+
+Splitting Behavior. We examine how FlexSplit ’s two-phase structure behaves in practice over the full ZipLLM-Trace corpus. Fig. 15 characterizes the clusters produced by Phase I greedy assignment. The left panel shows cluster size distri-butions on a log scale: non-split clusters are concentrated at small sizes ( <10 tensors), while split-targeted clusters (i.e., clusters that will trigger a split in Phase II) dominate the 10 2–
+
+10 3 range, aggregating heterogeneous tensors from diverse fine-tuning lineages. The right panel reveals a corresponding compressibility gap: split-targeted clusters peak at low reduc-tion ratios (0.25–0.50), whereas non-split clusters peak near 0.75. This confirms that Phase II applies a dual criterion—it triggers a split only when a cluster is both sufficiently large and sufficiently inefficient to warrant refinement. Overall, 58.9% of clusters require no split at all, confirming that FlexS-plit ’s refinement is surgical rather than pervasive. Fig. 16 quantifies the improvement from Phase II splitting over 1,352 clusters. The left panel plots per-cluster reduction ratio before (greedy assignment) vs. after ( FlexSplit ): 98.8% of 
+
+> 11
+
+Conference’17, July 2017, Washington, DC, USA Tingfeng Lan, Zirui Wang, Yunjia Zheng, Zhaoyuan Su, Juncheng Yang, and Yue Cheng Qwen2.5-7B Llama-3.1-8B Gemma-2-9b        
+
+> (a) Recall@1
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Recall@1
+> 1.00
+> 1.00
+> 1.00
+> 1.00
+> 1.00
+> 1.00
+> 0.60
+> 0.60
+> 0.73
+> 0.61
+> 0.66
+> 0.77
+> 0.41
+> 0.39
+> 0.32
+> Qwen2.5-7B Llama-3.1-8B Gemma-2-9b
+> (b) End-to-End QPS
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> 10 4
+> 10 5
+> 10 6
+> Queries per Second
+> 25,056
+> 26,107
+> 26,990
+> 2
+> 1
+> 2
+> 45
+> 31
+> 41
+> 2
+> 1
+> 2
+> 24,312
+> 25,480
+> 26,105
+> (c) Average Per-Tensor Query IO
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> 10 4
+> 10 5
+> 10 6
+> Avg. Query IO
+> 8.0 KB
+> 35 MB 35 MB
+> 1.2 KB
+> 8.0 KB
+> TensorSketch Bit Distance Raw Tensor HNSW LSH RandProj 2048d
+
+Figure 12. Performance Comparison of TensorSketch . Comparison of TensorSketch against baselines across Qwen, Llama, and Gemma families. ( a) Recall@1 (top-1 match accuracy): TensorSketch maintains a perfect 1.00 Recall@1, matching the exact Bit Distance baseline. (b) End-to-End QPS (queries per second): TensorSketch achieves over 25,000 QPS, representing a 4-order-of-magnitude speedup (up to 20,082 ×) compared to Bit Distance. ( c) Average Query IO : TensorSketch reduces the per-tensor query I/O from 35 MB (Bit Distance) to 8.0 KB, achieving a 4,517 × reduction in IO overhead while maintaining significantly higher accuracy than other low-IO baselines like LSH. 0% 20% 40% 60% 80% 100%   
+
+> (a) Real Reduction Ratio (%)
+> 0%
+> 20%
+> 40%
+> 60%
+> 80%
+> 100%
+> Predicted Reduction Ratio (%)
+> MAE: 1.11%
+> Med. AE: 0.79%
+> Pearson r: 99.3%
+> 020 40
+> (b) Absolute Error (%)
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> CDF
+> P50: 0.79%
+> P90: 2.32%
+> P99: 6.03%
+
+Figure 13. Validation of the reduction ratio prediction model over 5.7M tensor pairs. ( Left ) Predicted vs. real reduction ratio. (Right ) CDF of absolute prediction error. 200 400 600 800    
+
+> # of Tensors
+> 0.00
+> 0.20
+> 0.40
+> 0.60
+> 0.80
+> Reduction Ratio
+> ILP (Optimal)
+> Primal-Dual
+> FlexSplit (Ours)
+> 200 400 600 800
+> # of Tensors
+> 0
+> 20
+> 40
+> 60
+> Time (s)
+> ILP (Optimal)
+> Primal-Dual
+> FlexSplit (Ours)
+
+(a) q_proj_weight tensors. 200 400 600 800     
+
+> # of Tensors
+> 0.00
+> 0.20
+> 0.40
+> 0.60
+> 0.80
+> Reduction Ratio
+> ILP (Optimal)
+> Primal-Dual
+> FlexSplit (Ours)
+> 200 400 600 800
+> # of Tensors
+> 0
+> 20
+> 40
+> 60
+> Time (s)
+> ILP (Optimal)
+> Primal-Dual
+> FlexSplit (Ours)
+
+(b) v_proj_weight tensors. 
+
+Figure 14. Scalability of FlexSplit vs. ILP and Primal-Dual solvers on two representative tensor types. ( Top ) Reduction ratio remains near-optimal for FlexSplit across all scales. ( Bottom ) Solving time: ILP grows super-linearly and Primal-Dual grows linearly, while 
+
+FlexSplit maintains near-constant time. 
+
+split clusters improve, with the median ratio increasing from 0.463 to 0.650. Only 1.2% of cases show marginal regression, 10 1 10 2 10 3 10 4
+
+Greedy Attach Cluster Size 
+
+0% 
+
+5% 
+
+10% 
+
+15% 
+
+> Percentage (%)
+> Will Not Split (58.9%)
+> Will Trigger Split (41.1%)
+
+0.00 0.25 0.50 0.75 1.00 
+
+Greedy Attach Reduction Ratio 
+
+0% 
+
+2% 
+
+4% 
+
+6% 
+
+> Percentage (%)
+> Will Not Split (58.9%)
+> Will Trigger Split (41.1%)
+
+Figure 15. Cluster characteristics after Phase I greedy assignment, categorized by whether Phase II triggers a split. ( Left ) Cluster size distribution (log-scale). ( Right ) Reduction ratio distribution. 0% 20% 40% 60% 80% 100% 
+
+Before Split Reduction Ratio (%) 
+
+0% 
+
+20% 
+
+40% 
+
+60% 
+
+80% 
+
+100% 
+
+> After Split Reduction Ratio (%)
+> med. before: 46.9%
+> med. after: 65.0%
+> Better
+> Worse
+
+0% 50% 
+
+Benefit Ratio (%) 
+
+0% 
+
+2% 
+
+4% 
+
+6% 
+
+8% 
+
+10% 
+
+> Percentage (%)
+> Positive (98.8%)
+> Negative (1.2%)
+> Mean: 22.5%
+> Median: 16.3%
+
+Figure 16. Effect of Phase II FlexSplit splitting on per-cluster reduc-tion ratio ( 𝑛 = 1,352 clusters). ( Left ) Scatter of greedy assignment (Phase I) vs. FlexSplit (Phase II) reduction ratio. ( Right ) Distribu-tion of net gain ( FlexSplit minus greedy). 
+
+concentrated near zero. The right panel shows the distribu-tion of net gain: most improvements fall between 0.1 and 0.3, meaning Phase II typically adds 10–30% additional reduction per cluster. This demonstrates that Phase II reliably reassigns outlier tensors—those with poor fit to their initial base—to better-matched centers, directly translating into improved storage efficiency without accessing full tensor contents. 
+
+## 7 Conclusion 
+
+This paper presents TensorHub , a compact, tensor-centric AI model storage system. TensorHub addresses the granularity 
+
+12 TensorHub: Rethinking AI Model Hub with Tensor-Centric Compression Conference’17, July 2017, Washington, DC, USA 
+
+mismatch in existing delta compression approaches by ex-ploiting data-driven cross-tensor relationships. TensorHub 
+
+synthesizes three novel techniques: a compression-aware fingerprint that captures bit-level tensor similarity, a light-weight prediction model that estimates delta compressibil-ity without accessing full data, and an adaptive clustering planner that discovers high-quality base–delta tensor pair-ings at scale. Together, these techniques enable an efficient, metadata-oblivious compression pipeline that substantially reduces storage while maintaining high performance in large-scale real-world model repositories. 
+
+## References 
+
+[1] Jyrki Alakuijala, Andrea Farruggia, Paolo Ferragina, Evgenii Kliuch-nikov, Robert Obryk, Zoltan Szabadka, and Lode Vandevenne. Brotli: A general-purpose data compressor. ACM Transactions on Information Systems , 2019. [2] Amazon Web Services. Amazon S3: A Simple Storage Service. https: //aws.amazon.com/s3/ , 2006. [3] Amazon Web Services. Amazon ec2 - elastic compute cloud. https: //aws.amazon.com/ec2/ , 2026. Accessed: 2026-04-02. [4] Hyung-Chan An, Ashkan Norouzi-Fard, and Ola Svensson. Dynamic facility location via exponential clocks. 13(2), February 2017. [5] Alexandr Andoni and Ilya Razenshteyn. Optimal data-dependent hashing for approximate near neighbors. In Proceedings of the Forty-Seventh Annual ACM Symposium on Theory of Computing , STOC ’15, page 793–801, New York, NY, USA, 2015. Association for Computing Machinery. [6] Fabien André, Anne-Marie Kermarrec, and Nicolas Le Scouarnec. Cache locality is not enough: high-performance nearest neighbor search with product quantization fast scan. Proc. VLDB Endow. ,9(4):288–299, December 2015. [7] Vijay Arya, Naveen Garg, Rohit Khandekar, Adam Meyerson, Kamesh Munagala, and Vinayaka Pandit. Local search heuristics for 𝑘 -median and facility location problems. SIAM Journal on Computing , 33(3):544– 562, 2004. [8] J.E. Beasley. Lagrangean heuristics for location problems. European Journal of Operational Research , 65(3):383–399, 1993. [9] Ksenia Bestuzheva, Mathieu Besançon, Wei-Kun Chen, Antonia Chmiela, Tim Donkiewicz, Jasper van Doornmalen, Leon Eifler, Oliver Gaul, Gerald Gamrath, Ambros Gleixner, et al. The SCIP Optimization Suite 8.0. Technical Report, Optimization Online, 2021. [10] Kevin Beyer, Jonathan Goldstein, Raghu Ramakrishnan, and Uri Shaft. When is “nearest neighbor” meaningful? In Proceedings of the 7th International Conference on Database Theory (ICDT) , pages 217–235, 1999. [11] Alina Beygelzimer, Sham Kakade, and John Langford. Cover trees for nearest neighbor. In Proceedings of the 23rd International Conference on Machine Learning , ICML ’06, page 97–104, New York, NY, USA, 2006. Association for Computing Machinery. [12] Kushal Raj Bhandari, Pin-Yu Chen, and Jianxi Gao. Forecasting open-weight ai model growth on huggingface, 2025. [13] Davis Blalock, Samuel Madden, and John Guttag. Sprintz: Time series compression for the internet of things. Proceedings of the ACM on Interactive, Mobile, Wearable and Ubiquitous Technologies , 2(3):1–23, 2018. [14] Martin Burtscher and Paruj Ratanaworabhan. High throughput com-pression of double-precision floating-point data. In 2007 Data Com-pression Conference (DCC’07) , pages 293–302. IEEE, 2007. [15] Moses Charikar, Kevin Chen, and Martin Farach-Colton. Finding fre-quent items in data streams. In International Colloquium on Automata, Languages, and Programming , pages 693–703. Springer, 2002. [16] Cloudflare. Cloudflare r2. https://www.cloudflare.com/developer-platform/products/r2/ .[17] Yann Collet. xxhash - extremely fast hash algorithm. https://github. com/Cyan4973/xxHash , 2012. [18] Yann Collet and Murray Kucherawy. Zstandard compression and the application/zstd media type. Technical report, 2018. [19] Yann Collet, Nick Terrell, W. Felix Handte, Danielle Rozenblit, Vic-tor Zhang, Kevin Zhang, Yaelle Goldschlag, Jennifer Lee, Elliot Gorokhovsky, Yonatan Komornik, Daniel Riegel, Stan Angelov, and Nadav Rotem. Openzl: A graph-based model for compression, 2025. [20] Xingyu Dang, Christina Baek, Kaiyue Wen, Zico Kolter, and Aditi Raghunathan. Weight ensembling improves reasoning in language models, 2025. [21] Mayur Datar, Nicole Immorlica, Piotr Indyk, and Vahab S. Mirrokni. Locality-sensitive hashing scheme based on p-stable distributions. In 
+
+Proceedings of the Twentieth Annual Symposium on Computational Ge-ometry , SCG ’04, page 253–262, New York, NY, USA, 2004. Association for Computing Machinery. [22] davanstrien. Add ‘base_model‘ metadata to the automatically gener-ated model card. GitHub Issue #938, huggingface/peft, 2023. Accessed: 2025-12-12. [23] Dell Technologies. Understanding data domain compres-sion. https://www.dell.com/en-us/shop/storage-servers-and-networking-for-business/sf/powerprotect-data-domain , 2023. [24] Tim Dettmers, Ruslan Svirschevski, Vage Egiazarian, Denis Kuznedelev, Elias Frantar, Saleh Ashkboos, Alexander Borzunov, Torsten Hoefler, and Dan Alistarh. Spqr: A sparse-quantized rep-resentation for near-lossless llm weight compression. arXiv preprint arXiv:2306.03078 , 2023. [25] Peter Deutsch. Deflate compressed data format specification version 1.3. Technical report, 1996. [26] Sheng Di and Franck Cappello. Fast error-bounded lossy hpc data compression with sz. In 2016 ieee international parallel and distributed processing symposium (ipdps) , pages 730–739. IEEE, 2016. [27] James Diffenderfer, Alyson L Fox, Jeffrey A Hittinger, Geoffrey Sanders, and Peter G Lindstrom. Error analysis of zfp compres-sion for floating-point data. SIAM Journal on Scientific Computing ,41(3):A1867–A1898, 2019. [28] Jarek Duda. Asymmetric numeral systems: entropy coding combining speed of huffman coding with compression rate of arithmetic coding. 
+
+arXiv preprint arXiv:1311.2540 , 2013. [29] Hugging Face. Hugging face. https://huggingface.co/ , 2023. [30] Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. Gptq: Accurate post-training quantization for generative pre-trained transformers. arXiv preprint arXiv:2210.17323 , 2022. [31] Cong Fu, Chao Xiang, Changxu Wang, and Deng Cai. Fast approx-imate nearest neighbor search with the navigating spreading-out graph. Proc. VLDB Endow. , 12(5):461–474, January 2019. [32] Junhao Gan, Jianlin Feng, Qiong Fang, and Wilfred Ng. Locality-sensitive hashing scheme based on dynamic collision counting. In 
+
+Proceedings of the 2012 ACM SIGMOD International Conference on Management of Data , SIGMOD ’12, page 541–552, New York, NY, USA, 2012. Association for Computing Machinery. [33] Aristides Gionis, Piotr Indyk, Rajeev Motwani, et al. Similarity search in high dimensions via hashing. In Vldb , volume 99, pages 518–529, 1999. [34] GitHub. Git large file storage (lfs). https://github.com/git-lfs/git-lfs ,2024. [35] Almog Gueta, Elad Venezian, Colin Raffel, Noam Slonim, Yoav Katz, and Leshem Choshen. Knowledge is a region in weight space for fine-tuned language models. In The 2023 Conference on Empirical Methods in Natural Language Processing , 2023. [36] Gurobi Optimization, LLC. Gurobi Optimizer Reference Manual, 2026. 13 Conference’17, July 2017, Washington, DC, USA Tingfeng Lan, Zirui Wang, Yunjia Zheng, Zhaoyuan Su, Juncheng Yang, and Yue Cheng 
+
+[37] R. W. Hamming. Error detecting and error correcting codes. The Bell System Technical Journal , 29(2):147–160, 1950. [38] Moshik Hershcovitch, Andrew Wood, Leshem Choshen, Guy Gir-monsky, Roy Leibovitz, Ilias Ennmouri, Michal Malka, Peter Chin, Swaminathan Sundararaman, and Danny Harnik. Zipnn: Lossless compression for ai models. arXiv preprint arXiv:2411.05239 , 2024. [39] David A Huffman. A method for the construction of minimum-redundancy codes. Proceedings of the IRE , 40(9):1098–1101, 1952. [40] Hugging Face. Model cards - hugging face documentation. https: //huggingface.co/docs/hub/en/model-cards , 2024. [41] Hugging Face. Safetensors documentation. https://huggingface.co/ docs/safetensors/en/index , 2024. [42] Hugging Face. Ready, xet, go! a new era of dataset versioning. https: //huggingface.co/spaces/jsulz/ready-xet-go , 2025. Accessed: 2025-11-09. [43] IBM. IBM ILOG CPLEX Optimization Studio, 2022. [44] Piotr Indyk and Rajeev Motwani. Approximate nearest neighbors: towards removing the curse of dimensionality. In Proceedings of the 30th Annual ACM Symposium on Theory of Computing (STOC) , pages 604–613, 1998. [45] Kamal Jain and Vijay V. Vazirani. Approximation algorithms for metric facility location and 𝑘 -median problems using the primal-dual schema and Lagrangian relaxation. Journal of the ACM , 48(2):274–296, 2001. [46] Dong-Hwan Jang, Sangdoo Yun, and Dongyoon Han. Model stock: All we need is just a few fine-tuned models. In Computer Vision – ECCV 2024: 18th European Conference, Milan, Italy, September 29–October 4, 2024, Proceedings, Part XLIV , page 207–223, Berlin, Heidelberg, 2024. Springer-Verlag. [47] Albert Q. Jiang, Alexandre Sablayrolles, Arthur Mensch, Chris Bam-ford, Devendra Singh Chaplot, Diego de las Casas, Florian Bressand, Gianna Lengyel, Guillaume Lample, Lucile Saulnier, Lélio Renard Lavaud, Marie-Anne Lachaux, Pierre Stock, Teven Le Scao, Thibaut Lavril, Thomas Wang, Timothée Lacroix, and William El Sayed. Mis-tral 7b. https://arxiv.org/abs/2310.06825 , 2023. [48] William B Johnson, Joram Lindenstrauss, et al. Extensions of lipschitz mappings into a hilbert space. Contemporary mathematics , 26(189-206):1, 1984. [49] Herve Jégou, Matthijs Douze, and Cordelia Schmid. Product quan-tization for nearest neighbor search. IEEE Transactions on Pattern Analysis and Machine Intelligence , 33(1):117–128, 2011. [50] Maximilian Kuschewski, David Sauerwein, Adnan Alhomssi, and Viktor Leis. Btrblocks: Efficient columnar compression for data lakes. 
+
+Proceedings of the ACM on Management of Data , 1(2):1–26, 2023. [51] Benjamin Laufer, Hamidah Oderinwale, and Jon Kleinberg. Anatomy of a machine learning ecosystem: 2 million models on hugging face, 2025. [52] Panagiotis Liakos, Katia Papakonstantinopoulou, and Yannis Kotidis. Chimp: efficient lossless floating point compression for time series databases. Proceedings of the VLDB Endowment , 15(11):3058–3070, 2022. [53] Weixin Liang, Nazneen Rajani, Xinyu Yang, Ezinwanne Ozoani, Eric Wu, Yiqun Chen, Daniel Scott Smith, and James Zou. What’s docu-mented in ai? systematic analysis of 32k ai model cards. arXiv preprint arXiv:2402.05160 , 2024. [54] Xin Liang, Sheng Di, Dingwen Tao, Zizhong Chen, and Franck Cap-pello. An efficient transformation scheme for lossy data compression with point-wise relative error bound. In 2018 IEEE International Conference on Cluster Computing (CLUSTER) , pages 179–189. IEEE, 2018. [55] Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. Awq: Activation-aware weight quantization for on-device llm compression and acceleration. Proceedings of Machine Learning and Systems , 6:87–100, 2024. [56] Peter Lindstrom. Fixed-rate compressed floating-point arrays. IEEE transactions on visualization and computer graphics , 20(12):2674–2683, 2014. [57] Chunwei Liu, Hao Jiang, John Paparrizos, and Aaron J Elmore. Decom-posed bounded floats for fast compression and queries. Proceedings of the VLDB Endowment , 14(11):2586–2598, 2021. [58] Kejing Lu, Mineichi Kudo, Chuan Xiao, and Yoshiharu Ishikawa. Hvs: hierarchical graph structure based on voronoi diagrams for solving approximate nearest neighbor search. Proc. VLDB Endow. ,15(2):246–258, October 2021. [59] Josh MacDonald. File system support for delta compression . PhD thesis, Masters thesis. Department of Electrical Engineering and Computer Science . . . , 2000. [60] Yu A. Malkov and D. A. Yashunin. Efficient and robust approximate nearest neighbor search using hierarchical navigable small world graphs. IEEE Trans. Pattern Anal. Mach. Intell. , 42(4):824–836, April 2020. [61] Yury Malkov, Alexander Ponomarenko, Andrey Logvinov, and Vladimir Krylov. Approximate nearest neighbor algorithm based on navigable small world graphs. Information Systems , 45:61–68, 2014. [62] Detlev Marpe, Heiko Schwarz, and Thomas Wiegand. Context-based adaptive binary arithmetic coding in the h. 264/avc video compres-sion standard. IEEE Transactions on circuits and systems for video technology , 13(7):620–636, 2003. [63] Meta AI. Introducing llama 3.1: Our most capable models to date. 
+
+https://ai.meta.com/blog/meta-llama-3-1/ , 2024. [64] Meta AI. Introducing meta llama 3: The most capable openly available llm to date. https://ai.meta.com/blog/meta-llama-3/ , 2024. [65] Meta AI. Llama 3.1 8b. https://huggingface.co/meta-llama/Llama-3.1-8B , 2024. [66] Meta AI. Llama 3.2: Revolutionizing edge ai and vision with open, customizable models. https://ai.meta.com/blog/llama-3-2-connect-2024-vision-edge-mobile-devices/ , 2024. [67] Meta AI. The llama 4 herd: The beginning of a new era of natively mul-timodal ai innovation. https://ai.meta.com/blog/llama-4-multimodal-intelligence/ , 2025. [68] Athicha Muthitacharoen, Benjie Chen, and David Mazieres. A low-bandwidth network file system. In Proceedings of the eighteenth ACM symposium on Operating systems principles , pages 174–187, 2001. [69] NetApp. Netapp ontap 9 storage efficiency guide. Technical Report TR-3966, NetApp, 2020. [70] NetApp. Ontap data management software. https://www.netapp. com/data-management/ontap-data-management-software/ , 2024. [71] Wanyi Ning, Jingyu Wang, Qi Qi, Mengde Zhu, Haifeng Sun, Daixuan Cheng, Jianxin Liao, and Ce Zhang. Fm-delta: Lossless compression for storing massive fine-tuned foundation models. Advances in Neural Information Processing Systems , 37:66796–66825, 2024. [72] Myoungwon Oh, Sungmin Lee, Samuel Just, Young Jin Yu, Duck-Ho Bae, Sage Weil, Sangyeun Cho, and Heon Y. Yeom. TiDedup: A new distributed deduplication architecture for ceph. In 2023 USENIX Annual Technical Conference (USENIX ATC 23) , pages 855–869, 2023. [73] William B. Pennebaker, Joan L. Mitchell, Glen G Langdon, and Ronald B Arps. An overview of the basic principles of the q-coder adaptive binary arithmetic coder. IBM Journal of research and devel-opment , 32(6):717–726, 1988. [74] PostgreSQL. PostgreSQL: The World’s Most Advanced Open Source Relational Database. https://www.postgresql.org/ .[75] Morgane Riviere et al. Gemma 2: Improving open language models at a practical size. arXiv preprint arXiv:2408.00118 , 2024. 14 TensorHub: Rethinking AI Model Hub with Tensor-Centric Compression Conference’17, July 2017, Washington, DC, USA 
+
+[76] Raunak Shah, Zhaoheng Li, and Yongjoo Park. Qstore: Quantization-aware compressed model storage. Proc. VLDB Endow. , 19(3):388–398, March 2026. [77] Gregory Shakhnarovich, Trevor Darrell, and Piotr Indyk. Nearest-Neighbor Methods in Learning and Vision: Theory and Practice (Neural Information Processing) . The MIT Press, 2006. [78] Chanop Silpa-Anan and Richard Hartley. Optimised kd-trees for fast image descriptor matching. In 2008 IEEE Conference on Computer Vision and Pattern Recognition , pages 1–8, 2008. [79] Michal Stabno and Robert Wrembel. Rlh: Bitmap compression tech-nique based on run-length and huffman encoding. In Proceedings of the ACM tenth international workshop on Data warehousing and OLAP , pages 41–48, 2007. [80] Trevor Stalnaker, Nathan Wintersgill, Oscar Chaparro, Laura A. Hey-mann, Massimiliano Di Penta, Daniel M German, and Denys Poshy-vanyk. An empirical analysis of machine learning model and dataset documentation, supply chain, and licensing challenges on hugging face. ACM Trans. Softw. Eng. Methodol. , November 2025. Just Ac-cepted. [81] Zhaoyuan Su, Ammar Ahmed, Zirui Wang, Ali Anwar, and Yue Cheng. Everything you always wanted to know about storage compressibility of pre-trained ml models but were afraid to ask. Proc. VLDB Endow. ,17(8):2036–2049, April 2024. [82] Muhammad Asif Suryani, Saurav Karmakar, Brigitte Mathiak, and Philipp Mayr. Model card metadata collection from hugging face to foster multidisciplinary ai research: A dataset. In Proceedings of the 14th International Conference on Data Science, Technology and Applications , pages 583–590, 2025. [83] Dingwen Tao, Sheng Di, Zizhong Chen, and Franck Cappello. Signif-icantly improving lossy compression for scientific data sets based on multidimensional prediction and error-controlled quantization. In 
+
+2017 IEEE International Parallel and Distributed Processing Symposium (IPDPS) , pages 1129–1139. IEEE, 2017. [84] Gemma Team, Aishwarya Kamath, Johan Ferret, Shreya Pathak, Nino Vieillard, Ramona Merhej, Sarah Perrin, Tatiana Matejovicova, Alexandre Ramé, Morgane Rivière, et al. Gemma 3 technical report. 
+
+arXiv preprint arXiv:2503.19786 , 2025. [85] Andrew Tridgell. Efficient algorithms for sorting and synchronization. 1999. [86] Santosh S Vempala. The random projection method , volume 65. Amer-ican Mathematical Soc., 2005. [87] Jeffrey Scott Vitter. Design and analysis of dynamic huffman codes. 
+
+Journal of the ACM (JACM) , 34(4):825–845, 1987. [88] Deepak Vohra. Practical hadoop ecosystem. Chapter in Apache Parquet , 177:178, 2016. [89] Borui Wan, Mingji Han, Yiyao Sheng, Yanghua Peng, Haibin Lin, Mofan Zhang, Zhichao Lai, Menghan Yu, Junda Zhang, Zuquan Song, Xin Liu, and Chuan Wu. ByteCheckpoint: A unified checkpointing system for large foundation model development. In 22nd USENIX Symposium on Networked Systems Design and Implementation (NSDI 25) , pages 559–578, Philadelphia, PA, April 2025. USENIX Association. [90] Jingdong Wang and Shipeng Li. Query-driven iterated neighborhood graph search for large scale indexing. In Proceedings of the 20th ACM International Conference on Multimedia , MM ’12, page 179–188, New York, NY, USA, 2012. Association for Computing Machinery. [91] Zirui Wang, Tingfeng Lan, Zhaoyuan Su, Juncheng Yang, and Yue Cheng. Zipllm: Efficient llm storage via model-aware synergistic data deduplication and compression. arXiv preprint arXiv:2505.06252 ,2025. [92] Welch. A technique for high-performance data compression. Com-puter , 17(6):8–19, 1984. [93] Wen Xia, Yukun Zhou, Hong Jiang, Dan Feng, Yu Hua, Yuchong Hu, Qing Liu, and Yucheng Zhang. {FastCDC }: A fast and efficient 
+
+{Content-Defined } chunking approach for data deduplication. In 
+
+2016 USENIX Annual Technical Conference (USENIX ATC 16) , pages 101–114, 2016. [94] Siqi Xiang, Sheng Wang, Xiaokui Xiao, Cong Yue, Zhanhao Zhao, and Beng Chin Ooi. Neurstore: Efficient in-database deep learning model management system. Proc. ACM Manag. Data , 3(6), December 2025. [95] Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. Smoothquant: Accurate and efficient post-training quantization for large language models. In International Conference on Machine Learning , pages 38087–38099. PMLR, 2023. [96] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388 , 2025. [97] An Yang, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chengyuan Li, Dayiheng Liu, Fei Huang, Haoran Wei, et al. Qwen2. 5 technical report. arXiv preprint arXiv:2412.15115 ,2024. [98] Xiaozhe Yao, Qinghao Hu, and Ana Klimovic. Deltazip: Efficient serv-ing of multiple full-model-tuned llms. In Proceedings of the Twentieth European Conference on Computer Systems , pages 110–127, 2025. [99] Zhewei Yao, Reza Yazdani Aminabadi, Minjia Zhang, Xiaoxia Wu, Conglong Li, and Yuxiong He. Zeroquant: Efficient and affordable post-training quantization for large-scale transformers. Advances in Neural Information Processing Systems , 35:27168–27183, 2022. [100] Ofir Zafrir, Guy Boudoukh, Peter Izsak, and Moshe Wasserblat. Q8bert: Quantized 8bit bert. In 2019 Fifth Workshop on Energy Ef-ficient Machine Learning and Cognitive Computing-NeurIPS Edition (EMC2-NIPS) , pages 36–39. IEEE, 2019. [101] Jacob Ziv and Abraham Lempel. A universal algorithm for sequential data compression. IEEE Transactions on information theory , 23(3):337– 343, 1977. 15
