@@ -1,0 +1,1100 @@
+Title: Revisable by Design: A Theory of Streaming LLM Agent Execution
+
+URL Source: https://arxiv.org/pdf/2604.23283v1
+
+Published Time: Tue, 28 Apr 2026 00:34:53 GMT
+
+Number of Pages: 23
+
+Markdown Content:
+# Revisable by Design: A Theory of Streaming LLM Agent Execution ∗
+
+Zhiyuan Zhai 
+
+Fudan University 
+
+22110720067@m.fudan.edu.cn 
+
+Ming Li †
+
+Guangming Lab 
+
+ming.li@u.nus.edu 
+
+Xin Wang †
+
+Fudan University 
+
+xwang11@fudan.edu.cn 
+
+## Abstract 
+
+Current LLM agents operate under an implicit but universal assumption: execution is a transaction —the user submits a request, the agent works in isolation, and only upon completion does the dialogue resume. This forces users into a binary choice: wait for a potentially incorrect output, or interrupt and lose all progress. We reject this assumption and propose the stream paradigm , in which agent execution and user intervention are concurrent, interleaved processes sharing a bidirectional channel. We formalize this paradigm through a reversibility taxonomy 
+
+that classifies every agent action as Idempotent, Reversible, Compensable, or Irreversible, and arrive at a core conclusion: an agent’s flexibility is bounded by its reversibility . We prove that conflicting compensable actions impose unavoidable adaptation costs and that conflicting irreversible actions make full specification satisfaction impossible—these costs are properties of the action space, not of the algorithm. Guided by this insight, we present the Revision Absorber , a reactive algorithm based on the Earliest-Conflict Rollback rule that is structurally optimal under mild assumptions. Experiments on StreamBench with real LLM agents validate all predictions: the Absorber matches the quality of a brute-force full-restart baseline while wasting an order of magnitude fewer steps of already-completed work, turning mid-execution revisions from a dead-end into a first-class interaction. 
+
+## 1 Introduction 
+
+Large language model (LLM) agents—systems that interleave reasoning, tool use, and environmental observation to accomplish complex tasks [Yao et al., 2023, Shinn et al., 2023]—have become a central paradigm in applied AI. Systems like Claude Code, OpenAI Codex agents, and Devin-style coding assistants routinely execute multi-step workflows spanning minutes to hours. Throughout this paper, we use the term agent to refer specifically to tool-using LLM systems that execute multi-step plans with observable side effects (e.g., file writes, API calls, message sends), as distinct from single-turn chat or pure reasoning models. A striking property of all current agent architectures is an unstated assumption: execution is a transaction . The user submits a query, the agent enters a closed execution loop (plan → act →
+
+observe → re-plan), and only upon completion—or failure—does the user regain control. We call this the transactional assumption .The transactional assumption creates a fundamental tension. As agents tackle longer-horizon tasks, the probability that the user’s intent evolves during execution increases. The user watches intermediate outputs stream by and realizes: the direction is wrong, a constraint was omitted, priorities have  
+
+> ∗Code, data, and benchmark: https://github.com/zhiyuanZhai20/stream-agent .
+> †Co-corresponding authors. Preprint.
+> arXiv:2604.23283v1 [cs.LG] 25 Apr 2026
+
+shifted. Under the transactional model, the user faces a binary: wait for a potentially incorrect result, or interrupt and discard all progress. We propose a third path: an open user–agent channel in which revisions arrive during execution and are absorbed on-the-fly (visual summary in Fig. 1, after the taxonomy is formally defined). 
+
+This paper. We propose replacing the transactional assumption with the stream paradigm : agent execution and user intervention coexist as two concurrent processes on a shared bidirectional channel. The agent continuously streams its execution to the user; the user may inject revisions at any time without blocking the agent. By formalizing this paradigm and analyzing what determines an agent’s capacity to absorb revisions, we arrive at a core conclusion: 
+
+An agent’s flexibility is bounded by its reversibility. 
+
+No matter how sophisticated the planner, once an agent has executed actions with irreversible effects on the external world, the set of reachable final outcomes is permanently reduced. Revisions requiring outcomes outside this set incur compensation costs, wasted work, or outright failure. This is not an algorithmic limitation—it is a structural property of the action space itself. 
+
+Contributions. 
+
+1. The stream paradigm (§3). We propose a new interaction model in which the agent executes autonomously while the user may inject revisions at any time through a non-blocking bidirectional channel. We formalize this as the agent execution stream , a typed event sequence over four event kinds: action, thought, observation, and injection. 2. Formalization of reversibility (§3–4). We decompose agent state into two layers—epistemic (always rollbackable) and world (partially rollbackable)—and introduce a reversibility taxonomy 
+
+{I, R, K, X } that classifies every action by its effect on world state. We define the reversibility ratio ρ(T ) of a task, the adaptation cost of absorbing a revision, and a minimal taxonomy of revision types. 3. Core theoretical result: flexibility is bounded by reversibility (§5). We prove that conflicting 
+
+K-class actions impose unavoidable compensation costs and conflicting X-class actions make full specification satisfaction impossible (Proposition 1). These costs are properties of the action space, not of the algorithm. 4. The Revision Absorber algorithm (§6). Guided by the above insight, we present a reactive algorithm based on the Earliest-Conflict Rollback rule. We prove this rule is structurally optimal under mild assumptions (Theorem 3). The algorithm requires no cost estimation, no search, and at most O(m) LLM calls. 5. Experimental validation (§7). On StreamBench with DeepSeek-V3 as the agent ( n=1 ,008 
+
+runs), the Absorber achieves quality statistically indistinguishable from Full-Restart while wasting 
+
+14 .6× fewer steps, empirically confirming all theoretical predictions. 
+
+## 2 Related Work 
+
+LLM agent architectures. ReAct [Yao et al., 2023] established the interleaved thought–action– observation loop that underlies most modern agents. Reflexion [Shinn et al., 2023] added a self-correction mechanism in which the agent critiques its own output after task completion and retries. Plan-and-Execute architectures [Wang et al., 2023] separate high-level planning from step-level execution, enabling dynamic replanning when a step fails. A common thread in all these architectures is that the user’s role ends at t = 0 : the initial query fully specifies the task, and the agent operates autonomously until completion. None models the possibility that the user’s intent may evolve during 
+
+execution, and none reasons about the reversibility of the actions the agent takes. 
+
+Human-in-the-loop agents. LangGraph’s interrupt() mechanism [LangChain, 2024] enables synchronous, agent-initiated checkpoints where the agent pauses to request human approval. Col-laborative Gym (Co-Gym) [Shao et al., 2024] provides an asynchronous tripartite framework for human–agent–environment interaction and demonstrates that collaborative agents outperform au-tonomous ones. CowPilot [Huq et al., 2025] supports human intervention in web navigation via a 2suggest-then-execute model. However, all of these works remain fundamentally turn-based : the agent either pauses and waits for human input (LangGraph), or the human and agent alternate in a structured protocol (Co-Gym, CowPilot). None realizes a true bidirectional non-blocking channel in which the agent executes naturally without distortion while the user injects revisions at arbitrary times and the agent absorbs them on the fly. Furthermore, none provides theoretical guarantees on adaptation cost or formal characterization of what determines adaptability. 
+
+Asynchronous LLM serving and runtimes. High-throughput serving systems such as vLLM [Kwon et al., 2023] and SGLang [Zheng et al., 2024] target token-level latency and throughput for many independent requests through paged attention and structured program execution. Agent runtimes—LangGraph [LangChain, 2024], AutoGen [Wu et al., 2023], CrewAI [CrewAI, 2024], Google’s ADK [Google, 2024]—provide bidirectional streaming between agents and tools for inter-agent coordination, but the user–agent relationship remains transactional: none provides a mechanism for the user to inject mid-execution revisions that the agent absorbs on the fly. 
+
+Plan repair in classical AI. Plan repair [Fox et al., 2006, Nebel and Koehler, 1995] modifies partially executed plans when execution diverges from expectations. HTN plan repair [Höller et al., 2020] extends this to hierarchical task networks, and recent benchmarks [Valmeekam et al., 2023] evaluate whether LLMs can reason about plan change. The plan commitment property [Babli et al., 2023] minimizes disruption to other agents in shared environments. These works operate within a well-studied setting— dynamic environments with fixed goals —where the agent reacts to environmental changes while pursuing an unchanging objective. Our work is orthogonal, not incremental: we introduce a new paradigm in which the agent and the user share a persistent bidirectional channel, the agent executes autonomously, and the user may inject goal revisions at any time. This setting is neither a special case nor a generalization of plan repair; it addresses a distinct source of plan invalidation (user-initiated goal change rather than environment dynamics) and identifies a distinct binding constraint (action reversibility rather than plan structure). 
+
+## 3 The Stream Paradigm 
+
+3.1 Agent Execution Streams Definition 1 (Agent Execution Stream) . An agent execution stream is a finite sequence σ =(ε1, ε 2, . . . , ε n) of typed events, where each event εi belongs to one of four types: 
+
+• act (a, t ): the agent executed action a at time t, affecting world state W .
+
+• thk (r, t ): the agent emitted reasoning r at time t, affecting epistemic state E only. 
+
+• obs (o, t ): the environment returned observation o at time t, providing information. 
+
+• inj (ϕ, t ): the user injected revision ϕ at time t, exogenous and unpredictable. Events are ordered by time. The first three types are endogenous —generated by the agent–environment loop. The fourth is exogenous —arriving from outside the agent’s control flow. 
+
+This abstraction simultaneously captures three things that simpler models miss: (i) the agent’s internal control flow ( thk → act → obs ), (ii) the exogenous user channel ( inj ), and (iii) the temporal interleaving between them. It is not a relabeling of ReAct traces: ReAct assumes user input is fully committed at t = 0 , whereas our stream treats user input as progressively revealed through inj 
+
+events whose timing is controlled by the user. 
+
+3.2 State Decomposition 
+
+At any time t, the agent’s state is the pair (Et, W t):
+
+Definition 2 (State Pair) .
+
+• Epistemic state Et: the agent’s context, beliefs, and accumulated information. Always rollbackable 
+
+via context truncation. 
+
+3• World state Wt: changes to the external environment caused by the agent’s actions. Partially rollbackable , depending on the action. 
+
+The two layers have fundamentally different rollback semantics. Epistemic state is data; it can always be truncated. World state is the critical layer: its rollbackability depends on the algebraic structure of the actions that produced it. (Tokens and wall-clock time consumed during execution are sunk costs that cannot be recovered; we do not model them as part of the agent’s state since they play no role in rollback decisions.) 
+
+3.3 The Reversibility Taxonomy Definition 3 (Reversibility Classes) . For each action a in the agent’s action space A, we assign a 
+
+reversibility class based on the algebraic structure of its effect on world state W :
+
+• Idempotent ( I): These actions do not modify world state W . Formally, exec( a) ◦ exec( a) ≡
+
+exec( a). Since W is unchanged, no rollback is ever needed. Examples : read file, query database, fetch web page. 
+
+• Reversible ( R): ∃ a−1 such that exec( a−1) ◦ exec( a) ≡ id . Effect is exactly undoable. Examples :create file ↔ delete file; set flag ↔ unset flag. 
+
+• Compensable ( K): No exact inverse exists, but ∃ comp( a) such that the composition leaves W in a state acceptable under the new specification. Examples : sent email → send correction; booked ticket → cancel with fee. 
+
+• Irreversible ( X): No compensation exists or its cost is prohibitive. Examples : settled financial transaction; deleted unique data without backup. 
+
+This taxonomy mirrors the saga pattern in distributed database theory [Garcia-Molina and Salem, 1987] and compensation semantics in long-lived transactions [Elmagarmid, 1992]. What is new is its application to LLM agent action spaces and the claim that this classification is the correct invariant for reasoning about agent adaptability .
+
+Definition 4 (Reversibility Ratio) . The reversibility ratio of a task T is: 
+
+ρ(T ) = |{ a ∈ A T : class( a) ∈ { I, R }}| |A T | (1) 
+
+where AT is the set of tools available for task T .
+
+The ratio ρ(T ) ∈ [0 , 1] is a structural property of the task, determined by its tool configuration and known before execution begins. Tasks with low ρ are inherently harder to adapt to user revisions, regardless of the algorithm used—a claim we formalize in §5. 
+
+## 4 The Revision Decision Problem 
+
+With the stream paradigm and the reversibility taxonomy in place, we can now precisely formulate what happens when a user injection arrives. 
+
+4.1 The Decision Triple 
+
+When an injection inj (ϕ, t ) arrives at step n of the stream, the agent faces a decision. Given the current trace τ = ( ε1, . . . , ε n), state (En, W n), the current specification S0 (which includes the initial query and all previously absorbed injections), and the new revision ϕ, the agent must choose a triple (k∗, ρ, π ′):• k∗ ∈ { 0, 1, . . . , n }: the epistemic rollback point —context is truncated to step k∗.• ρ: a compensation program —a sequence of actions applied to W to undo or mitigate effects of 
+
+τk∗+1: n.• π′: a continuation policy from (Ek∗ , W post-comp ) under the updated spec S0 ∪ { ϕ}.4Definition 5 (Adaptation Cost) .
+
+AdaptCost( k∗, ρ, π ′) = Ccomp (ρ)
+
+| {z }
+
+> compensation
+
++ Cwaste (τk∗+1: n)
+
+| {z }
+
+> abandoned work
+
+(2) 
+
+where Ccomp is the cost of compensation actions and Cwaste is the sunk cost of discarded steps. Both terms are measured in abstract cost units; our theoretical results hold for any additive cost measure. 
+
+4.2 Revision Types 
+
+We classify revisions into three core categories based on their effect on the specification: Additive 
+
+(ϕ+, spec is extended), Restrictive (ϕ−, spec is narrowed), and Substitutive (ϕ∗, a clause is replaced). In experiments (§7) we additionally evaluate two practical types: Cancellation (a requirement is revoked) and Priority shift (execution order is changed). 
+
+## 5 What Bounds an Agent’s Flexibility? 
+
+The stream paradigm and the formalization in the preceding sections equip us with the vocabulary to ask a precise question: when an injection ϕ arrives mid-execution, what determines how costly it is for the agent to absorb it? 
+
+One might expect the answer to lie in algorithmic sophistication—a better planner, a more capable LLM, or a longer context window. But none of these address the core difficulty. A better planner cannot unsend an email that has already been delivered. A more capable LLM cannot reverse a payment that has already settled. A longer context window can always be truncated, so epistemic state is never the bottleneck. The real constraint lies elsewhere: in what the agent has already done to the world, and whether those effects can be undone .An agent whose trace consists entirely of I/R -class actions can absorb any injection at near-zero cost—there is nothing irreversible to undo. An agent that has executed K- or X-class actions faces unavoidable compensation costs or outright impossibility. The binding constraint is not the algorithm—it is the reversibility structure of the action space . We now state this formally. 
+
+5.1 The Irreversibility Cost Principle Proposition 1 (Irreversibility Cost Principle) . Let τ1: n be an agent’s execution trace and let ϕ be an injection arriving at step n. For any action ai ∈ τ1: n that is incompatible with S0 ∪ { ϕ}:1. If class( ai) = I: ai did not modify W ; no undo is needed. Cost: zero .2. If class( ai) = R: ai can be exactly undone by executing a−1 
+
+> i
+
+. Cost: C(a−1 
+
+> i
+
+), typically small .3. If class( ai) = K: the agent must execute comp( ai). Cost Ccomp (comp( ai)) > 0. This cost is unavoidable : no algorithm can avoid it once ai has been executed. 4. If class( ai) = X: no compensation exists. Full satisfaction of S0 ∪ { ϕ} is impossible .Proof. Each case follows directly from the definitions of the reversibility classes (Definition 3). Case 1: I-class actions do not modify W ; nothing to undo. Case 2: R-class actions have an exact inverse. Case 3: K-class actions have no exact inverse; compensation has nonzero cost by definition. Case 4: X-class actions have no compensation; W permanently contains the incompatible effect. Proposition 1 is the formal expression of our central thesis: an agent’s flexibility is bounded by its reversibility . The unavoidable costs in Cases 3 and 4 are not limitations of any particular algorithm— they are properties of the action space itself . Improving the planner, the prompt, or the underlying LLM cannot reduce them. The only way to reduce these costs is to change the tools: adding compensation endpoints to APIs, designing actions to be reversible by default, or restructuring workflows to defer irreversible steps. 
+
+Corollary 2 (Reversibility Ratio and Adaptation Difficulty) . For a task T with reversibility ratio 
+
+ρ(T ), the expected number of unavoidable-cost actions in a trace of length n is at least (1 − ρ(T )) · n.Tasks with lower ρ(T ) expose the agent to more unavoidable costs per injection. 
+
+55.2 Structural Optimality of Earliest-Conflict Rollback 
+
+Given that some costs are unavoidable, can we at least minimize the avoidable costs? We show that a simple rule achieves this. 
+
+Assumption 1 (Compatibility Separability) . τ1: k is compatible with S0 ∪ { ϕ} if and only if every K-or X-class action in τ1: k remains valid under the new spec. 
+
+Assumption 2 (Monotone Compensation) . Ccomp (τk+1: n) is non-decreasing as k decreases. 
+
+Assumption 3 (Monotone Waste) . Cwaste (τk+1: n) is non-decreasing as k decreases. 
+
+Theorem 3 (Structural Optimality) . Under Assumptions 1–3, define ibad as the index of the earliest 
+
+K- or X-class action in τ that is incompatible with S0 ∪ { ϕ}. Then k∗ = ibad − 1 minimizes 
+
+Ccomp (τk∗+1: n) + Cwaste (τk∗+1: n) over all feasible k.Proof. The feasible set is K = {0, 1, . . . , i bad − 1} (by Assumption 1). For k′ < i bad − 1, both cost terms are strictly larger (Assumptions 2–3). For k′ > i bad − 1, k′ /∈ K . Hence k∗ = ibad − 1
+
+uniquely minimizes the objective. 
+
+Remark 1. The proof is short because the result is structural: monotonicity of costs combined with a compatibility constraint admits a unique minimizer. This directness means the optimal rollback strategy can be implemented as a simple scan without any cost estimation or search, as we show next. 
+
+## 6 The Revision Absorber Algorithm 
+
+We now translate the theoretical results into a concrete algorithm. Proposition 1 tells us what 
+
+determines adaptation cost; Theorem 3 tells us where to roll back. What remains is to assemble these into a working system. Figure 1 previews the contrast between the transactional status quo and the stream paradigm at the level of a single execution trace annotated with the {I, R, K, X } taxonomy (Def. 3); the algorithm realising panel (b) is stated next. 
+
+## (a) Transactional (status quo) 
+
+User S0
+
+result       
+
+> channel closed at t> 0
+> user must choose: wait for (possibly wrong) result or discard all progress
+
+## (b) Stream paradigm (ours) 
+
+User S0 
+
+> inject ϕ
+> comp
+
+result          
+
+> open channel
+> Absorber: keep I/R prefix ·compensate earli-est conflicting K·re-plan tail under S0∪ { ϕ}
+
+Legend  
+
+> I: idempotent
+> R: reversible
+> K: compensable
+> X: irreversible
+> compensation
+> re-plan under
+> S0∪ { ϕ}
+
+Figure 1: Transactional vs. stream execution. (a) In the transactional model the user–agent channel closes at t=0 ; a mid-execution revision ϕ forces a binary choice between waiting or discarding. 
+
+(b) The stream paradigm keeps the channel open; the Revision Absorber preserves the I/R -class prefix, compensates the earliest conflicting K-class action, and re-plans only the post-conflict tail under the updated specification. Tile colours use the reversibility taxonomy of Def. 3. The Revision Absorber is guided by three design principles: (1) Agent-natural execution : the agent’s main loop is unchanged. (2) Reactive activation : the Absorber is dormant and activates only 6Algorithm 1 Revision Absorber with Earliest-Conflict Rollback 
+
+Require: Trace τ1: n with reversibility annotations, state (En, W n), current spec S0, injection ϕ 
+
+> 1:
+
+// Step 1: Scan for earliest conflict  
+
+> 2:
+
+ibad ← n + 1  
+
+> 3:
+
+for i = 1 to n do  
+
+> 4:
+
+if class( ai) ∈ { K, X } and ¬ ISCOMPATIBLE (ai, S0 ∪ { ϕ}) then  
+
+> 5:
+
+ibad ← i; break  
+
+> 6:
+
+end if  
+
+> 7:
+
+end for  
+
+> 8:
+
+k∗ ← ibad − 1 
+
+> 9:
+
+// Step 2: Compensate  
+
+> 10:
+
+for j = k∗ + 1 to n do  
+
+> 11:
+
+if class( aj ) = R then  
+
+> 12:
+
+Execute a−1 
+
+> j
+> 13:
+
+else if class( aj ) = K then  
+
+> 14:
+
+Execute comp( aj ) 
+
+> 15:
+
+else if class( aj ) = X then  
+
+> 16:
+
+XF ALLBACK (aj , ϕ ) 
+
+> 17:
+
+end if  
+
+> 18:
+
+end for  
+
+> 19:
+
+W ′ ← current world state after compensation  
+
+> 20:
+
+// Step 3: Continue  
+
+> 21:
+
+Truncate context to Ek∗ ; π′ ← PLAN (Ek∗ , W ′, S0 ∪ { ϕ}) 
+
+> 22:
+
+return (Ek∗ , W ′, π ′)
+
+when an injection arrives. (3) Minimum Compensation : the rollback point minimizes world-state compensation, consistent with compatibility. ISCOMPATIBLE (a, S) is implemented as a single LLM call. Step 1 requires at most m LLM calls (m = number of K/X -class actions, typically m ≪ n). The non-blocking stream runtime checks the injection queue after each event and activates the Absorber if non-empty. No existing framework (LangGraph, AutoGen, CrewAI) supports this interaction model natively. 
+
+## 7 Experiments 
+
+We validate all theoretical predictions on S TREAM BENCH , a controlled benchmark with real LLM agents. Our experimental corpus totals 30,561 runs: 1,008 real-LLM runs on DeepSeek-V3 [DeepSeek-AI, 2024] as the primary grid, plus 29,310 deterministic MockLLM runs for large-scale ablations. We additionally verify cross-LLM consistency on Claude Haiku 4.5 [Anthropic, 2024] ( n=300 ) and GPT-4o-mini ( n=224 ). Full experimental details, per-scenario breakdowns, ablation analyses, and statistical tests are in the Appendix. 
+
+Benchmark. STREAM BENCH comprises three multi-step tool-calling scenarios of 12–15 steps each (Event Planning, Travel Arrangement, Report & Publish), instantiated at four reversibility ratios ρ ∈ { 1.0, 0.75 , 0.5, 0.25 } by varying which K/X tools are enabled. Tools are simulated and annotated with their reversibility class. Each injection directly contradicts the first K-class action already executed. Five revision types are tested: additive ( ϕ+), restrictive ( ϕ−), substitutive (ϕ∗), cancellation, and priority shift. The agent is a ReAct-style planner [Yao et al., 2023] using DeepSeek-V3 via function calling. Quality is scored 1–5 by a separate strict LLM-as-judge [Zheng et al., 2023] that inspects both the agent’s declared outcome and its concrete world-state effects (email bodies, booking targets, payment amounts); each run is scored three times and averaged. 
+
+Methods. We evaluate five revision-response policies spanning the full policy space induced by our formalization (§4): Oracle (informed upper bound: receives S0 ∪ { ϕ} at t=0 ; not achievable online), Revision Absorber (ours), Full-Restart (brute-force: compensate everything, restart from scratch), Naive Absorber (no-op: append ϕ to spec, continue without rollback), and Ignore (no-op: discard ϕ entirely). Oracle and Ignore serve as principled upper and lower bounds; Full-Restart is 7Table 1: DeepSeek-V3 primary grid ( n=1 ,008 , 144 balanced runs per method). Quality : 1–5 LLM-judged score assessing output conformance to the revised spec. Wasted : acts executed pre-injection then discarded. Comp. : K-class compensation plus R-class inversion calls. The Absorber closes ∼60% of the Oracle–Ignore quality gap at 0.78 wasted acts per run; Full-Restart reaches indistinguishable quality at 14 .6× the waste. 
+
+Method Quality Wasted Comp. Steps Tokens (k) 
+
+Oracle (upper bound) 3.79 ± 0.98 0.00 0.00 18.0 77.1 
+
+Absorber (ours) 3.07 ± 0.86 0.78 0.78 27.6 136.8 Full Restart (brute force) 3.17 ± 0.85 11.41 3.44 30.2 116.6 Naive Absorber (lower bound) 2.78 ± 1.19 0.00 0.00 28.2 137.0 Ignore (lower bound) 1.99 ± 1.27 0.00 0.00 22.9 110.0 
+
+the brute-force reference. Additional comparisons with systems-inspired patterns (Checkpoint-K,LangGraph-Interrupt) are reported in Appendix I. 
+
+Metrics. Quality (1–5, LLM-judged against S0 ∪ { ϕ}); Wasted acts (pre-injection actions later discarded); Comp. (K COMPENSATE plus R INVERT calls); Total steps ; Tokens (k) (summed over agent, judge, and compatibility check). ρ(T ) as in Def. 4. 
+
+7.1 Main Results 
+
+Table 1 shows a clear hierarchy: Ignore 1.99 < Naive 2.78 < Absorber 3.07 ≈ Full-Restart 3.17 <
+
+Oracle 3.79 . The Absorber matches Full-Restart on quality while saving 14 .6× on waste; full pairwise bootstrap CIs and Cohen’s d effect sizes are in Table 2. Figure 2 plots the resulting quality–waste Pareto frontier. 0.0 2.5 5.0 7.5 10.0 12.5  
+
+> Wasted acts
+> 2
+> 3
+> 4
+> Quality
+> Oracle
+> Absorber (ours) Full Restart
+> Naive
+> Ignore
+
+Figure 2: Quality–waste Pareto frontier on DeepSeek-V3 ( n=1 ,008 ). The Absorber at-tains near-Oracle quality at an order of magni-tude less waste than Full-Restart. Error bars: SEM. Table 2: Pairwise statistical tests (Absorber vs. principled bounds; combined real-LLM corpus, 
+
+n=1 ,161 ). ¯∆=¯ a−¯b; Cohen’s d is the standardized effect size; CIs are bootstrap 2,000-resample 95%.                                   
+
+> vs. Metric ¯∆d95% CI Oracle quality −0.75 −0.77 [−0.95 ,−0.54]
+> Oracle waste +0 .74 +2 .14 [+0 .69 ,+0 .80]
+> Full-Rest. quality −0.11 −0.12 [−0.27 ,+0 .05]
+> Full-Rest. waste −10 .00 −2.05 [−10 .89 ,−9.15]
+> Naive quality +0 .33 +0 .30 [+0 .13 ,+0 .52]
+> Ignore quality +1 .38 +1 .32 [+1 .19 ,+1 .57]
+
+The quality CI vs. Full-Restart crosses zero ( |d|<0.2, negligible) while the waste CI does not (d=−2.05 , very large); the quality gains vs. Naive ( d=+0 .30 ) and Ignore ( d=+1 .32 ) confirm the rollback–compensate behavior is responsible for the improvement, not better prompting. 
+
+7.2 Revision-Type Sensitivity 
+
+Table 3 decomposes Table 1 by revision type. The Absorber holds Q∈[2 .72 , 3.60] with waste 0.7–0.9
+
+across all types; Ignore collapses on restrictive/substitutive/priority-shift because its world state contradicts the revised spec; Full-Restart’s waste balloons to 9.7–15 .5 since it discards the entire trace. Figure 3 extends the view to Claude Haiku 4.5 and GPT-4o-mini (analysis in App. I). 
+
+7.3 Case Study 
+
+A single substitutive run (Event Planning, ρ=0 .25 , “indoor dinner → outdoor BBQ”, Fig. 4) shows the mechanism: Absorber keeps 8 I/R steps, compensates 1 K step, re-plans ( Q=3 .00 , waste 1); Full-Restart discards 9 pre-injection steps and fails to converge within the step budget ( Q=1 .67 , waste 8Table 3: Per-(method, revision-type) quality / wasted-acts on DeepSeek-V3. Each cell is Q / wasted. 
+
+Method additive restrictive substitutive cancellation priority_shift 
+
+Oracle 3.94 / 0.0 3.33 / 0.0 3.68 / 0.0 4.94 / 0.0 3.50 / 0.0 
+
+Absorber 3.60 / 0.8 2.72 / 0.7 2.93 / 0.8 2.94 / 0.9 3.11 / 0.9 
+
+Full Restart 3.34 / 9.7 2.93 / 10.4 3.08 / 10.8 3.46 / 14.1 3.22 / 15.5 Naive 3.63 / 0.0 1.92 / 0.0 2.72 / 0.0 2.80 / 0.0 2.93 / 0.0 Ignore 3.19 / 0.0 1.69 / 0.0 1.50 / 0.0 2.06 / 0.0 1.07 / 0.0 additive 
+
+restrictive 
+
+substitutive 
+
+cancellation 
+
+priority_shift 
+
+Oracle 
+
+Absorber (ours) 
+
+Full Restart 
+
+Naive 
+
+Ignore 
+
+3.94 3.33 3.68 4.94 3.50 
+
+3.60 2.72 2.93 2.94 3.11 
+
+3.34 2.93 3.08 3.46 3.22 
+
+3.63 1.92 2.72 2.80 2.93 
+
+3.19 1.69 1.50 2.06 1.07 
+
+DeepSeek-V3 
+
+additive 
+
+restrictive 
+
+substitutive 
+
+cancellation 
+
+priority_shift 
+
+3.17 3.94 3.72 5.00 2.89 
+
+3.11 1.17 1.92 1.72 2.42 
+
+2.83 1.89 2.83 2.33 2.50 
+
+2.56 1.39 1.28 1.44 2.75 
+
+2.89 2.33 1.45 1.67 2.06 
+
+Claude Haiku 4.5 
+
+additive 
+
+restrictive 
+
+substitutive 
+
+cancellation 
+
+priority_shift 
+
+3.58 3.00 2.88 3.67 1.80 
+
+2.50 1.00 1.00 1.00 1.00 
+
+2.45 1.00 1.10 1.00 2.67 
+
+1.92 1.00 1.29 1.00 1.75 
+
+1.33 1.00 1.00 1.00 2.00 
+
+GPT-4o-mini 
+
+1
+
+2
+
+3
+
+4
+
+5
+
+> quality
+
+Figure 3: Quality heatmap per (method × revision-type × LLM). The Absorber stays in the high-quality region across all revision types and all LLM families. Ignore collapses on substitutive and priority-shift revisions, confirming that the judge penalizes spec-violating outputs. 
+
+17 ); Naive and Ignore score Q=1 . Ablations (App. C–G) and cross-LLM results (App. I) confirm the structural waste footprint is LLM-invariant (Absorber ∼ 1, Full-Restart ∼ 10 –14 across DeepSeek-V3, Claude Haiku 4.5, GPT-4o-mini); quality scales with agent capability, with Absorber beating Naive by +0 .33 on DeepSeek, +0 .18 on Haiku, and +0 .03 on GPT-4o-mini (the Oracle–Ignore spread also compresses, so the ordering is preserved). search 
+
+> reviews
+> compare
+> s_cater
+> r_cater
+> w_plan
+> budget
+> guests
+> proposal
+> book_v
+> order
+> invite
+> remind
+> deposit
+> fin_pay
+
+Oracle   
+
+> t= 0 spec
+
+Q = 4.00 
+
+> search
+> reviews
+> compare
+> s_cater
+> r_cater
+> w_plan
+> budget
+> guests
+> proposal
+> comp
+> proposal'
+> book_v'
+> order'
+> invite'
+> remind'
+> deposit'
+> fin_pay'
+
+Absorber 
+
+(ours)   
+
+> wasted =1
+
+Q = 3.00 
+
+> search
+> reviews
+> compare
+> s_cater
+> r_cater
+> w_plan
+> budget
+> guests
+> proposal
+> comp
+> search'
+> reviews'
+> compare'
+> s_cater'
+> r_cater'
+> w_plan'
+> budget'
+> guests'
+> proposal'
+> book_v'
+> order'
+> invite'
+> remind'
+> deposit'
+> fin_pay'
+
+Full 
+
+Restart   
+
+> wasted =17
+
+Q = 1.67 
+
+> search
+> reviews
+> compare
+> s_cater
+> r_cater
+> w_plan
+> budget
+> guests
+> proposal
+> book_v'
+> order'
+> invite'
+> remind'
+> deposit'
+> fin_pay'
+
+Naive 
+
+> no rollback
+
+Q = 1.00 
+
+> search
+> reviews
+> compare
+> s_cater
+> r_cater
+> w_plan
+> budget
+> guests
+> proposal
+> book_v
+> order
+> invite
+> remind
+> deposit
+> fin_pay
+
+Ignore 
+
+> spec violated
+
+Q = 1.00 
+
+> I (idempotent)
+> R (reversible)
+> K (compensable)
+> X (irreversible)
+> discarded (wasted)
+> compensation
+> re-planned under new spec
+> stale / under old spec
+
+inject 
+
+(indoor dinner outdoor BBQ) 
+
+Figure 4: Per-step case study (Event Planning, ρ=0 .25 , substitutive injection, DeepSeek-V3 seed 0). Absorber keeps 8 I/R steps (green/blue), compensates one K step (orange), re-plans under the new spec (purple). Full-Restart discards everything pre-injection (grey hatch). Naive keeps the pre-injection work but leaves the stale proposal (pink) uncompensated and continues under the new spec, producing an inconsistent world state. Ignore finishes under the old spec. 
+
+## 8 Discussion and Conclusion 
+
+The Absorber’s advantage is structural work preservation. Limitations: it requires a re-planning-capable agent (weaker LLMs fall below this bar, App. I); S TREAM BENCH uses simulated tools, and live-API extension is future work. We formalized reversibility as {I, R, K, X } and showed the Revision Absorber matches brute-force quality at 14 .6× less waste. 9References 
+
+James F. Allen, Curry I. Guinn, and Eric Horvitz. Mixed-initiative interaction. IEEE Intelligent Systems , 14(5):14–23, 1999. Saleema Amershi, Daniel Weld, Mihaela Vorvoreanu, Adam Fourney, Besmira Nushi, Penny Collis-son, Jina Suh, Shamsi Iqbal, Paul N. Bennett, Kori Inkpen, Jaime Teevan, Ruth Kikin-Gil, and Eric Horvitz. Guidelines for human-AI interaction. In Proceedings of the CHI Conference on Human Factors in Computing Systems , 2019. Anthropic. The Claude model card and evaluations. https://www.anthropic.com/claude , 2024. Mohannad Babli, Óscar Sapena, and Eva Onaindia. Plan commitment: Replanning versus plan repair. 
+
+Engineering Applications of Artificial Intelligence , 123:106275, 2023. Yuntao Bai, Andy Jones, Kamal Ndousse, Amanda Askell, Anna Chen, Nova DasSarma, Dawn Drain, Stanislav Fort, Deep Ganguli, Tom Henighan, Nicholas Joseph, Saurav Kadavath, Jackson Kernion, Tom Conerly, Sheer El-Showk, Nelson Elhage, Zac Hatfield-Dodds, Danny Hernandez, Tristan Hume, Scott Johnston, Shauna Kravec, Liane Lovitt, Neel Nanda, Catherine Olsson, Dario Amodei, Tom Brown, Jack Clark, Sam McCandlish, Chris Olah, Ben Mann, and Jared Kaplan. Training a helpful and harmless assistant with reinforcement learning from human feedback. arXiv preprint arXiv:2204.05862 , 2022. Gagan Bansal, Tongshuang Wu, Joyce Zhou, Raymond Fok, Besmira Nushi, Ece Kamar, Marco Tulio Ribeiro, and Daniel Weld. Does the whole exceed its parts? The effect of AI explanations on complementary team performance. In Proceedings of the CHI Conference on Human Factors in Computing Systems , 2021. Philip A. Bernstein, Vassilis Hadzilacos, and Nathan Goodman. Concurrency Control and Recovery in Database Systems . Addison-Wesley, 1987. Allan Borodin and Ran El-Yaniv. Online Computation and Competitive Analysis . Cambridge University Press, 2005. Tom B. Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agarwal, Ariel Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh, Daniel M. Ziegler, Jeffrey Wu, Clemens Winter, Christopher Hesse, Mark Chen, Eric Sigler, Mateusz Litwin, Scott Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam McCandlish, Alec Radford, Ilya Sutskever, and Dario Amodei. Language models are few-shot learners. In Advances in Neural Information Processing Systems (NeurIPS) , 2020. Harrison Chase. LangChain: Building applications with LLMs through composability. https: //github.com/langchain-ai/langchain , 2022. Weize Chen, Yusheng Su, Jingwei Zuo, Cheng Yang, Chenfei Yuan, Chi-Min Chan, Heyang Yu, Yaxi Lu, Yi-Hsin Hung, Chen Qian, Yujia Qin, Xin Cong, Ruobing Xie, Zhiyuan Liu, Maosong Sun, and Jie Zhou. Agentverse: Facilitating multi-agent collaboration and exploring emergent behaviors. In International Conference on Learning Representations (ICLR) , 2024. Paul F. Christiano, Jan Leike, Tom B. Brown, Miljan Martic, Shane Legg, and Dario Amodei. Deep reinforcement learning from human preferences. In Advances in Neural Information Processing Systems (NeurIPS) , 2017. Edmund M. Clarke, Orna Grumberg, Daniel Kroening, Doron Peled, and Helmut Veith. Model Checking . MIT Press, 2nd edition, 2018. CrewAI. CrewAI: Framework for orchestrating role-playing autonomous AI agents. https:// github.com/crewAIInc/crewAI , 2024. DeepSeek-AI. DeepSeek-V3 technical report. Technical report, DeepSeek, 2024. https://arxiv. org/abs/2412.19437 .10 Xiang Deng, Yu Gu, Boyuan Zheng, Shijie Chen, Sam Stevens, Boshi Wang, Huan Sun, and Yu Su. Mind2Web: Towards a generalist agent for the web. In Advances in Neural Information Processing Systems (NeurIPS), Datasets and Benchmarks Track , 2023. Marlon Dumas, Marcello La Rosa, Jan Mendling, and Hajo A. Reijers. Fundamentals of Business Process Management . Springer, 2nd edition, 2018. Ahmed K. Elmagarmid, editor. Database Transaction Models for Advanced Applications . Morgan Kaufmann, 1992. Maria Fox, Alfonso Gerevini, Derek Long, and Ivan Serina. Plan stability: Replanning versus plan repair. In Proceedings of the International Conference on Automated Planning and Scheduling (ICAPS) , 2006. Hector Garcia-Molina and Kenneth Salem. Sagas. In Proceedings of the ACM SIGMOD International Conference on Management of Data , pages 249–259, 1987. Malik Ghallab, Dana Nau, and Paolo Traverso. Automated Planning: Theory and Practice . Morgan Kaufmann, 2004. Google. Agent Development Kit (ADK): Google’s open-source framework for building AI agents. 
+
+https://google.github.io/adk-docs/ , 2024. William C. Hill, James D. Hollan, Dave Wroblewski, and Tim McCandless. Edit Wear and Read Wear. In Proceedings of the SIGCHI Conference on Human Factors in Computing Systems (CHI) ,pages 3–9, 1992. Daniel Höller, Pascal Bercher, Gregor Behnke, and Susanne Biundo. HTN plan repair via model transformation. In Proceedings of the German Conference on Artificial Intelligence (KI) , 2020. Sirui Hong, Mingchen Zhuge, Jiaqi Chen, Xiawu Zheng, Yuheng Cheng, Jinlin Wang, Ceyao Zhang, Zili Wang, Steven Ka Shing Yau, Zijuan Lin, Liyang Zhou, Chenyu Ran, Lingfeng Xiao, Chenglin Wu, and Jürgen Schmidhuber. Metagpt: Meta programming for a multi-agent collaborative framework. In International Conference on Learning Representations (ICLR) , 2024. Eric Horvitz. Principles of mixed-initiative user interfaces. In Proceedings of the SIGCHI Conference on Human Factors in Computing Systems (CHI) , pages 159–166, 1999. Faria Huq, Zora Zhiruo Wang, Frank F. Xu, Tianyue Ou, Shuyan Zhou, Jeffrey P. Bigham, and Graham Neubig. CowPilot: A framework for autonomous and human-agent collaborative web navigation. In Proceedings of the Conference of the North American Chapter of the Association for Computational Linguistics: System Demonstrations (NAACL Demo) , 2025. Carlos E. Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, and Karthik Narasimhan. SWE-bench: Can language models resolve real-world GitHub issues? In International Conference on Learning Representations (ICLR) , 2024. Anna R. Karlin, Mark S. Manasse, Lyle A. McGeoch, and Susan Owicki. Competitive randomized algorithms for nonuniform problems. Algorithmica , 11(6):542–571, 1994. Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with PagedAttention. In Proceedings of the 29th Symposium on Operating Systems Principles (SOSP) , 2023. Vivian Lai, Chacha Chen, Alison Smith-Renner, Q. Vera Liao, and Chenhao Tan. Towards a science of human-AI decision making: An overview of design space in empirical human-subject studies. In Proceedings of the ACM Conference on Fairness, Accountability, and Transparency (FAccT) ,2023. LangChain. LangGraph: Building stateful, multi-actor applications with LLMs. https:// langchain-ai.github.io/langgraph/ , 2024. 11 Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich Küttler, Mike Lewis, Wen-tau Yih, Tim Rocktäschel, Sebastian Riedel, and Douwe Kiela. Retrieval-augmented generation for knowledge-intensive NLP tasks. In Advances in Neural Information Processing Systems (NeurIPS) , 2020. Guohao Li, Hasan Abed Al Kader Hammoud, Hani Itani, Dmitrii Khizbullin, and Bernard Ghanem. Camel: Communicative agents for “mind” exploration of large language model society. In 
+
+Advances in Neural Information Processing Systems (NeurIPS) , 2023. Xiao Liu, Hao Yu, Hanchen Zhang, Yifan Xu, Xuanyu Lei, Hanyu Lai, Yu Gu, Hangliang Ding, Kaiwen Men, Kejuan Yang, Shudan Zhang, Xiang Deng, Aohan Zeng, Zhengxiao Du, Chenhui Zhang, Sheng Shen, Tianjun Zhang, Yu Su, Huan Sun, Minlie Huang, Yuxiao Dong, and Jie Tang. AgentBench: Evaluating LLMs as agents. In International Conference on Learning Representations (ICLR) , 2024. Yang Liu, Dan Iter, Yichong Xu, Shuohang Wang, Ruochen Xu, and Chenguang Zhu. G-Eval: NLG evaluation using GPT-4 with better human alignment. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing (EMNLP) , pages 2511–2522, 2023. Grégoire Mialon, Roberto Dessì, Maria Lomeli, Christoforos Nalmpantis, Ram Pasunuru, Roberta Raileanu, Baptiste Rozière, Timo Schick, Jane Dwivedi-Yu, Asli Celikyilmaz, Edouard Grave, Yann LeCun, and Thomas Scialom. Augmented language models: A survey. Transactions on Machine Learning Research , 2023. Reiichiro Nakano, Jacob Hilton, Suchir Balaji, Jeff Wu, Long Ouyang, Christina Kim, Christopher Hesse, Shantanu Jain, Vineet Kosaraju, William Saunders, Xu Jiang, Karl Cobbe, Tyna Eloundou, Gretchen Krueger, Kevin Button, Matthew Knight, Benjamin Chess, and John Schulman. WebGPT: Browser-assisted question-answering with human feedback. arXiv preprint arXiv:2112.09332 ,2021. Bernhard Nebel and Jana Koehler. Plan reuse versus plan generation: A theoretical and empirical analysis. Artificial Intelligence , 76(1–2):427–454, 1995. OpenAI. GPT-4 technical report. Technical report, OpenAI, 2023. https://arxiv.org/abs/ 2303.08774 .Long Ouyang, Jeffrey Wu, Xu Jiang, Diogo Almeida, Carroll L. Wainwright, Pamela Mishkin, Chong Zhang, Sandhini Agarwal, Katarina Slama, Alex Ray, John Schulman, Jacob Hilton, Fraser Kelton, Luke Miller, Maddie Simens, Amanda Askell, Peter Welinder, Paul Christiano, Jan Leike, and Ryan Lowe. Training language models to follow instructions with human feedback. In Advances in Neural Information Processing Systems (NeurIPS) , 2022. Joon Sung Park, Joseph C. O’Brien, Carrie J. Cai, Meredith Ringel Morris, Percy Liang, and Michael S. Bernstein. Generative agents: Interactive simulacra of human behavior. In Proceedings of the 36th Annual ACM Symposium on User Interface Software and Technology (UIST) , 2023. Shishir G. Patil, Tianjun Zhang, Xin Wang, and Joseph E. Gonzalez. Gorilla: Large language model connected with massive APIs. arXiv preprint arXiv:2305.15334 , 2023. Chen Qian, Wei Liu, Hongzhang Liu, Nuo Chen, Yufan Dang, Jiahao Li, Cheng Yang, Weize Chen, Yusheng Su, Xin Cong, Juyuan Xu, Dahai Li, Zhiyuan Liu, and Maosong Sun. Chatdev: Communicative agents for software development. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (ACL) , 2024. Yujia Qin, Shihao Liang, Yining Ye, Kunlun Zhu, Lan Yan, Yaxi Lu, Yankai Lin, Xin Cong, Xiangru Tang, Bill Qian, Sihan Zhao, Lauren Hong, Runchu Tian, Ruobing Xie, Jie Zhou, Mark Gerstein, Dahai Li, Zhiyuan Liu, and Maosong Sun. ToolLLM: Facilitating large language models to master 16000+ real-world APIs. In International Conference on Learning Representations (ICLR) , 2024. Chris Richardson. Microservices Patterns: With Examples in Java . Manning Publications, 2018. Timo Schick, Jane Dwivedi-Yu, Roberto Dessì, Roberta Raileanu, Maria Lomeli, Eric Hambro, Luke Zettlemoyer, Nicola Cancedda, and Thomas Scialom. Toolformer: Language models can teach themselves to use tools. In Advances in Neural Information Processing Systems (NeurIPS) , 2023. 12 Yijia Shao, Vinay Samuel, Yucheng Jiang, John Yang, and Diyi Yang. Collaborative gym: A frame-work for enabling and evaluating human-agent collaboration. arXiv preprint arXiv:2412.15701 ,2024. Noah Shinn, Federico Cassano, Ashwin Gopinath, Karthik Narasimhan, and Shunyu Yao. Reflexion: Language agents with verbal reinforcement learning. In Advances in Neural Information Processing Systems (NeurIPS) , 2023. Ben Shneiderman. Direct manipulation: A step beyond programming languages. IEEE Computer , 16 (8):57–69, 1983. Theodore Sumers, Shunyu Yao, Karthik Narasimhan, and Thomas Griffiths. Cognitive architectures for language agents. Transactions on Machine Learning Research , 2024. Qiaoyu Tang, Ziliang Deng, Hongyu Lin, Xianpei Han, Qiao Liang, and Le Sun. ToolAlpaca: General-ized tool learning for language models with 3000 simulated cases. arXiv preprint arXiv:2306.05301 ,2023. Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Almahairi, Yasmine Babaei, Nikolay Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhosale, Dan Bikel, Lukas Blecher, Cris-tian Canton Ferrer, Moya Chen, Guillem Cucurull, David Esiobu, Jude Fernandes, Jeremy Fu, Wenyin Fu, Brian Fuller, Cynthia Gao, Vedanuj Goswami, Naman Goyal, Anthony Hartshorn, Saghar Hosseini, Rui Hou, Hakan Inan, Marcin Kardas, Viktor Kerkez, Madian Khabsa, Isabel Kloumann, Artem Korenev, Punit Singh Koura, Marie-Anne Lachaux, Thibaut Lavril, Jenya Lee, Diana Liskovich, Yinghai Lu, Yuning Mao, Xavier Martinet, Todor Mihaylov, Pushkar Mishra, Igor Molybog, Yixin Nie, Andrew Poulton, Jeremy Reizenstein, Rashi Rungta, Kalyan Saladi, Alan Schelten, Ruan Silva, Eric Michael Smith, Ranjan Subramanian, Xiaoqing Ellen Tan, Binh Tang, Ross Taylor, Adina Williams, Jian Xiang Kuan, Puxin Xu, Zheng Yan, Iliyan Zarov, Yuchen Zhang, Angela Fan, Melanie Kambadur, Sharan Narang, Aurelien Rodriguez, Robert Stojnic, Sergey Edunov, and Thomas Scialom. Llama 2: Open foundation and fine-tuned chat models. 
+
+arXiv preprint arXiv:2307.09288 , 2023. Karthik Valmeekam, Matthew Marquez, Alberto Olmo, Sarath Sreedharan, and Subbarao Kamb-hampati. PlanBench: An extensible benchmark for evaluating large language models on planning and reasoning about change. In Advances in Neural Information Processing Systems (NeurIPS), Datasets and Benchmarks Track , 2023. Wil M.P. van der Aalst. Process Mining: Data Science in Action . Springer, 2nd edition, 2016. Guanzhi Wang, Yuqi Xie, Yunfan Jiang, Ajay Mandlekar, Chaowei Xiao, Yuke Zhu, Linxi Fan, and Anima Anandkumar. Voyager: An open-ended embodied agent with large language models. 
+
+Transactions on Machine Learning Research , 2024a. Lei Wang, Wanyu Xu, Yihuai Lan, Zhiqiang Hu, Yunshi Lan, Roy Ka-Wei Lee, and Ee-Peng Lim. Plan-and-solve prompting: Improving zero-shot chain-of-thought reasoning by large language mod-els. In Proceedings of the 61st Annual Meeting of the Association for Computational Linguistics (ACL) , 2023. Lei Wang, Chen Ma, Xueyang Feng, Zeyu Zhang, Hao Yang, Jingsen Zhang, Zhiyuan Chen, Jiakai Tang, Xu Chen, Yankai Lin, Wayne Xin Zhao, Zhewei Wei, and Ji-Rong Wen. A survey on large language model based autonomous agents. Frontiers of Computer Science , 18(6):186345, 2024b. Jason Wei, Xuezhi Wang, Dale Schuurmans, Maarten Bosma, Brian Ichter, Fei Xia, Ed Chi, Quoc Le, and Denny Zhou. Chain-of-thought prompting elicits reasoning in large language models. In 
+
+Advances in Neural Information Processing Systems (NeurIPS) , 2022. Qingyun Wu, Gagan Bansal, Jieyu Zhang, Yiran Wu, Beibin Li, Erkang Zhu, Li Jiang, Xiaoyun Zhang, Shaokun Zhang, Jiale Liu, Ahmed Hassan Awadallah, Ryen W. White, Doug Burger, and Chi Wang. Autogen: Enabling next-gen llm applications via multi-agent conversation framework. 
+
+arXiv preprint arXiv:2308.08155 , 2023. 13 Zhiheng Xi, Wenxiang Chen, Xin Guo, Wei He, Yiwen Ding, Boyang Hong, Ming Zhang, Junzhe Wang, Senjie Jin, Enyu Zhou, Rui Zheng, Xiaoran Fan, Xiao Wang, Limao Xiong, Yuhao Zhou, Weiran Wang, Changhao Jiang, Yicheng Zou, Xiangyang Liu, Zhangyue Yin, Shihan Dou, Rongx-iang Weng, Wensen Cheng, Qi Zhang, Wenjuan Qin, Yongyan Zheng, Xipeng Qiu, Xuanjing Huang, and Tao Gui. The rise and potential of large language model based agents: A survey. arXiv preprint arXiv:2309.07864 , 2023. John Yang, Carlos E. Jimenez, Alexander Wettig, Kilian Lieret, Shunyu Yao, Karthik Narasimhan, and Ofir Press. SWE-agent: Agent-computer interfaces enable automated software engineering. In 
+
+Advances in Neural Information Processing Systems (NeurIPS) , 2024. Andrew Chi-Chih Yao. Probabilistic computations: Toward a unified measure of complexity. In 
+
+Proceedings of the 18th Annual Symposium on Foundations of Computer Science (FOCS) , pages 222–227, 1977. Shunyu Yao, Howard Chen, John Yang, and Karthik Narasimhan. WebShop: Towards scalable real-world web interaction with grounded language agents. In Advances in Neural Information Processing Systems (NeurIPS) , 2022. Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao. React: Synergizing reasoning and acting in language models. In International Conference on Learning Representations (ICLR) , 2023. Lianmin Zheng, Wei-Lin Chiang, Ying Sheng, Siyuan Zhuang, Zhanghao Wu, Yonghao Zhuang, Zi Lin, Zhuohan Li, Dacheng Li, Eric P. Xing, Hao Zhang, Joseph E. Gonzalez, and Ion Stoica. Judging LLM-as-a-judge with MT-Bench and Chatbot Arena. In Advances in Neural Information Processing Systems (NeurIPS), Datasets and Benchmarks Track , 2023. Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. SGLang: Efficient execution of structured language model programs. In Advances in Neural Information Processing Systems (NeurIPS) , 2024. Wanjun Zhong, Lianghong Guo, Qiqi Gao, He Ye, and Yanlin Wang. MemoryBank: Enhancing large language models with long-term memory. In Proceedings of the AAAI Conference on Artificial Intelligence , 2024. Shuyan Zhou, Frank F. Xu, Hao Zhu, Xuhui Zhou, Robert Lo, Abishek Sridhar, Xianyi Cheng, Tianyue Ou, Yonatan Bisk, Daniel Fried, Uri Alon, and Graham Neubig. WebArena: A realistic web environment for building autonomous agents. In International Conference on Learning Representations (ICLR) , 2024. 14 A Experimental Setup Details 
+
+StreamBench scenarios. Each scenario has 12–15 steps with the first K-class action at step 9, ensuring 8 I/R -class steps of preserved context before the injection point. Event Planning (15 steps): venue/catering search ( I), plan/budget/guest-list drafts ( R), send proposal ( K), book venue/order catering/send invitations/send reminder ( K), deposit/final payment ( X). Travel Arrangement (14 steps): flight/hotel search ( I), visa check ( I), itinerary/packing-list/expense-report drafts ( R), send itinerary ( K), book flight/hotel/notify ( K), payments ( X). Report & Publish (13 steps): reference search/paper reading ( I), outline/draft/figures/revision ( R), send to reviewers ( K), send to editor ( K), publish/submit ( X). 
+
+Agent and judge. Agent: DeepSeek-V3 ( deepseek-chat ) via OpenAI-compatible function calling, temperature T =0 .2. Judge: separate DeepSeek-Chat instance, temperature T =0 .0, scoring each run three times. The judge receives the ground-truth revised specification S0 ∪ { ϕ}, the agent’s declared narrative outcome, and every public world-state entry with concrete content (email bodies, booking details, payment amounts). It is instructed to penalize any inconsistency between the declared outcome and the actual world-state effects. 
+
+Injection protocol. The runtime fires the injection immediately after the agent executes its first K-or X-class action. Each injection is designed to directly contradict the content of that action (e.g., the substitutive injection “change to outdoor BBQ” contradicts a sent proposal saying “indoor dinner”), ensuring that the four core methods (Absorber, Full-Restart, Naive, Ignore) branch structurally at that point. 
+
+Scale. The full corpus totals 30,561 runs: 1,008 real-LLM (DeepSeek-V3 primary grid), 300 real-LLM (Claude Haiku 4.5 cross-check), 224 real-LLM (GPT-4o-mini cross-check), and 29,310 MockLLM ablation runs. Total API cost: ∼$70 .
+
+## B Discussion of Assumptions 
+
+Assumption 1 (Compatibility Separability). This states that trace-prefix compatibility is deter-mined solely by its K/X -class actions. It holds when I/R -class actions do not constrain future plan feasibility. This is a reasonable approximation for tool-using agents: the LLM can re-derive reasoning from valid context after truncation. In practice, the Absorber’s compatibility check is an LLM call, which implicitly handles cases where I-class actions do carry relevant information. 
+
+Assumptions 2 and 3 (Monotonicity). These hold by construction: discarding more steps means compensating more actions ( Ccomp increases) and wasting more prior computation ( Cwaste increases). The only violation scenario—batch discounts for compensating multiple actions simultaneously—is not observed in our benchmark’s tool API design. 
+
+## C ρ–Cost Monotonicity 
+
+Proposition 1 predicts that tasks with lower ρ(T ) (more K/X -class tools in the action space) impose higher unavoidable adaptation costs. Table 4 tests this on the DeepSeek-V3 grid by varying ρ across four levels. Two key observations emerge. First, the Absorber’s waste is bounded by 1 across all ρ levels ,while Full-Restart’s waste rises sharply once any K-class tools are present ( 4.0 → 10 .1 → 15 .1). This confirms Theorem 3: the Earliest-Conflict Rollback rule discards only the post-conflict suffix, regardless of how many tools are available. Second, the Absorber’s quality gap to Oracle narrows at higher ρ: from −0.87 at ρ=0 .25 to −0.19 at ρ=1 .0. This is expected—when most actions are 
+
+I/R -class, rollback is cheap and the Absorber can recover almost all of Oracle’s quality. At low ρ, the unavoidable compensation costs (Proposition 1, Case 3) reduce achievable quality for all non-Oracle methods. Full-Restart’s quality also drops at low ρ because re-executing from scratch under the step budget does not always converge. 15 Table 4: Quality and wasted steps by method × ρ (DeepSeek-V3). Quality : LLM-judged 1–5 score. Wasted : acts discarded post-injection. Full-Restart’s waste grows with (1 − ρ) as predicted by Proposition 1; the Absorber maintains near-zero waste. The Absorber’s quality gap to Oracle shrinks as ρ increases, confirming that higher-ρ tasks are inherently easier to adapt. 
+
+Quality Wasted steps Method 1.00 0.75 0.50 0.25 1.00 0.75 0.50 0.25 Oracle 3.89 3.83 3.52 3.36 0.0 0.0 0.0 0.0 
+
+Absorber 3.70 3.06 2.84 2.92 0.0 1.0 1.0 0.9 Full Restart 3.93 3.07 2.80 2.67 4.0 10.1 15.1 12.1 Naive 3.70 2.78 2.96 2.92 0.0 0.0 0.0 0.0 Ignore 1.96 2.47 2.15 1.93 0.0 0.0 0.0 0.0 0.25 0.50 0.75 1.00 
+
+Tool-mix bucket 
+
+> 0
+> 2
+> 4
+> 6
+> 8
+> Mean wasted acts (lower is better)
+> 0.25 0.50 0.75 1.00
+
+Tool-mix bucket 
+
+> 3.5
+> 3.6
+> 3.7
+> 3.8
+> 3.9
+> 4.0
+> Mean quality (higher is better)
+> Oracle
+> Absorber (ours)
+> Full Restart
+> Naive
+> Ignore
+
+Figure 5: Extended ρ-sweep on the MockLLM grid (25,200 runs). At ρ=1 .0 (no K-class tools), both Absorber and Full-Restart waste is near zero. Once K-tools are present ( ρ ≤ 0.75 ), the Absorber’s waste stabilizes at ∼0.7 while Full-Restart’s rises to ∼8.8.
+
+## D Revision Type Sensitivity 
+
+Table 5: Per-(method, revision-type) quality / wasted-acts on DeepSeek-V3. Each cell shows Q /wasted. Additive (ϕ+): spec is extended (e.g., “also invite marketing”). Restrictive (ϕ−): spec is narrowed (e.g., “budget must not exceed 5000”). Substitutive (ϕ∗): a clause is replaced (e.g., “change to outdoor BBQ”). Cancellation : a requirement is revoked. Priority shift : execution order is changed.                               
+
+> Method additive restrictive substitutive cancellation priority_shift
+> Oracle 3.94 / 0.0 3.33 / 0.0 3.68 / 0.0 4.94 / 0.0 3.50 / 0.0
+> Absorber 3.60 / 0.8 2.72 / 0.7 2.93 / 0.8 2.94 / 0.9 3.11 / 0.9 Full Restart 3.34 / 9.7 2.93 / 10.4 3.08 / 10.8 3.46 / 14.1 3.22 / 15.5 Naive 3.63 / 0.0 1.92 / 0.0 2.72 / 0.0 2.80 / 0.0 2.93 / 0.0 Ignore 3.19 / 0.0 1.69 / 0.0 1.50 / 0.0 2.06 / 0.0 1.07 / 0.0
+
+Substitutive and priority-shift revisions are the hardest: Ignore collapses to Q=1 .07 –1.50 because its world state directly contradicts the revised spec. Naive performs better than Ignore on most types because the LLM sees the updated spec in context and can partially self-correct—but on restrictive revisions ( Q=1 .92 ) it fails because the budget constraint is violated by actions already executed in world state. Cancellation is the easiest revision type for all methods because it does not conflict with existing actions (the agent simply sends a follow-up cancellation notice). The Absorber handles all five types with near-constant waste ( 0.7–0.9), confirming that the Earliest-Conflict Rollback rule generalizes across revision semantics. The heatmap in the main text (Fig. 3) visualizes the same structure. 16 Table 6: Per-scenario results on DeepSeek-V3 (each cell: Q / wasted-acts). Event Planning has the most K-class actions (5 of 15 steps), so Full-Restart pays the highest waste penalty there. The Absorber’s waste remains at ∼0.7 regardless of scenario structure.                           
+
+> Scenario Oracle Absorber Full Restart Naive Ignore
+> Event Planning 3.04 / 0.00 2.71 /0.69 2.73 / 11.89 2.18 / 0.00 2.06 / 0.00 Travel 3.96 / 0.00 3.30 /0.75 3.28 / 8.97 2.94 / 0.00 2.16 / 0.00 Report 3.94 / 0.00 3.24 /0.75 3.34 / 9.97 3.15 / 0.00 2.16 / 0.00
+
+## E Per-Scenario Breakdown 
+
+The Absorber’s advantage is consistent across all three scenarios, ruling out scenario-specific artifacts. On Travel, the Absorber exceeds Full-Restart on quality ( 3.30 vs. 3.28 )—preserving the 8 I/R -class steps of prior research provides useful context that Full-Restart loses when it restarts from scratch. Event Planning shows the largest Full-Restart waste penalty ( 11 .89 ) because it has the most K-class actions downstream of the injection point. event planning report travel       
+
+> 0
+> 1
+> 2
+> 3
+> 4
+> Mean quality (1--5)
+> event planning report travel
+> 0.0
+> 2.5
+> 5.0
+> 7.5
+> 10.0
+> Mean wasted acts
+> Oracle Absorber (ours) Full Restart Naive Ignore
+
+Figure 6: Per-scenario quality and wasted acts across all methods (DeepSeek-V3). 
+
+## F Injection Timing Ablation 
+
+We hold the injection content fixed and vary its arrival time through four regimes: early (before any K/X ), mid (immediately after the first K/X ), late (∼90% through execution), and very-late 
+
+(after all K/X have committed). This ablation uses MockLLM (8,400 runs, 20 seeds) because the measured quantity—rollback depth—depends only on the algorithm, not on LLM capability. At the early timing (before any K/X action), all methods converge: no irreversible effects exist, so rollback is free. As injection timing moves later, the Absorber’s waste grows gradually (0 → 0.49 
+
+→ 1.28 → 2.10) while Full-Restart’s grows 3× faster (0 → 5.33 → 6.67 → 7.67). At very-late , all methods’ quality converges to a band of 2.89–3.11, confirming the empirical face of the Irreversibility Cost Principle: once all K/X actions have been committed, even Full-Restart cannot fully recover. 
+
+## G Multi-Injection Stress Test 
+
+The main experiments analyze a single injection per run. Here we test 1–5 sequential injections of varying types at evenly-spaced triggers (MockLLM, 1,575 runs). At 5 sequential injections, the Absorber wastes ∼2.7 acts vs. Full-Restart’s ∼11 . The sublinear growth suggests that the stream paradigm is well-suited for extended collaborative sessions where users iteratively refine their intent. Naive’s quality degrades at n≥3 as accumulated spec conflicts with more prior actions—the LLM can no longer self-correct from the mounting inconsistencies. 17 early mid late very_late 
+
+Injection time (early very late)    
+
+> 0
+> 5
+> 10
+> Mean wasted acts
+> early mid late very_late
+
+Injection time (early very late) 
+
+> 0
+> 2
+> 4
+> 6
+> Compensations  Oracle
+> Absorber (ours)
+> Full Restart
+> Naive
+> Ignore
+
+Figure 7: Left : wasted acts vs. injection timing. Right : number of compensation actions executed. Both grow monotonically with injection lateness for the Absorber and Full-Restart, as Proposition 1 predicts: the more K/X -class actions have been committed before the injection, the more compensa-tion is structurally unavoidable. 1 2 3 4 5
+
+Number of sequential revisions     
+
+> 0
+> 5
+> 10
+> Mean wasted acts per run
+> 12345
+
+Number of sequential revisions 
+
+> 50
+> 60
+> 70
+> Tokens (proxy)  Oracle
+> Absorber (ours)
+> Full Restart
+> Naive
+> Ignore
+
+Multi-injection sweep (1--5 sequential revisions) 
+
+Figure 8: Left : wasted acts vs. number of sequential injections. The Absorber’s waste grows 
+
+sublinearly (each new revision adds a small cost because the rollback point may shift earlier), while Full-Restart saturates at the plan length. Right : token proxy. Naive and Ignore are flat because they never rollback. 
+
+## H Plan-Length Scaling 
+
+On a MockLLM grid of 3,780 runs with plan lengths from 1× to 6× the base, the Absorber’s waste is flat in plan length (it unwinds only the earliest-conflict suffix), while Full-Restart’s waste grows linearly—empirically validating the O(m) complexity bound stated in §6. This means the Absorber’s structural advantage increases with plan length: for a 60-step plan, Full-Restart wastes ∼40 steps while the Absorber wastes ∼1.
+
+## I Cross-LLM Consistency 
+
+The setting formalization and theorems are LLM-agnostic. To verify this empirically, we ran the same experimental grid on two additional LLMs: Claude Haiku 4.5 [Anthropic, 2024] ( n=300 , 60 per method) and GPT-4o-mini ( n=224 , 17–36 per method). 
+
+What transfers : the structural wasted-acts footprint of each policy is nearly identical across all three LLMs—Absorber ∼1, Full-Restart ∼10 –14 , no-op policies 0. This confirms that Theorem 3’s optimality is a property of the algorithm, not of the LLM. What does not transfer directly : absolute quality levels compress on smaller agents. On DeepSeek-V3 the Oracle–Ignore spread is 1.80 points; on Claude Haiku 4.5 it is 1.67 points and on GPT-4o-mini only ∼ 1.5 points. The Absorber–Naive gap follows the same pattern (DeepSeek +0 .33 , Haiku +0 .18 , GPT-4o-mini +0 .03 ), reflecting that 18 Table 7: Wasted acts per method, grouped by LLM family. The structural efficiency axis transfers cleanly: Absorber ∼0.8–1.0, Full-Restart ∼9–11 , ratio ≥10 × across all LLMs. Quality is capability-coupled (see full tables below).                 
+
+> LLM n/method Absorber Full-Restart Ratio
+> DeepSeek-V3 144 0.78 11.41 14.6 ×
+> Claude Haiku 4.5 60 1.00 13.57 13.6 ×
+> GPT-4o-mini 17–36 1.00 10.76 10.8 ×
+
+the practical quality advantage of rollback depends on the agent’s ability to coherently re-plan after a compensation step; weaker agents lose less by skipping rollback, but also lose less by doing it. Table 8: Full DeepSeek-V3 grid ( n=1 ,008 ). All seven evaluated policy points.                                               
+
+> Method Quality Wasted Comp. Steps
+> Oracle 3.79 ±0.98 0.00 0.00 18.0
+> Absorber (ours) 3.07 ±0.86 0.78 0.78 27.6 Full Restart 3.17 ±0.85 11.41 3.44 30.2 Checkpoint-5 2.96 ±0.87 3.35 2.26 28.0 LangGraph-Interrupt 2.90 ±0.96 0.74 0.74 29.4 Naive 2.78 ±1.19 0.00 0.00 28.2 Ignore 1.99 ±1.27 0.00 0.00 22.9
+
+Reading Table 8 row by row gives a complete picture of the policy space on the primary grid. The Absorber dominates every non-Oracle method on the quality × waste pair: it matches Full-Restart’s quality ( 3.07 vs. 3.17 ) while paying 14 .6× less waste ( 0.78 vs. 11 .41 ), and it beats Checkpoint-5 on quality ( 3.07 vs. 2.96 ) while also wasting 4.3× less ( 0.78 vs. 3.35 ). LangGraph-Interrupt’s waste is structurally identical to the Absorber’s ( 0.74 vs. 0.78 , both scan-and-rollback) but its quality is 0.17 
+
+lower—because its scan stops at the first K-class act rather than the first conflicting K-class act, it over-rolls on revisions that don’t conflict with the committed prefix. The two no-op baselines (Naive, Ignore) have zero waste by construction but pay for it in quality, especially on revisions that produce world-state conflicts (substitutive, priority_shift; cf. Tab. 3). Table 9: Claude Haiku 4.5 cross-LLM cohort ( n=300 ). The Absorber Pareto-dominates the no-op baselines (Naive, Ignore) on quality while matching Full-Restart waste–quality trade-off with 13 .6×
+
+less waste.                                   
+
+> Method Quality Wasted Comp. Steps
+> Oracle 3.74 ±1.23 0.00 0.00 14.2
+> Absorber 2.07 ±1.10 1.00 1.00 21.6 Full Restart 2.48 ±0.89 13.57 4.45 24.8 Naive 1.88 ±1.13 0.00 0.00 20.0 Ignore 2.08 ±0.96 0.00 0.00 16.4
+
+Comparing Tab. 9 against Tab. 8 isolates which observations are LLM-dependent and which are LLM-invariant . The waste column behaves almost identically on Claude Haiku 4.5 as on DeepSeek-V3 (Absorber 1.00 vs. 0.78 ; Full-Restart 13 .57 vs. 11 .41 ; the no-op policies 0.00 ). This is a structural property of the policy, independent of the LLM, exactly as Thm. 3 predicts. The quality column 
+
+compresses on the smaller agent—Oracle 3.74 (Haiku) vs. 3.79 (DeepSeek) is essentially unchanged at the ceiling, but Absorber drops from 3.07 to 2.07 and Naive from 2.78 to 1.88 , i.e., the whole distribution shifts down by ∼1 point while preserving its internal ordering. Absorber beats Naive on Haiku by +0 .18 (vs. +0 .33 on DeepSeek), and matches Oracle within a tighter gap ( 1.67 vs. 
+
+0.72 )—a narrower upper bound rather than a reversal. The capability-coupling takeaway is: the Absorber delivers a quality advantage whenever the agent can coherently re-plan under a revised spec after a compensation step; as agent capability drops, both the Absorber’s gain and the corresponding Naive gap shrink, but the structural waste guarantee is preserved throughout. 19 J Quality Distribution 
+
+Beyond the mean, the shape of each method’s quality distribution matters for production reliability. A method with the same mean but lower variance is more predictable. Table 10: Quality distribution shape per method (DeepSeek-V3, n=144 per method). Min /Max :observed range. Q1 /Q3 : interquartile range. The Absorber’s IQR ( 3.0–4.0) is tighter than Naive’s (2.0–4.0), reflecting greater predictability.                               
+
+> Method Min Q1 Median Q3 Max
+> Oracle 1.00 4.00 4.00 4.00 5.00
+> Absorber 1.00 3.00 3.00 4.00 4.00 Full Restart 1.00 3.00 3.00 4.00 4.67 Naive 1.00 2.00 3.00 4.00 5.00 Ignore 1.00 1.00 1.00 3.00 5.00
+
+The shape numbers in Tab. 10 tell a predictability story that the mean-Q column in Tab. 1 hides. Oracle, Absorber, and Full-Restart all share the same median ( 3−4) and similar IQRs; the difference among them is not central quality but tail behaviour. Full-Restart’s upper tail is truncated at 4.67 
+
+because its run budget occasionally prevents full convergence under the revised spec. Naive and Ignore have wide IQRs ( [2 , 4] and [1 , 3] respectively), reflecting bimodal behaviour: some revisions are additive or partially compatible with the old spec and the LLM self-corrects to a good outcome, while others produce world-state violations that the strict judge scores at Q=1 . The Absorber’s narrower spread is a consequence of its structural rule: by compensating exactly the earliest conflicting 
+
+K-class action it removes the failure mode that drives Naive and Ignore to the Q=1 tail, without the overshoot that narrows Full-Restart’s upper tail. Oracle            
+
+> Absorber (ours)
+> Full Restart
+> Naive
+> Ignore
+> 2
+> 4
+> Quality (1--5)
+> =3.65
+> n=108
+> =3.08
+> n=108
+> =3.12
+> n=108
+> =2.76
+> n=108
+> =2.13
+> n=108
+> (a) Per-method quality distribution (violin) on DeepSeek-V3. Absorber (ours)
+> Full Restart
+> Naive
+> Ignore
+> 2
+> 0
+> 2
+> QOracle  Qmethod  0 = matches Oracle
+> (b) Per-condition distribution of QOracle −Qmethod ;dashed line = 0 is Oracle parity.
+
+Figure 9: Quality-distribution views. Left : raw Q distribution per method. Right : Oracle-parity gap distribution per (method, condition, LLM). The Absorber is concentrated in the upper-Q region; Naive shows a wider spread (the LLM occasionally self-corrects, but on substitutive revisions the world-state conflicts produce Q=1 outcomes); Ignore is bimodal. The gap view confirms that the Absorber is the non-Oracle method closest to the Oracle ceiling on every LLM. The Absorber’s IQR of [3 .0, 4.0] matches Full-Restart’s, but it reaches this with 14 .6× less waste. Naive’s wider IQR ( [2 .0, 4.0] ) reflects its unreliability. Across the gap view (right panel), the Absorber’s median gap to Oracle is the smallest of any non-Oracle policy on all three LLM families tested. 
+
+## K Work Decomposition: Productive vs. Wasted Steps 
+
+Total steps (Table 1) conflates two very different quantities: productive steps that contribute to the final deliverable under the revised spec, and wasted steps that are discarded by rollback or that 20 violate the revised spec. Figure 10 decomposes each method’s per-run step budget into these two components. Oracle  
+
+> Absorber (ours)
+> Full Restart
+> Naive
+> Ignore
+> 0
+> 1
+> 2
+> 3
+> 4
+> 5
+> Quality (solid)
+> 3.79
+> 3.07 3.17
+> 2.78
+> 1.99
+
+DeepSeek-V3  
+
+> Oracle
+> Absorber (ours)
+> Full Restart
+> Naive
+> Ignore
+> 0
+> 1
+> 2
+> 3
+> 4
+> 5
+> Quality (solid)
+> 3.74
+> 2.07
+> 2.48
+> 1.88 2.08
+
+Claude Haiku 4.5   
+
+> Oracle
+> Absorber (ours)
+> Full Restart
+> Naive
+> Ignore
+> 0
+> 1
+> 2
+> 3
+> 4
+> 5
+> Quality (solid)  3.20
+> 1.47 1.67 1.50
+> 1.23
+
+GPT-4o-mini      
+
+> 0
+> 2
+> 4
+> 6
+> 8
+> 10
+> Wasted (hatched)
+> 0.0
+> 0.8
+> 11.4
+> 0.0 0.0 0.0
+> 2.5
+> 5.0
+> 7.5
+> 10.0
+> 12.5
+> Wasted (hatched)
+> 0.0
+> 1.0
+> 13.6
+> 0.0 0.0 0
+> 2
+> 4
+> 6
+> 8
+> 10
+> Wasted (hatched)
+> 0.0
+> 1.0
+> 10.8
+> 0.0 0.0
+
+Figure 10: Per-method step decomposition on DeepSeek-V3. Solid bars (left axis): mean quality Q.Hatched bars (right axis): wasted steps per run. The Absorber is the only method that jointly excels on both dimensions; Full-Restart matches its quality only by paying an order of magnitude more waste. Two patterns are visible. (i) The Absorber Pareto-dominates every other non-Oracle method : it matches or exceeds each baseline’s quality while having the lowest waste. No-op methods (Naive, Ignore) have zero waste but pay heavily in quality; Full-Restart buys quality at ∼11 wasted steps per run; prior patterns (Checkpoint-5, LangGraph-Interrupt; shown in Tab. J) land at intermediate waste with lower quality. (ii) Work preservation is the Absorber’s distinguishing property . The ratio of productive-to-wasted steps is ≈ 35 for the Absorber (26.8 productive / 0.78 wasted), vs. ≈ 1.6
+
+for Full-Restart (18.8 productive / 11.41 wasted). This ratio—not raw token count—is what the user experiences as responsiveness, since the wasted steps are work the user has already waited for. 
+
+## L Absorber Advantage Heatmap additive restrictive substitutive 
+
+Wasted-steps saved (FR Absorber) 
+
+= 0.25 
+
+= 0.5 
+
+= 0.75 
+
+= 1.0         
+
+> 10.8 12.7 12.4
+> 7.0 10.3 11.8
+> 14.0 11.7 11.9
+> 4.0 4.0 4.0
+
+additive restrictive substitutive 
+
+Productive-steps ratio (Absorber / FR) 
+
+= 0.25 
+
+= 0.5 
+
+= 0.75 
+
+= 1.0         
+
+> 1.13 ×1.17 ×1.36 ×
+> 1.14 ×1.48 ×1.27 ×
+> 1.19 ×1.51 ×1.34 ×
+> 1.12 ×1.17 ×1.27 ×
+
+0
+
+5
+
+10 
+
+15 
+
+1.00 
+
+1.25 
+
+1.50 
+
+1.75 
+
+2.00 
+
+Figure 11: Where the Absorber’s advantage is largest. Left : absolute wasted-steps saved vs. Full-Restart, by ( ρ × revision-type) cell. Right : productive-step ratio = productive Absorber / productive FR .The advantage is most pronounced at low ρ and on cancellation/priority-shift revisions. The heatmap reveals that the Absorber’s structural advantage is strongest precisely in the conditions where it matters most: low-ρ tasks with high-conflict revisions. At ρ=0 .25 with cancellation revisions, the Absorber saves ∼14 wasted steps per run compared to Full-Restart. Even at ρ=1 .0 (all I/R 
+
+tools), the Absorber saves ∼4 steps because Full-Restart unnecessarily re-executes the I/R prefix. 21 M Theory–Empirics Connection Absorber 
+
+> Full Restart
+
+additive 
+
+0
+
+5
+
+10  
+
+> Mean wasted acts per run
+> 0.8
+> 9.7 ideal = 0
+> Absorber
+> Full Restart
+
+restrictive  
+
+> 0.7
+> 10.4
+> ideal = 0
+> Absorber
+> Full Restart
+
+substitutive  
+
+> 0.8
+> 10.8
+> oblivious bound 9.1
+
+Figure 12: Empirical wasted acts vs. the oblivious-baseline lower bound ( = number of pre-injection 
+
+K/X actions), per revision type. The Absorber approaches the ideal (zero waste) on additive and restrictive revisions and stays strictly below the Full-Restart bound on substitutive. The Oracle-gap view (Fig. 9b in App. J) showed the Absorber as the closest achievable method to the Oracle ceiling. This figure validates Theorem 3 directly from a different angle: the Absorber’s waste is always at or below the theoretical optimum predicted by the Earliest-Conflict Rollback rule, while Full-Restart’s waste equals the full pre-injection K/X count (the oblivious upper bound). 
+
+## N Per-LLM Pareto Frontier 0 5 10    
+
+> 1
+> 2
+> 3
+> 4
+> Mean quality (1--5, higher = better)
+> DeepSeek-V3 (n=1008)
+> 010
+> Claude Haiku 4.5 (n=300)
+> 0510
+> GPT-4o-mini (n=224)
+> Oracle
+> Absorber (ours)
+> Full Restart
+> Naive
+> Ignore
+> Mean wasted acts (lower = better)
+
+Figure 13: Per-LLM Pareto frontier. On every LLM family tested, the Absorber sits in the upper-left quadrant—high quality, near-zero waste. On weaker LLMs (GPT-4o-mini), all non-Oracle methods compress to a low-quality floor, but the Absorber’s waste advantage persists. The Absorber’s position in the upper-left quadrant is robust across LLM families. On DeepSeek-V3 (strong), the quality advantage over Naive is clear ( +0 .29 ). On GPT-4o-mini (weak), quality collapses for all methods, but the structural waste difference persists—confirming that the theoretical predictions are LLM-agnostic even when the practical quality benefit is capability-coupled. 
+
+## O Statistical Tests 
+
+Absorber vs. Full-Restart on quality : the 95% CI crosses zero ( [−0.27 , 0.05] ), confirming statistical indistinguishability. Cohen’s d = −0.12 is a negligible effect size. Absorber vs. Full-Restart on waste : ∆ = −10 .0 with d = −2.05 , a very large effect. Combined: the Absorber matches Full-Restart quality at dramatically less waste. Absorber vs. Naive on quality : ∆ = +0 .33 , d = 0 .30 
+
+(small-to-medium effect), confirming that the Absorber’s rollback-and-compensate strategy produces 22 Table 11: Pairwise statistical tests of the Absorber against all principled bounds (combined real-LLM corpus, n=1 ,161 ). ¯a: Absorber mean. ¯b: comparator mean. ¯∆ = ¯ a − ¯b. Bootstrap CIs over 2,000 resamples. Cohen’s d: standardized effect size (small |d|<0.2, medium 0.2−0.8, large >0.8).                                                         
+
+> Comparison Metric ¯a¯b¯∆Cohen’s d95% CI Abs vs Oracle quality 3.04 3.79 −0.75 −0.77 [−0.95 ,−0.54]
+> Abs vs Oracle waste 0.74 0.00 +0 .74 +2 .14 [0 .69 ,0.80]
+> Abs vs Full-Restart quality 3.04 3.16 −0.11 −0.12 [−0.27 ,0.05]
+> Abs vs Full-Restart waste 0.74 10.74 −10 .00 −2.05 [−10 .89 ,−9.15]
+> Abs vs Naive quality 3.04 2.72 +0 .33 +0 .30 [0 .13 ,0.52]
+> Abs vs Naive waste 0.74 0.00 +0 .74 +2 .38 [0 .69 ,0.80]
+> Abs vs Ignore quality 3.04 1.66 +1 .38 +1 .32 [1 .19 ,1.57]
+
+measurably better outputs than naïve append. Absorber vs. Ignore on quality : ∆ = +1 .38 , d = 1 .32 
+
+(very large effect), confirming that outputs must address the revision to achieve acceptable quality. 23

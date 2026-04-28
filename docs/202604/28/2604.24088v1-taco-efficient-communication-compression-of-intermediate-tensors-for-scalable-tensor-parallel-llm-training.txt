@@ -1,0 +1,804 @@
+Title: TACO: Efficient Communication Compression of Intermediate Tensors for Scalable Tensor-Parallel LLM Training
+
+URL Source: https://arxiv.org/pdf/2604.24088v1
+
+Published Time: Tue, 28 Apr 2026 01:32:27 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# TACO: Efficient Communication Compression of Intermediate Tensors for Scalable Tensor-Parallel LLM Training 
+
+# Man Liu 
+
+Hangzhou Institute for Advanced Study, University of Chinese Academy of Sciences Hangzhou, China liuman24@mails.ucas.ac.cn 
+
+# Xingchen Liu 
+
+Institute of Computing Technology, Chinese Academy of Sciences Beijing, China liuxingchen23s@ict.ac.cn 
+
+# Xingjian Tian 
+
+Hangzhou Institute for Advanced Study, University of Chinese Academy of Sciences Hangzhou, China tianxingjian25@mails.ucas.ac.cn 
+
+# Bing Lu 
+
+Institute of Computing Technology, Chinese Academy of Sciences Beijing, China lubing@ict.ac.cn 
+
+# Shengkai Lyu 
+
+Institute of Computing Technology, Chinese Academy of Sciences Beijing, China lvshengkai23@mails.ucas.ac.cn 
+
+# Shengquan Yin 
+
+University of Science and Technology of China Hefei, China yinshengquan@mail.ustc.edu.cn 
+
+# Wenjing Huang 
+
+Institute of Computing Technology, Chinese Academy of Sciences Beijing, China huangwenjing23@mails.ucas.ac.cn 
+
+# Zheng Wei 
+
+Institute of Computing Technology, Chinese Academy of Sciences Beijing, China weizheng@ncic.ac.cn 
+
+# Hairui Zhao 
+
+Institute of Computing Technology, Chinese Academy of Sciences Beijing, China zhaohairui@ict.ac.cn 
+
+# Guangming Tan 
+
+Institute of Computing Technology, Chinese Academy of Sciences Beijing, China tgm@ict.ac.cn 
+
+# Dingwen Tao 
+
+Institute of Computing Technology, Chinese Academy of Sciences Beijing, China taodingwen@ict.ac.cn 
+
+## Abstract 
+
+Handling communication overhead in large-scale tensor-parallel training remains a critical challenge due to the dense, near-zero distributions of intermediate tensors, which exacerbate errors un-der frequent communication and introduce significant computa-tional overhead during compression. To this end, we propose TACO 
+
+(Tensor-parallel Adaptive CO mmunication compression), a robust FP8-based framework for compressing TP intermediate tensors. First, we employ a data-driven reshaping strategy combined with an Adaptive Scale–Hadamard Transform to enable high-fidelity FP8 quantization, while its Dual-Scale Quantization mechanism ensures numerical stability throughout training. Second, we design a highly fused compression operator to reduce memory traffic and kernel launch overhead, allowing efficient overlap with communication. Fi-nally, we integrate TACO with existing state-of-the-art methods for Data and Pipeline Parallelism to develop a compression-enabled 3D-parallel training framework. Detailed experiments on GPT models and Qwen model demonstrate up to 1.87 × end-to-end throughput improvement while maintaining near-lossless accuracy, validating the effectiveness and efficiency of TACO in large-scale training.  
+
+> This work is licensed under a Creative Commons Attribution 4.0 International License.
+> HPDC ’26, Cleveland, OH, USA
+> ©2026 Copyright held by the owner/author(s). ACM ISBN 979-8-4007-2640-8/2026/07 https://doi.org/10.1145/3806645.3807584
+
+## CCS Concepts 
+
+• Software and its engineering → Message passing ; • Theory of computation → Data compression .
+
+## Keywords 
+
+Tensor parallelism, quantization, distributed training, communica-tion compression, large language model. 
+
+ACM Reference Format: 
+
+Man Liu, Xingchen Liu, Xingjian Tian, Bing Lu, Shengkai Lyu, Shengquan Yin, Wenjing Huang, Zheng Wei, Hairui Zhao, Guangming Tan, and Ding-wen Tao. 2026. TACO: Efficient Communication Compression of Intermedi-ate Tensors for Scalable Tensor-Parallel LLM Training. In The 35th Interna-tional Symposium on High-Performance Parallel and Distributed Computing (HPDC ’26), July 13–16, 2026, Cleveland, OH, USA. ACM, New York, NY, USA, 14 pages. https://doi.org/10.1145/3806645.3807584 
+
+## 1 Introduction 
+
+The rapid scaling of large language models (LLMs) to tens of bil-lions, hundreds of billions, and even trillion-parameter scales has driven the adoption of increasingly sophisticated distributed train-ing strategies [11, 22, 24, 44]. Among them, 3D parallelism — com-prising data parallelism (DP), tensor parallelism (TP), and pipeline parallelism (PP)—has emerged as the dominant paradigm for train-ing ultra-large models [ 10 , 57 ]. However, as model scale grows, training performance becomes increasingly constrained by com-munication rather than computation. Recent system studies show  
+
+> arXiv:2604.24088v1 [cs.DC] 27 Apr 2026 HPDC ’26, July 13–16, 2026, Cleveland, OH, USA Liu et al.
+
+that communication can account for over 50% of the total training time [ 35 , 50 ]. Different parallelism strategies exhibit fundamen-tally different communication patterns and compression challenges. DP performs relatively low-frequency gradient synchronization, while PP primarily relies on lightweight point-to-point communi-cation without global synchronization, making both comparatively amenable to effective communication compression [1, 20, 34, 39]. In contrast, TP requires frequent, tightly synchronized commu-nication to exchange intermediate tensors (sharded activations and gradients) during both forward and backward passes [ 5, 18 , 43 , 47 ,52 ]. As a result, TP communication lies on the critical execution path, accounts for over 50–60% of total communication time (see Fig-ure 1a), and is notoriously difficult to overlap with computation [ 35 ,43 , 50 ].This creates a fundamental challenge— compression over-head under frequent communication —as compression over-head must be minimized, which demands extreme operator-level optimization while carefully and strictly controlling error. To mitigate communication overhead, prior work has explored various compression techniques, including quantization [ 31 , 56 ], sparsification [ 7 , 26 ], and low-rank approximation [ 49 , 56 ]. These approaches have been successfully applied in DP and PP. Represen-tative methods such as SDP4bit [ 21 ] and TahQuant [ 19 ] demonstrate that carefully designed compression strategies can significantly re-duce communication cost while effectively preserving training sta-bility in their respective domains [ 12 ]. In parallel, many inference-oriented compression methods—such as SmoothQuant [53 ], FlatQuant [ 45 ], QuaRot [ 4], and GPTQ [ 15 ]—primarily leverage INT4/INT8 formats tailored for static weights and activations .However, communication compression for TP remains largely underexplored, particularly in training. Unlike the coarse-grained and relatively infrequent communication patterns in DP and PP, TP necessitates multiple rounds of compression within every Trans-former block communication, giving rise to a critical challenge: 
+
+error accumulation under high-frequency communication .Even minor quantization errors in TP intermediate tensors can propagate through attention and residual connections, amplifying during backpropagation [ 54 ] and, as shown in Figure 1b, potentially destabilizing training or causing divergence. Moreover, TP commu-nication compression is much more challenging during training than inference. Unlike inference, pretraining involves thousands of forward and backward passes, repeatedly injecting and amplifying quantization noise, so directly applying inference-oriented com-pression to TP tensors often leads to catastrophic training failure. Through a systematic analysis of the distributions of TP interme-diate tensors, we make two key observations that clearly and funda-mentally highlight the fundamental difficulty of their compression. First, these tensors are strongly dominated by small-magnitude values with highly concentrated, zero-centered distributions . This characteristic constitutes the primary challenge for TP commu-nication compression ( distinct TP intermediate tensor char-acteristics ), as conventional methods fail to adequately capture the numerical subtleties of these extremely small values, result-ing in significant information loss and progressively severe error accumulation, especially under repeated synchronization along the TP computation path. Second, regarding quantization prepro-cessing, prior work commonly applies fixed transformations—such 30.2%          
+
+> 33.8%
+> 36.0%
+> 27.3%
+> 27.6%
+> 45.1%
+> 34.6%
+> 31.2%
+> 34.2%
+> 25.8%
+> 30.3%
+> 43.9%
+> 25B 39B
+> Llama
+> 18B 30B
+> GPT
+> TP Comm.
+> Other Comm.
+> Others
+> (a) Execution time break-down across different models and scales 05000 10000 15000 20000
+> Iteration
+> 2.1
+> 2.3
+> 2.5
+> 2.7
+> 2.9
+> Validation Loss
+> 19k 20k
+> 2.25
+> 2.28
+> 2.31
+> Baseline(w/o compress)
+> DP(SDP4bit)-PP(TahQuant)-TP(TahQuant)
+> DP(SDP4bit)-PP(TahQuant)-TP(w/o compress)
+> (b) Validation loss comparison between the base-line and TP using TahQuant compression under 3D parallelism on GPT-350M
+
+Figure 1: Communication overhead and impact of quantization on training performance and convergence 
+
+as rotations or Hadamard transforms—to balance value distribu-tions [ 3, 6 , 14 , 41 , 48 ]. While these transforms can spread variance across dimensions in other contexts, they are data-independent and lack the adaptability required to disperse the dense, zero-centered clusters inherent in TP intermediate tensors. Consequently, static transforms alone are insufficient to enable high-fidelity and reliable quantization for tightly synchronized TP communication. 
+
+Motivated by these challenges , we propose TACO (Tensor-parallel Adaptive CO mmunication compression), a robust FP8-based framework explicitly designed to efficiently compress in-termediate tensors within TP training. TACO is specifically designed to address the critical challenges of error accumulation during TP pretraining, the distinct characteristics of TP intermediate tensors, and the high compression overhead induced by tightly synchronized communication. Unlike prior works, TACO directly targets latency-critical intermediate tensor communication in TP training, where both numerical fidelity and efficiency are essential. It introduces a data-driven reshaping strategy that dynamically adapts to the statistical distributions of TP intermediate tensors, enabling high-fidelity FP8 quantization in practice. To ensure numerical stability, the framework employs a dual-scale quantization technique that preserves precision across all training stages. In addition, we de-velop a highly fused compression operator to minimize memory traffic and kernel launch overhead, significantly enhancing com-putational efficiency. To the best of our knowledge, TACO is the first 3D parallel communication compression system that achieves stable convergence in large-scale TP training scenarios. Our primary contributions are summarized as follows. 
+
+• We systematically analyze TP intermediate tensors, whose 
+
+dense, near-zero distributions render INT8 quantization inad-equate while favoring FP8. Nevertheless, FP8’s representational capacity under low-bit remains limited, and standard Hadamard transform fails to sufficiently disperse these highly concentrated values. This analysis provides crucial guidance for designing effective TP intermediate tensor compression methods. 
+
+• We propose TACO , a TP communication compression frame-work. TACO introduces the Adaptive Scale–Hadamard Trans-form to dynamically reshape the distribution of TP intermediate tensors for high-fidelity FP8 quantization, and implements Dual-Scale Quantization to keep all communicated values within the FP8 representable range across training, effectively preventing error amplification under frequent TP communication .TACO HPDC ’26, July 13–16, 2026, Cleveland, OH, USA Transformer    
+
+> Layer Input
+> 𝒈
+> Self Attention
+> Linear
+> ഥ𝒈
+> LayerNorm
+> Dropout
+> LayerNorm
+> 𝒈
+> Linear
+> GeLU
+> Linear
+> ഥ𝒈
+> Dropout
+> Transformer
+> Layer Output
+> Tensor
+> Parallel
+> Tensor
+> Parallel
+> 2AllReduce 2AllReduce
+> Figure 2: Illustration of TP in a Transformer block, including the AllReduce operations required during forward and backward passes.
+
+• We develop a highly fused compression operator that com-bines all quantization steps in a single kernel, reuses warp-level reductions, and accesses metadata without extra copies. This design reduces memory traffic and kernel launches, accelerates computation, and enables efficient overlap with communication via tight integration with backends and fine-grained scheduling, thus mitigating high-frequency compression overhead .
+
+• We integrate TACO with state-of-the-art compression methods for DP (SDP4Bit) and PP (TahQuant), enabling fully compression-enabled 3D-parallel training. In addition, evaluation results on GPT models and Qwen2.5-7B show that our method achieves up to 1.87 × end-to-end throughput improvement for TP com-pression and up to 1.53 × under full 3D-parallel compression, while maintaining near-lossless training accuracy .
+
+## 2 Background and Related Work 2.1 Tensor Parallelism and Its Communication 
+
+Currently, distributed training of LLMs encounters increasingly significant communication bottlenecks stemming from different parallelism strategies, including DP, PP, and TP. Among these, TP is the primary contributor to intra-node communication overhead, as it requires frequent synchronization of intermediate activations and gradients across GPUs. TP enables the scaling of Transformer-based LLMs across multiple GPUs by exploiting the inherent paral-lelism of large matrix multiplications [ 2, 43 ]. In TP, weight matrices are partitioned along the hidden dimension—either by rows or columns—allowing multiple devices to collaboratively compute a single Transformer block. As illustrated in Figure 2, mainstream implementations apply TP to both the MLP and Attention blocks. During the forward pass, column-parallel linear layers produce par-tial outputs on each GPU, which must be synchronized via collective communication before being consumed by subsequent layers. Simi-larly, during backpropagation, row-parallel layers require collective synchronization of gradients prior to parameter updates. Because TP collectives are invoked synchronously at every layer and iteration, TP constitutes the primary intra-node communication pathway in 3D-parallel training systems. Whether implemented as 
+
+AllReduce or, when combined with sequence parallelism (SP), de-composed into AllGather and Reduce-Scatter operations along the sequence dimension [ 27 ], TP communication is highly sensitive to both bandwidth and latency. As model widths scale to tens of thousands and depths grow to hundreds of layers, the communi-cation volume incurred by TP increases rapidly, leading to severe bottlenecks even on advanced GPU interconnects [ 5, 16 , 35 , 43 ]. Consequently, TP communication consistently accounts for a sub-stantial fraction of the overall training communication cost. E4M3 Format  E5M2 Format     
+
+> Sign Bit Exponent Bit Mantissa Bit
+> Total : 8 bits
+> Characteristics : Lower Precision,
+> Larger Dynamic Range
+> Total : 8 bits
+> Characteristics : Higher Precision,
+> Smaller Dynamic Range
+> Figure 3: FP8 Format Specifications: E4M3 vs. E5M2. E4M3 provides a larger dynamic range with relatively lower precision, while E5M2 offers higher precision but a smaller dynamic range.
+
+## 2.2 Communication Compression in Distributed Training 
+
+Communication compression has been extensively studied in dis-tributed training, particularly for data-parallel gradient synchro-nization. In DP, gradients exhibit relatively stable distributions and tolerate moderate approximation errors, enabling diverse com-pression techniques, including stochastic quantization [ 1 ], low-bit gradient methods [ 28 ], and low-precision optimizers [ 12 , 31 , 56 ]. Quantization-aware training methods, such as LLM-QAT [ 30 ], fur-ther enhance robustness under low-precision representations by incorporating quantization effects during training, mainly targeting weights and activations. More recent system-level designs further push DP gradient communication toward ultra-low precision. For example, SDP4Bit achieves near-4-bit communication in sharded DP training [ 21 ], EDGC uses entropy-driven dynamic gradient com-pression to reduce latency in GPT training [ 55 ], and TAGC intro-duces a Transformer-aware hierarchical compression scheme [ 38 ]. Collectively, these methods demonstrate that aggressive communi-cation compression is feasible in DP while preserving convergence. Beyond DP, communication compression has also been studied in PP training, where reducing inter-stage communication can signifi-cantly improve throughput. Representative approaches include dy-namic precision control [ 8], activation difference compression [ 51 ], and joint activation–gradient compression with error compensa-tion [ 40 ]. More recently, TahQuant introduces fine-grained activa-tion quantization along the PP communication path to improve ac-curacy preservation [ 19 ]. While effective in PP settings, these meth-ods typically rely on relatively loose synchronization constraints. Recent system-level efforts further explore communication-efficient training via coordinated compression and execution optimization, e.g., Tango [ 9], which reduces computation and communication overhead through quantization-aware scheduling. In contrast, TP exhibits fundamentally different communication characteristics. TP intermediate tensors are smaller, exchanged at higher frequency, and reside on the critical computation path. Consequently, TP communication is highly sensitive to numerical perturbations, and directly applying DP- or PP-oriented compres-sion methods can severely degrade numerical stability and hinder convergence. Although recent efforts explore low-bit TP communi-cation [ 13 , 25 ], they primarily target inference workloads, which are more tolerant of approximation errors. Furthermore, in end-to-end 3D-parallel training systems, existing designs often adopt conservative strategies that leave TP communication uncompressed to avoid catastrophic training divergence [ 54 ]. To date, there re-mains no communication compression scheme that enables stable convergence for TP training of large language models. HPDC ’26, July 13–16, 2026, Cleveland, OH, USA Liu et al. −0.100 −0.075 −0.050 −0.025 0.000 0.025 0.050 0.075 0.100 
+
+> Data Value
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> Count
+> ×10 6
+> Original Data
+> Figure 4: Histogram of TP communication data.
+
+## 2.3 Numerical Challenges of Low-Bit Quantization in TP Communication 
+
+Low-bit quantization is a common strategy for reducing commu-nication and memory overhead in large-scale model training. In practice, INT8 quantization is widely adopted in inference due to its simplicity and favorable efficiency–accuracy trade-offs [ 4, 45 ]. How-ever, its applicability to TP communication during pretraining is constrained by much stricter numerical stability requirements. INT8 maps floating-point values to a uniform integer grid using a single scaling factor, with quantization defined as 𝑄 INT8 (𝑥 ) = round (𝑥 /Δ)
+
+and Δ = |𝑥 |max /127 . While hardware-efficient, this uniform quanti-zation provides limited effective resolution for values concentrated near zero, which are frequently observed in TP intermediate ten-sors [23]. In high-frequency, tightly synchronized TP communica-tion, small mismatches in scaling factors across layers or shards can introduce rounding and saturation effects, leading to distorted gradient aggregation and unstable optimization dynamics [32]. In contrast, reduced-precision floating-point formats, such as FP8, preserve scale information through explicit exponent encoding, enabling more robust handling of heterogeneous and dynamically changing tensor values. An FP8 number is represented as 𝑥 =
+
+(− 1)𝑠 · 2𝑒 −𝐵 · ( 1 + 𝑓 ), where 𝑠 , 𝑒 , and 𝑓 denote the sign, exponent, and mantissa, respectively. Common FP8 variants include E4M3 and E5M2 [ 42 ]. The bit-level structures of these variants are illustrated in Figure 3.This inherent adaptivity makes FP8 particularly well-suited for low-bit TP communication during pretraining, addressing key numerical limitations of INT8 in such settings [ 33 ]. Moreover, FP8 is currently being widely adopted in modern AI accelerators, including NVIDIA and AMD GPUs, and is expected to become a broadly supported type in the future—similar to how FP16 gained widespread hardware adoption—making it a timely and forward-looking choice for large-scale training. While FP8 mitigates several numerical limitations inherent to INT8 quantization, effective TP communication compression de-pends not only on the numerical format itself, but also critically on how well it aligns with the statistical properties and synchroniza-tion patterns of TP intermediate tensors. In the following section, we analyze why FP8 is particularly well suited for TP communica-tion and how its representational characteristics can be leveraged to achieve both high compression efficiency and stable training. 
+
+## 3 Why FP8 is Suitable for TP Communication Compression? 3.1 Distribution of TP Intermediate Tensors 
+
+We analyze the intermediate tensors involved in TP AllReduce (see Figure 4). Our results indicate that these tensors are highly INT8         
+
+> −10.0 −7.5 −5.0 −2.5 0.0 2.5 5.0 7.5 10.0
+> Numerical Value
+> FP8
+> Figure 5: Data distribution characteristics of INT8 and FP8.
+
+concentrated around zero while simultaneously exhibiting a long-tail distribution. Let the TP intermediate tensor be 𝑋 = {𝑥 𝑖 }𝑁 𝑖 =1
+
+with probability density 𝑝 𝑋 (𝑥 ), such that the zero-centered re-gion satisfies ∫ 𝜖  
+
+> −𝜖
+
+𝑝 𝑋 (𝑥 ) 𝑑𝑥 ≈ 1, where 𝜖 → 0+. The dense and long-tail subsets can be defined as 𝑋 0 = {𝑥 𝑖 ∈ 𝑋 | | 𝑥 𝑖 | ≤ 𝜖 } and 
+
+𝑋 𝐿 = {𝑥 𝑖 ∈ 𝑋 | | 𝑥 𝑖 | > 𝜖 }, capturing the extremely small and relatively large values, respectively. In other words, most values transmitted during TP communication are extremely small and densely clustered near zero, while only a few occupying the long tail. For such distributions, quantization must provide sufficient res-olution around 𝑋 0; otherwise, small-magnitude values may collapse to the same quantization level, resulting in information loss. 
+
+## 3.2 INT8 Incompatibility with TP Communication Compression 
+
+INT8 quantization typically adopts a fixed scale with zero-point, performing uniform quantization over the entire value range. How-ever, this approach is unsuitable for TP intermediate tensors (see Figure 4). INT8 maps the range using a fixed step size Δ, while TP intermediate tensors are highly concentrated near zero, form-ing a sharp peak. Figure 5 shows the visual comparison of INT8 and FP8 representations. INT8 adopts uniform quantization with evenly spaced representable values, imposing the same quantiza-tion resolution on both high-density and low-density regions. As a result, the numerous small-magnitude values clustered around zero incur large relative quantization errors, leading to a pronounced degradation in training accuracy. Let the quantization error be 
+
+𝑒 𝑖 = 𝑥 𝑖 − ˆ𝑥 𝑖 , ˆ𝑥 𝑖 = 𝑄 INT8 (𝑥 𝑖 ), 𝑖 = 1, . . . , 𝑁 . (1) Due to the uniform step, multiple dense zero-centered values may map to the same integer, leading to collisions: 
+
+∃𝑥 𝑖 , 𝑥 𝑗 ∈ 𝑋 0, 𝑄 INT8 (𝑥 𝑖 ) = 𝑄 INT8 (𝑥 𝑗 ), 𝑖 ≠ 𝑗 . (2) Consequently, the mean squared error in the dense region remains significant, severely degrading training accuracy. Our experiments on the tensors show that INT8 error is approximately uniformly distributed across the range (see Figure 6), consistent with its uni-form step mechanism. Therefore, INT8 can’t provide fine-grained resolution in the dense zero region and is unsuitable for TP. 
+
+## 3.3 The Mathematical Suitability of FP8 
+
+FP8 addresses the limitations of INT8 by providing an exponentially scaled representation that achieves high precision near zero while maintaining a wide dynamic range. Figure 5 illustrates the one-dimensional density of FP8 representable values, characterized by a pronounced concentration near zero and a long tail, which high-lights FP8’s suitability for compressing TP intermediate tensors. For values in the dense zero-centered region 𝑋 0, the quantization TACO HPDC ’26, July 13–16, 2026, Cleveland, OH, USA −0.0006 −0.0004 −0.0002 0.0000 0.0002 0.0004 0.0006 
+
+> Quantization Error
+> 0
+> 1
+> 2
+> 3
+> Count
+> ×10 6
+> INT8
+> FP8 (E4M3)
+> Figure 6: Quantization errors of INT8 and FP8.
+
+error is bounded by the unit in the last place (ULP): 
+
+|𝑒 FP8  
+
+> 𝑖
+
+| ≤ ULP (𝑥 𝑖 ) = 2⌊log 2 |𝑥 𝑖 | ⌋− 𝑚 , 𝑥 𝑖 ∈ 𝑋 0, (3) where 𝑚 is the mantissa width. This implies that smaller values (lower exponent) are represented with finer precision and denser quantization points, closely matching the dense, small-magnitude peak observed in TP intermediate tensors. For large-magnitude values in the long-tail region 𝑋 𝐿 , FP8 step size grows exponentially, providing sufficient dynamic range. As a result, the overall tensor-level quantization error is significantly lower than INT8, while preserving high-fidelity representation near zero. This property can be approximated for E4M3 FP8 as 
+
+𝑄 FP8 (𝑥 ) ≈ sign (𝑥 ) · 2𝐸 −𝐵 · ( 1 + 𝑀 /2𝑚 ) , (4) where the exponent 𝐸 and mantissa 𝑀 are encoded with 4 and 3 bits, respectively. The exponential step ensures minimal error for critical small values, while still covering the long-tail region, achieving 
+
+local high precision and global dynamic range simultaneously. The quantization errors of int8 and FP8 to TP intermediate tensor are as shown in Figure 6, which demonstrates that the error of fp8 is obviously smaller than that of INT8. Overall, TP intermediate tensors exhibit distributions that are heavily skewed toward low-magnitude values, rendering uniform INT8 quantization susceptible to substantial precision loss. In contrast, FP8’s exponent-based representation provides finer granularity in the near-zero regime, making it more suitable for large-scale distributed training. 
+
+## 4 Design of TACO 4.1 High-Level Overview 
+
+Motivated by the observations above, we propose TACO. TACO specifically targets the compression of intermediate tensors ex-changed in TP communication. It enhances the adaptability of FP8 quantization by dynamically regulating the energy distribution of these tensors, effectively mitigating the quantization error arising from their highly concentrated nature near zero. Furthermore, it en-ables high-throughput data transmission on GPU clusters through a unified kernel design. The overview of TACO is shown in Figure 7. In the compression workflow, the limitations of standard Hadamard are first analyzed in Section 4.2.1. To address the iden-tified “Zero-Collapse” issue, the Adaptive Scale-Hadamard (ASH) transform is detailed in Section 4.2. This process involves calculat-ing the second-order raw moment and scale factors ( ①), followed by the ASH transform ( ②). In Section 4.3, the Dual-Scale (DS) quanti-zation ( ③) is applied to map the transformed data to the FP8 format. Since executing these operations sequentially incurs significant memory overhead, kernel fusion ( ④) is required to combine vari-ance computation, ASH transform, and DS quantization into a single operator. The specific implementation and kernel fusion methods are detailed in Section 4.4.1. Furthermore, to mitigate the overhead of compression latency, an overlap strategy ( ⑤) is employed to par-allelize computation and communication. The system performance optimization and overlap details are discussed in Section 4.4.2. In the decompression workflow, the data is first processed by the dequantization step, followed by the inverse DS quantization and inverse ASH transformation. We optimize the decompres-sion process by fusing these operations into a unified fused_ash _decompress_kernel . This fusion eliminates intermediate mem-ory writes and reduces kernel launch overhead. 
+
+## 4.2 Adaptive Scale–Hadamard Transform 
+
+4.2.1 Motivation: Limitation of Standard Hadamard. Despite the superior near-zero resolution of FP8 compared to INT8, its applica-tion to TP intermediate tensors is hindered by their extreme value concentration. We identify “Zero-Collapse” as the root cause of failure , where direct quantization or standard transformations cannot effectively map data into the representable range of FP8. 
+
+Direct FP8 Quantization. Due to the lack of adaptive scaling, the vast majority of low-magnitude values fall into the subnormal range or underflow directly to zero, resulting in severe fidelity loss. 
+
+Inefficacy of Standard Hadamard. While the standard Hadamard transform is effective for spreading outliers, it is funda-mentally an isometric transformation that preserves the Euclidean norm ( 𝐿 2 energy) of the input vector. Consequently, data blocks with inherently low energy remain confined to a narrow numerical range even after rotation, failing to occupy the effective bits of FP8. As illustrated in Figure 8, the distribution of the transformed data remains sharply peaked around zero, indicating that the stan-dard Hadamard transform fails to sufficiently disperse these dense, low-magnitude clusters. Consequently, this results in persistent underutilization of FP8’s high-precision dynamic range. 
+
+4.2.2 ASH Transform. To overcome the limitations of the stan-dard Hadamard transform and prevent zero-collapse, we propose the Adaptive Scale–Hadamard Transform, which combines block-wise energy rescaling with orthogonal Hadamard rotation for high-fidelity quantization. This design amplifies low-magnitude blocks while appropriately scaling high-magnitude blocks, enabling the transformed data to fully exploit FP8’s representable range. Let 
+
+X ∈ R𝑁 denote the flattened TP intermediate tensor prior to trans-fer. We partition X into 𝑀 contiguous blocks of size 𝐵 :
+
+X = [𝐺 1, 𝐺 2, . . . , 𝐺 𝑀 ], 𝐺 𝑘 ∈ R𝐵 , (5) where 𝐵 is chosen to fit entirely in GPU shared memory for low-latency, block-local processing. The effect of ASH transform is clearly visualized in Figure 8. Compared to the standard Hadamard transform, ASH transform effectively disperses the dense near-zero clusters, expanding them into FP8’s high-precision quantization range and yielding a more balanced distribution. 
+
+Block-wise Adaptive Rescaling. To explicitly control the nu-merical magnitude of each block, ASH begins with block-wise adaptive energy rescaling. We specifically adopt the second-order raw moment (energy) rather than variance to estimate the local scale. This is motivated by the observation that TP intermediate tensors are typically zero-centered; thus, the raw energy captures the effective signal magnitude required for quantization without HPDC ’26, July 13–16, 2026, Cleveland, OH, USA Liu et al. ASH Transform                
+
+> low -magnitude
+> （𝝈 𝒌 ↓,𝜶 𝒌 ↑)
+> （𝝈 𝒌 ↑,𝜶 𝒌 ↓)
+> Scale Factor Determination
+> Adaptive Rescaling
+> （𝝈 𝒌 ↑,𝜶 𝒌 ↓)
+> high -
+> magnitude
+> high -
+> magnitude
+> Compression Workflow
+> Dual -Scale (DS)
+> Target_Max
+> ෪𝑮 𝒌
+> Section 4.2 Section 4.2 Section 4.3
+> 123
+> +-
+> 𝟏
+> 𝑩
+> 𝑯 𝑩 𝒁 𝒌
+> ×
+> ……
+> ……Hadamard
+> Decompression Workflow
+> Decompress_fp8 Inverse_ DS Inverse_ ASH Inverse_ rescaling
+
+One kernel   
+
+> Performance Optimization
+> Adaptive _re scale ASH _transform Compute _DS
+> Three kernel
+> One kernel
+
+Kernel Fusion 4
+
+> Comm -Comp Co -optimization 5
+
+Section 4.4               
+
+> Adaptive _rescale ASH DS_FP8
+> 0
+> 1
+> 2
+> 3
+> #GPU
+> 0000
+> 1111
+> 2222
+> 3333
+> One -shot
+> Reduce -Scatter
+> Compression -
+> enabled  AllGather
+
+Figure 7: Overview of TACO. TP intermediate tensors are compressed via adaptive rescaling, the ASH transform, and dual-scale quantization, with kernel fusion and communication–computation co-optimization. Decompression is performed using a fused kernel for efficient reconstruction. −4 −2 0 2 4        
+
+> Value
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> 10 4
+> 10 5
+> 10 6
+> Log Frequency  Original Distribution
+> −4 −2 024
+> Value
+> Data trapped
+> near zero
+> Standard Hadamard
+> −4 −2 024
+> Value
+> Adaptive Hadamard (Ours)
+
+Figure 8: Distribution of tensors before and after Hadamard-based transformations. AS-Hadamard redistributes densely clustered near-zero values into FP8’s high-precision quantization range, unlike the standard Hadamard transform. 
+
+incurring the computational overhead of mean centering. For block 
+
+𝐺 𝑘 , we calculate its root mean square (RMS) amplitude as follows: 
+
+𝜎 𝑘 =
+
+vut 1
+
+𝐵 
+
+> 𝐵
+
+∑︁ 
+
+> 𝑗 =1
+
+𝐺 2 
+
+> 𝑘,𝑗
+
++ 𝜖, (6) where 𝜖 is a small constant ensuring numerical stability for near-zero blocks. We then compute an adaptive scaling factor to map each block’s energy to a reference target level: 
+
+𝛼 𝑘 = 𝜏 𝜎 𝑘 
+
+, (7) where 𝜏 denotes a constant target energy aligned with FP8’s effec-tive dynamic range. This scaling strategy amplifies low-magnitude blocks while attenuating higher-magnitude ones, effectively nor-malizing the dynamic range across all blocks. The rescaled block is computed element-wise as ˜𝐺 𝑘 = 𝛼 𝑘 ·𝐺 𝑘 , where each block 𝐺 𝑘 has its own adaptive scale 𝛼 𝑘 . This ensures that every block is normalized independently, providing distinguishable numerical ranges across blocks before the rotation stage. By doing so, we effectively max-imize the utilization of FP8’s high-precision range and minimize quantization errors for near-zero values. Importantly, this com-putation involves only lightweight reductions and element-wise multiplications, making it highly efficient and naturally suited for massively parallel GPU execution, where thousands of blocks can be processed concurrently with minimal overhead. 
+
+Orthogonal Hadamard Rotation. After rescaling, each block undergoes an orthogonal Walsh–Hadamard transform: 
+
+Z𝑘 = 1
+
+√𝐵 H𝐵 ˜𝐺 𝑘 , (8) where H𝐵 denotes the Hadamard matrix of order 𝐵 . The factor 
+
+1/√𝐵 is incorporated to explicitly enforce orthogonality, thereby preserving the energy of the transformation. Since the normalized Hadamard matrix is bothsymmetric and orthogonal ( H𝑇 𝐵 = H−1 
+
+> 𝐵
+
+= 
+
+> 1√𝐵
+
+H𝐵 ), the transformation is exactly invertible. Crucially, because the rotation is energy-preserving, it redis-tributes the dense low-magnitude clusters without disrupting the block-wise scaling established during the rescaling step. The trans-formed data exhibits an approximate zero-mean, Gaussian-like distribution, which naturally aligns with the non-uniform expo-nent density of FP8. As illustrated in Figure 8, ASH significantly improves the utilization of FP8’s effective dynamic range compared to the standard Hadamard transform. For efficiency, this opera-tion is implemented using the Fast Walsh–Hadamard Transform (FWHT) in an in-place manner within shared memory, reducing computational complexity from 𝑂 (𝐵 2) to 𝑂 (𝐵 log 𝐵 ).
+
+## 4.3 Dual-Scale FP8 Quantization 
+
+Following the ASH transform, the rotated tensor Z𝑘 exhibits a more favorable Gaussian-like distribution. Nevertheless, careful scale management remains critical due to the rigid upper bound of the FP8 format. Without proper scaling, high-magnitude values can exceed the maximum representable range ( 𝑄 max ), causing over-flow or severe saturation. Such numerical instability is a primary contributor to training divergence and abrupt loss spikes. 
+
+Post-Rotation Quantization Scale. To ensure that all values strictly fit in the FP8 representable range, we compute a block-wise post-rotation scale based on the maximum absolute value in the block: 
+
+𝑠 𝑘 = max (| Z𝑘 |) 
+
+𝑄 max 
+
+, (9) where max (| Z𝑘 |) denotes the maximum value in block 𝑘 , and 𝑄 max 
+
+is the largest representable FP8 value. The data are then quantized element-wise to FP8: 
+
+q𝑘 = Cvt FP8 
+
+ Z𝑘 
+
+𝑠 𝑘 
+
+
+
+, (10) where Cvt FP8 denotes the intrinsic conversion function (NVIDIA’s 
+
+_nv_cvt_float_to_fp8 ). By strictly enforcing this mapping, nu-merical overflow is effectively prevented, and the available bit-width is maximally and efficiently utilized throughout computation. TACO HPDC ’26, July 13–16, 2026, Cleveland, OH, USA 
+
+Algorithm 1 TACO: Tensor-Parallel Adaptive Communication Compres-sion 
+
+Require: Input intermediate tensor X; block size 𝐵 ; target energy 
+
+𝜏 ; FP8 maximum value 𝑄 max 
+
+Ensure: Reconstructed intermediate tensor X′
+
+Sender-side: Fused Compression Kernel 
+
+1: Partition X into 𝑀 contiguous blocks {𝐺 1, 𝐺 2, . . . , 𝐺 𝑀 } of size 
+
+𝐵 
+
+2: for each block 𝐺 𝑘 in parallel do 
+
+3: Load 𝐺 𝑘 into shared memory / registers 
+
+4: Block-wise Adaptive Rescaling 
+
+5: 𝜎 𝑘 ←√︃ 1
+
+> 𝐵
+
+Í𝐵 𝑗 =1 𝐺 2 
+
+> 𝑘,𝑗
+
++ 𝜖 
+
+6: 𝛼 𝑘 ← 𝜏 /𝜎 𝑘 
+
+7: ˜𝐺 𝑘 ← 𝛼 𝑘 · 𝐺 𝑘 
+
+8: Orthogonal Hadamard Rotation 
+
+9: Z𝑘 ← 1√𝐵 FWHT ( ˜𝐺 𝑘 )
+
+10: Post-Rotation FP8 Quantization 
+
+11: 𝑠 𝑘 ← max (| Z𝑘 |)/ 𝑄 max 
+
+12: q𝑘 ← Cvt FP8 (Z𝑘 /𝑠 𝑘 )
+
+13: end for 
+
+14: Communicate {( q𝑘 , 𝛼 𝑘 , 𝑠 𝑘 )} 𝑀 𝑘 =1 using TP collectives 
+
+Receiver-side: Decompression Kernel 
+
+15: for each received tuple (q𝑘 , 𝛼 𝑘 , 𝑠 𝑘 ) in parallel do 
+
+16: ˆZ𝑘 ← Cvt FP32 (q𝑘 ) · 𝑠 𝑘 
+
+17: ˆ𝐺 𝑘 ← 1√𝐵 FWHT ( ˆZ𝑘 )
+
+18: 𝐺 ′ 
+
+> 𝑘
+
+← ˆ𝐺 𝑘 /𝛼 𝑘 
+
+19: Append 𝐺 ′ 
+
+> 𝑘
+
+to X′
+
+20: end for 
+
+21: return X′
+
+Dual-Scale Reconstruction. To enable high-fidelity reconstruc-tion, TACO utilizes two distinct scalars per block to separately con-trol the data distribution and the quantization range. Both the adap-tive rescaling factor 𝛼 𝑘 (Eq. 7), which normalizes block energy, and the quantization scale 𝑠 𝑘 (Eq. 9), which prevents numerical overflow, are transmitted alongside the compressed tensor. Reconstruction strictly follows the reverse order of the compression sequence: 
+
+ˆZ𝑘 = Cvt FP32 (q𝑘 ) · 𝑠 𝑘 , (11) 
+
+ˆ𝐺 𝑘 = 1
+
+√𝐵 H𝐵 ˆZ𝑘 , (12) 
+
+𝐺 ′ 
+
+> 𝑘
+
+= ˆ𝐺 𝑘 /𝛼 𝑘 . (13) Specifically, Eq. 11 recovers the post-rotation magnitude, Eq. 12 applies the inverse orthogonal Hadamard transform to restore the original ordering of the data, and Eq. 13 reverses the adaptive rescal-ing. By decoupling these two factors, this mechanism mitigates the conflict between resolving small values and containing large val-ues. It ensures that low-magnitude clusters are safeguarded against underflow, while high-magnitude blocks remain strictly bounded within the FP8 representable range throughout training. The communication overhead of transmitting two scalars per block is negligible compared to the substantial bandwidth savings achieved by FP8 compression. Despite this minimal overhead, the additional scaling metadata is critically important for maintaining numerical stability and ensuring stable training convergence. As a Adaptive Rescale 
+
+> Compute
+> ASH Transform
+> Kernel
+> Compute_DS
+> Kernel
+> FP8 Quantization
+> Kernel
+
+Naï ve: Traditional Multi -Kernel Execution   
+
+> Global Memory
+> CTA 1
+> Shared Memory
+> Launch
+> Global R&W
+> CTA 2
+> Shared Memory
+> Launch
+> CTA 3
+> Shared Memory
+> Launch
+> CTA M
+> Shared Memory
+> Launch
+> Global R&W Global R&W Global R&W
+> TACO: Fused Compression Kernel
+> (Variance, ASH Transform, DS Quantization)
+
+TACO: Single Kernel Execution           
+
+> Launch
+> ෍𝒙 𝒊
+> 𝟐
+> Thread -Level
+> Computation
+> Warp Shuffle
+> Reduction
+> Block -Level
+> Finalization
+> CTA: Fused Compression Kernel
+> 𝑹𝒐𝒕𝒂𝒕𝒆 &𝒚 𝒊 𝒙 𝒊
+> 𝟐 𝑴𝒂𝒙 𝒚 𝒊 ෍𝒙 𝒊
+> 𝟐 FP8
+> Global Memory
+> Global Read Global Write Global R&W
+> Shared Memory Shared
+> Memory
+> CTA M
+> Thread
+> Warp
+> Block
+> CUDA Kernel Fusion (Optimization)
+
+Figure 9: Comparison of Naïve Multi-Kernel Execution vs. TACO Single Kernel Execution. The upper part illustrates the high memory traffic in traditional methods, while the lower part demonstrates the efficiency of fused kernel execution with parallel CTAs. 
+
+result, TACO enables highly efficient FP8-based TP communication, while having minimal impact on overall training accuracy. 
+
+## 4.4 Performance Optimization 
+
+4.4.1 System-Level Kernel Fusion Optimizations. TACO imple-ments a fully fused compression kernel (Algorithm 1) that inte-grates adaptive rescale factor computation, the ASH transform, and DS quantization into a single GPU kernel (Figure 9). By eliminating redundant global memory accesses and kernel launches, this design significantly increases arithmetic intensity and improves overall efficiency. In contrast, naïve implementations typically launch sepa-rate reduction kernels to compute block-wise variance for adaptive energy normalization and the post-rotation maximum magnitude for FP8 scaling, incurring substantial overhead. TACO effectively eliminates this redundancy by coalescing both reductions within a single fused kernel using warp-level primitives and shared memory. Concretely, each thread locally computes both the squared input value for variance estimation and the absolute value of its rotated output for post-rotation scaling. Warp-level shuffle operations are then used to simultaneously aggregate partial sum and partial maximum with minimal synchronization overhead, after which shared memory efficiently finalizes the block-level reductions to produce 𝜎 𝑘 and 𝑠 𝑘 without launching auxiliary kernels. This design significantly reduces global memory traffic and kernel launch overhead, enabling fully block-local computation for both normalization and quantization scale derivation. 
+
+4.4.2 System performance optimization. To better integrate TACO with communication protocols, we implement two optimizations: refining buffer distribution and integrating TACO with COCCL, a compressible collective communication library, followed by perfor-mance tuning, ensuring efficient TP communication across GPUs, which allows TACO to be seamlessly embedded into existing col-lective primitives with minimal protocol modification. HPDC ’26, July 13–16, 2026, Cleveland, OH, USA Liu et al. One-shot Two-shot Triple-shot      
+
+> Methods
+> 0
+> 50
+> 100
+> 150
+> 200
+> 250
+> Throughput (TFLOPS)
+> 128MB 64MB 32MB 16MB 8MB 4MB
+> Overlap Chunk Size
+> 0
+> 50
+> 100
+> 150
+> 200
+> Throughput (TFLOPS)
+> Figure 10: Throughput comparison. Left: Performance of different shot methods. Right: Impact of overlap chunk size on throughput.
+
+First, each compressed block requires two scalar parameters: the adaptive pre-scaling factor 𝛼 𝑘 and the post-rotation quantization scale 𝑠 𝑘 . TACO stores these scalars contiguously with the corre-sponding FP8-compressed payload in global memory, enabling a zero-copy metadata layout. During decompression, the kernel re-trieves 𝛼 𝑘 and 𝑠 𝑘 via simple pointer arithmetic, avoiding explicit metadata copies as well as additional communication launches for scale gathering. Moreover, this layout enables fully coalesced global memory accesses during reconstruction, as threads within a block read contiguous FP8 values followed immediately by their associated metadata,further minimizing memory latency. Second, integrating TACO into traditional ring- or tree-based communication algorithms results in frequent compression within a single communication, leading to significant performance degrada-tion and accumulated compression errors. To reduce compression overhead, we integrate TACO into COCCL [ 29 ], a compressible collective communication protocol built on NCCL. We tune this library as shown in Figure 10 and find that, TP communication scenario—where all communication occurs within a node—using COCCL’s two-shot AllReduce as the communication algorithm achieves the best overall performance. The two-shot algorithm decomposes AllReduce into ReduceScatter and AllGather. The Re-duceScatter phase consists of one compressed AlltoAll operation followed by a single local reduction. This design effectively reduces TACO execution to two operations per communication round, min-imizing compression frequency and increasing compression block granularity. As a result, it significantly lowers execution overhead when integrating TACO with communication while preserving accuracy. In addition, COCCL incorporates a two-level overlap strategy. Through optimization of the overlap granularity, we de-termine that overlapping data blocks of size 64 MB yields optimal performance, further masking the computational latency of TACO. 
+
+## 5 Evaluation 5.1 Experimental Setup 
+
+Platforms. We evaluate TACO on a GPU-centric cluster comprising two nodes, each equipped with two Intel XEON(R) Platinum 8558 CPUs (192 cores) and eight NVIDIA H100 SXM5 GPUs with 80 GB memory. The nodes are interconnected via four 400Gbps InfiniBand links, providing an aggregate inter-node bandwidth of 1.6 Tbps. The software stack includes CUDA 12.6 and NVIDIA driver 550.90.07. 
+
+Baselines. We compare TACO against the following commu-nication strategies: Baseline (w/o Comp), which performs stan-dard distributed training without communication compression; TahQuant [ 19 ], a PP compression method serving as a representa-tive baseline for communication quantization; SDP4bit [ 21 ], a 4-bit quantization method optimized for DP gradient compression. 
+
+> Table 1: Accuracy comparison under TP=8 after 10,000 training it-erations for the BF16 baseline, TahQuant, and TACO; degradation (Deg.) indicates the relative loss increase over the baseline.
+
+Method Val Loss ↓ Test Loss ↓ Val Deg. ↓ Test Deg. ↓
+
+Baseline 2.389899 2.344701 – –TahQuant 2.458742 2.413642 +2.88 % +2.94 % 
+
+TACO 2.395784 2.351210 +0.25 % +0.28 % 
+
+Models and Datasets. In Section 5.2, we evaluate compression algorithms on GPT-350M trained on the Pile dataset [ 17 ], using a learning rate schedule of (3 × 10 −4 → 3 × 10 −5), with a global batch size of 256 and 10,000 training iterations. We further ex-tend the evaluation to a larger model, GPT-6.7B, trained on the same Pile dataset. In addition, Qwen2.5-7B [ 46 ] is trained on the Open-Web-Math dataset [ 36 ], following a learning rate schedule of (3 × 10 −4 → 3 × 10 −5), with a global batch size of 64 for 10,000 iterations, to evaluate the generalization ability of the proposed method across different model families and data distributions. In Section 5.5, we conduct large-scale evaluations under a 3D parallel training configuration, where GPT-6.7B is trained from scratch on the Pile dataset using PyTorch [ 37 ] v2.5.1 and Megatron-LM [ 43 ], with parallelism configured as (TP = 4, PP = 2, DP = 2). 
+
+Metrics. We report End-to-end throughput (TFLOPS) to measure efficiency, and Model quality (Validation/Test Loss) to evaluate con-vergence. Degradation (Deg.) is reported as the relative percentage increase in loss relative to the BF16 baseline. 
+
+## 5.2 Evaluation of Accuracy with TP 
+
+In this section, we systematically evaluate the impact of commu-nication compression on model convergence under TP settings, where intermediate tensors are exchanged across GPUs during both forward and backward passes. First, we benchmark the overall 
+
+End-to-End Performance in Section 5.2.1 under high-parallelism con-figurations (up to TP8) to comprehensively demonstrate robustness and convergence stability at scale. Next, we perform a Component-wise Analysis in Section 5.2.2 of TACO’s internal mechanisms—ASH and DS—to assess their contributions to numerical stability and pre-cision recovery. We further extend this evaluation in Section 5.2.3 to large-scale models (GPT-6.7B and Qwen-2.5-7B), rigorously verify-ing that TACO maintains stable optimization dynamics and exhibits negligible accuracy degradation under aggressive TP compression. 
+
+5.2.1 End-to-End Convergence Comparison. To evaluate the effec-tiveness of the proposed TACO framework for compressing TP intermediate tensors, we benchmark its end-to-end training ac-curacy against the state-of-the-art communication compression method TahQuant under a TP8 configuration. Table 1 reports the final validation and test losses for the uncompressed BF16 base-line, TahQuant, and TACO. After 10,000 training iterations, the BF16 baseline achieves a validation loss of 2.389899 and a test loss of 2.344701, serving as the reference for assessing compression-induced degradation. While TahQuant reduces communication vol-ume, it incurs a substantial accuracy penalty, with validation and test losses increasing by +2.88% and +2.94% , respectively. This degradation suggests that quantization errors introduced into TP intermediate tensors accumulate across layers and iterations, ulti-mately impeding convergence toward the full-precision optimum. TACO HPDC ’26, July 13–16, 2026, Cleveland, OH, USA 0 500 1000 1500 2000 2500 3000        
+
+> Iteration
+> 3
+> 4
+> 5
+> 6
+> 7
+> Validation Loss
+> 2500 2750 3000
+> 2.8
+> 2.9
+> 3.0
+> Baseline Tahquant NVFP8 NVFP8+ASH NVFP8+DS NVFP8+ASH+DS
+> Figure 11: Ablation of TACO components on convergence stability. The plot demonstrates the progressive stability gained by combining ASH and DS, with the final framework (purple) nearly overlapping the uncompressed baseline (blue).
+
+In contrast, TACO exhibits consistently near-lossless accuracy. As shown in Table 1, TACO attains a validation loss of 2.395784 and a test loss of 2.351210, corresponding to only +0.25% and +0.28% 
+
+degradation relative to BF16. Compared to TahQuant, TACO im-proves fidelity by more than an order of magnitude. This robustness is particularly significant in TP settings, where intermediate tensors are exchanged at every layer and iteration, and even small numeri-cal perturbations can rapidly propagate and destabilize training. 
+
+5.2.2 Component-wise Analysis. To elucidate how TACO preserves training stability, we systematically analyze its core architectural components: ASH and DS . Figure 11 presents the convergence of these configurations under TP4. The empirical evidence reveals that naively applying standard NVFP8 compression to TP intermediate tensors leads to immediate and catastrophic divergence, with the validation loss spiking to 5.605692. As shown by the NVFP8 curve in Figure 11, the loss quickly plateaus at an extremely high value (near 6.0) and completely fails to track the downward trend of the baseline. This indicates that standard 8-bit quantization without conditioning is clearly insufficient for the precision requirements of TP. This failure is rooted in the highly non-uniform nature of the numerical distributions within these tensors. TP intermediate tensors typically exhibit a dense clustering of values near zero; such a distribution fails to utilize the discrete representable points of the FP8 format effectively, resulting in significant quantization noise that destabilizes the gradient flow across parallel partitions. Integrating Dual-Scale (DS) quantization in isolation provides only partial stabilization of the training objective, reducing the validation loss to 3.300491. By partitioning TP intermediate tensors into finer sub-blocks and assigning independent scaling factors, DS mitigates precision loss caused by local dynamic range mismatches. However, the training trajectory (red diamonds in Figure 11) re-mains substantially above the uncompressed baseline, indicating that DS alone cannot fully recover full-precision performance. With-out prior reshaping of the numerical distribution, the FP8 mantissa bits remain underutilized for the majority of densely clustered val-ues, resulting in persistent information loss that limits convergence. Crucially, the full TACO configuration (NVFP8 + ASH + DS) achieves near-baseline performance, with a validation loss of 2.667557. As shown by the purple trajectory in Figure 11, this con-figuration closely tracks the baseline curve, particularly during the later stages of training, as highlighted in the magnified inset, 500 1000 1500 2000 2500 3000      
+
+> 3.0
+> 4.0
+> Loss
+> GPT-6.7B
+> 2500 3000
+> 2.70
+> 2.80
+> 2000 4000 6000 8000 10000
+
+Iteration   
+
+> 2.5
+> 3.0
+> Loss
+> Qwen2.5-7B
+> 9500 10000
+> 2.25
+> 2.35
+> Baseline (w/o compress) TACO (w/ compress)
+> Figure 12: Validation loss comparison between the baseline (no com-pression) and TACO on GPT 6.7B and Qwen2.5-7B.
+
+and consistently outperforms TahQuant under the same setting. In this synergy, ASH acts as a preconditioner that disperses dense clusters and flattens the distribution, while DS explicitly aligns the transformed blocks to the FP8 representable range. Notably, ASH alone yields limited improvement, since transformed values can still exceed the FP8 range without DS’s adaptive scaling. These results demonstrate that the combination of ASH and DS is essential for enabling high-fidelity, low-bit communication in TP training. 
+
+5.2.3 Large-Scale Model Verification. To evaluate the scalability and numerical robustness of the proposed framework, we further conduct experiments on two representative large-scale language models, GPT 6.7B and Qwen-2.5 7B. As shown in Figure 12, we compare the training loss trajectories between baseline (no com-pression) and TACO. For GPT 6.7B, TACO achieves a final validation loss of 2.570587, compared to 2.552718 for baseline, corresponding to a marginal degradation of +0.70%. Similarly, on Qwen-2.5 7B, TACO reaches a loss of 2.257332 versus 2.256751 for the baseline, resulting in an extremely small degradation of +0.03%. Across both model families, the loss curves remain stable throughout training, and the performance gap between TACO and full-precision training is negligible. These results demonstrate that TACO consistently preserves optimization stability under aggres-sive communication compression, and generalizes well across dif-ferent architectures and scales without requiring additional tuning. 
+
+## 5.3 Ablation Study 
+
+We systematically investigate the impact of Hadamard-based trans-form and the selection of low-bit formats on training convergence under TP4. In Section 5.3.1, we analyze the effectiveness of ASH by comparing it against standard Hadamard transform. In Section 5.3.2, we evaluate the sensitivity to different quantization formats. 
+
+5.3.1 Component Ablation. Our analysis compares the uncom-pressed baseline against the standard Hadamard transform and the proposed ASH mechanism. Applying a standard Hadamard transform increases the validation loss from 2.663061 to 2.757688, corresponding to a +3.55% degradation. This accuracy drop occurs because the standard rotation does not sufficiently recondition the HPDC ’26, July 13–16, 2026, Cleveland, OH, USA Liu et al. 2.58 2.62 2.66 2.70 2.74 2.78   
+
+> Loss Value
+> Validation
+> loss
+> Test loss
+> Baseline Hadamard AS-Hadamard
+> Figure 13: Validation and test loss for baseline, standard Hadamard, and ASH under TP4.
+
+dense clusters of near-zero values inherent in TP intermediate ten-sors. As a result, a large fraction of values remains concentrated in a narrow range, severely underutilizing the FP8 mantissa. In contrast, ASH restores performance to near-baseline levels, achieving a vali-dation loss of 2.667557 (a marginal +0.17% degradation) by spread-ing values more uniformly across the representable range, thereby minimizing quantization error for small-magnitude elements. As illustrated in Figure 13, the standard Hadamard transform exhibits a visible accuracy gap, whereas ASH effectively recovers the lost fidelity. These results confirm that adaptive distribution reshaping is a prerequisite for high-precision, low-bit communication. 
+
+5.3.2 Format Ablation. We further evaluate the effectiveness of different low-bit numerical formats when combined with ASH, with results shown in Figure 14. The choice of numerical format proves critical to training stability, as reflected by the markedly different loss trajectories observed in our ablation study. ASH+INT8 denotes INT8 quantization applied after ASH transform. As illustrated in Figure 14, this configuration leads to catastrophic divergence. Al-though the loss remains superficially stable during the initial ∼1,500 iterations, it subsequently exhibits a sharp exponential increase, ultimately reaching a validation loss of 68.10. This failure arises because INT8’s limited range cannot accommodate the broadened tensor distribution produced by ASH, resulting in saturation of high-magnitude values and collapse of small-magnitude ones. The floating-point formats offer significantly better robustness. The FP8 (E5M2) configuration partially mitigates the divergence seen in INT8, maintaining a stable downward trend. However, as shown in the magnified inset of Figure 14, the E5M2 curve (orange triangles) remains consistently higher than the baseline, settling at a validation loss of 3.305199. This +24 .1% degradation indicates that while the E5M2 format provides sufficient dynamic range (5 bits for exponent), its limited 2-bit mantissa lacks the necessary resolution to represent the critical details of the reshaped tensors. In contrast, the FP8 (E4M3) format achieves the optimal balance between range and precision. As illustrated in Figure 14, the E4M3 curve (green squares) tracks the uncompressed baseline (blue cir-cles) with remarkable fidelity throughout the entire training process, achieving a near-lossless validation loss of 2.667557, only a 0.19% degradation. These results highlight that both distribution condi-tioning via ASH and careful selection of the FP8 format are essential for maintaining stability in TP communication compression. 
+
+5.3.3 ASH Block Size Sensitivity. The block size ( 𝐵 ) of ASH is a crit-ical hyperparameter that governs the trade-off between numerical stability and computational efficiency. Table 2 reports the validation loss, test loss, and training performance in a range of block sizes. 0 500 1000 1500 2000 2500 3000      
+
+> Iteration
+> 2
+> 4
+> 6
+> 8
+> 10
+> Validation Loss
+> 2500 2750 3000
+> 2.80
+> 2.85
+> 2.90
+> Baseline ASH+INT8 ASH+FP8(E5M2) ASH+FP8(E4M3)
+> Figure 14: Validation loss curves for ASH combined with different low-bit formats. INT8 causes complete divergence
+
+These results provide several key insights into how the granular-ity of the transformation affects the statistical conditioning and performance of TP intermediate tensors. At small block sizes ( 𝐵 ∈ { 32 , 64 }), overly fine-grained partition-ing introduces non-negligible overhead due to increased kernel invocations. Limited per-block computation leads to poor GPU uti-lization and suboptimal memory bandwidth efficiency, resulting in only modest throughput gains of 1.09 –1.11 × over the baseline. Moreover, the limited receptive field of the Hadamard transform at this granularity is insufficient to effectively reshape TP intermediate tensor distributions, leading to a slight convergence degradation. In contrast, moderate block sizes ( 𝐵 ∈ 128 , 256 ) significantly improve arithmetic intensity and enable more efficient memory coalescing. As reported in Table 2, 𝐵 = 256 achieves the highest speedup of 1.52 × while preserving sufficient spatial scope to ef-fectively align the reshaped TP intermediate tensor distribution with the FP8 dynamic range. This configuration strikes an optimal balance between computational efficiency and numerical fidelity, while maintaining near-baseline convergence behavior in practice. However, excessively large blocks ( 𝐵 = 512 ) degrade both throughput and numerical accuracy. Relative to the optimal block size of 𝐵 = 256 , the reduced speedup of 1.41 × stems from thread-level workload imbalance and increased shared-memory bank con-flicts, which limit effective parallelism and overall execution ef-ficiency. Moreover, the expanded spatial scope of the transform diminishes the effectiveness of adaptive scaling by aggregating TP intermediate tensors with heterogeneous magnitudes into a single scaling region, resulting in a modest but systematic loss of numerical fidelity and slightly impaired convergence. In summary, a block size of 𝐵 = 256 provides the best trade-off between computational efficiency and numerical robustness. Maximize GPU parallelism while ensuring that the reshaped TP intermediate tensor distribution remains well conditioned for FP8                                           
+
+> Table 2: ASH block size ablation on accuracy and throughput. Throughput is measured in TFLOPS, with speedup relative to the baseline. Bold denotes the best result.
+> Block Size Val Loss ↓Test Loss ↓Throughput ↑Speedup ↑
+> Baseline 2.663061 2.650814 27.1 1.00 ×
+> ASH (32) 2.670513 2.658282 29.5 1.09 ×
+> ASH (64) 2.670663 2.658583 30.2 1.11 ×
+> ASH (128) 2.668261 2.656122 37.9 1.40 ×
+> ASH (256) 2.667557 2.655678 41.2 1.52 ×
+> ASH (512) 2.670552 2.658692 38.1 1.41 ×TACO HPDC ’26, July 13–16, 2026, Cleveland, OH, USA TP=2 TP=4 TP=8 TP=2 TP=4 TP=8
+> 0
+> 40
+> 80
+> 120
+> 160
+> 200
+> Throughput (TFLOPS)
+> 1.21x
+> 1.52x
+> 1.90x
+> 1.25x
+> 1.54x
+> 1.40x
+> 1.23x
+> 1.63x
+> 1.43x
+> 1.29x
+> 1.70x
+> 1.87x
+> GPT-2.7B GPT-6.7B
+> Ring Tree TahQuant TACO
+
+Figure 15: End-to-end training throughput (TFLOPS) under different TP degrees on GPT-2.7B and GPT-6.7B. We compare standard Ring and Tree-based collectives with TahQuant and TACO. 
+
+quantization. This balance is crucial for TACO to provide high performance and almost lossless low-bit TP communication. 
+
+## 5.4 Evaluation of Performance with TP 
+
+We next analyze system-level performance under TP degrees of 2, 4, and 8 on GPT-2.7B and GPT-6.7B. Section 5.4.1 to quantify end-to-end throughput and communication scalability under different collective strategies, and Section 5.4.2 to uncover the underlying sources of TACO’s performance gains through a detailed decompo-sition of computation, communication, and compression overhead. 
+
+5.4.1 End-to-End Throughput Comparison. We systematically eval-uate end-to-end training throughput for GPT-2.7B and GPT-6.7B un-der TP degrees of 2, 4, and 8, comparing Ring AllReduce, tree-based collective communication, TahQuant, and TACO (see Figure 15. Throughput is measured in TFLOPS, and relative improvements are reported primarily as speedup over the Ring baseline. Ring and tree-based collectives are two widely used communication algorithms in distributed training: Ring AllReduce overlaps communication with computation but incurs latency that scales linearly with the TP degree, whereas tree-based collectives reduce the number of communication steps but often suffer from limited bandwidth uti-lization and increased synchronization overhead at scale. Across most configurations, TACO achieves the highest through-put and largest speedups over Ring AllReduce. On GPT-2.7B with TP=2, TACO improves throughput by approximately 1.23 × over Ring, slightly surpassing TahQuant ( 1.21 ×). As the TP degree in-creases to 4, communication overhead becomes more pronounced: Ring throughput degrades significantly, whereas TACO main-tains a 1.63 × speedup, outperforming TahQuant’s 1.52 ×. At TP=8, TahQuant slightly outperforms TACO, achieving a 1.43 × speedup versus 1.90 × for TACO, reflecting reduced amortization efficiency of TACO’s aggressive kernel optimizations under extreme TP. In contrast, TACO consistently outperforms all baselines on GPT-6.7B across all TP degrees. At TP=2, it achieves a 1.29 × speedup over Ring, surpassing TahQuant’s 1.25 ×. The advantage grows with higher TP degrees: at TP=4, TACO reaches a 1.70 × speedup versus 
+
+1.54 × for TahQuant, and at TP=8, it maintains a 1.87 × improvement, compared to 1.40 × for TahQuant. These results clearly highlight TACO’s increasing strong efficiency relative to alternatives as TP scales, thanks to its ability to compress TP intermediate tensors and effectively overlap communication with computation. Overall, throughput decreases as the TP degree increases due to the rapidly growing volume and frequency of TP intermediate tensor communication. TACO consistently mitigates this degrada-tion by compressing TP intermediate tensors into FP8 and fusing TP2 TP4 TP8   
+
+> 0
+> 50
+> 100
+> 150
+> 200
+> 250
+> Throughput (TFLOPS)
+> 0.73x
+> 1.77x
+> 1.05x
+> 0.86x
+> 1.98x
+> 1.18x
+> 0.70x
+> 2.66x
+> 1.33x
+> w/o Compress TACO w/o Kernel Fusion TACO w/ Kernel Fusion
+> TACO w/o Kernel Fusion and w/ co-optimization
+
+Figure 16: Throughput comparison across different TP settings. The numbers above the bars indicate the speedup ratio relative to the previous baseline. 
+
+compression, decompression, and communication into optimized kernels. By overlapping these operations asynchronously, TACO reduces the effective communication cost along the critical path, improving hardware utilization and delivering substantially better scalability across model sizes and TP configurations. 
+
+5.4.2 Performance Breakdown. We evaluate TACO’s performance on GPT-6.7B under varying TP degrees, reporting end-to-end throughput in TFLOPS (Figure 16). The uncompressed baseline achieves 134.9, 63.7, and 31.3 TFLOPS for TP2, TP4, and TP8, re-spectively. Applying TACO without kernel fusion slightly reduces throughput due to the local computation overhead of compression, yielding 98.2, 54.8, and 22.0 TFLOPS—corresponding to relative speedups of 0.73 ×, 0.86 ×, and 0.70 × compared to the baseline. Applying kernel fusion dramatically improves performance: TACO with fusion achieves 174.1, 108.3, and 58.5 TFLOPS for TP2, TP4, and TP8, corresponding to speedups of 1.77 ×, 1.98 ×,and 2.66 × over TACO without fusion. Further co-optimization on top of kernel fusion provides additional speedups of 1.05 ×,1.18 ×, and 1.33 × for TP2, TP4, and TP8, respectively. These results demonstrate that TACO’s optimizations effectively exploit com-putation–communication co-design: while FP8 compression intro-duces minor local computation, kernel fusion and co-optimization maximize throughput, especially as TP communication dominates. Overall, Figure 16 highlights that TACO consistently delivers sub-stantial performance gains over the baseline, with the benefits of combined optimizations growing as TP increases. 
+
+## 5.5 3D Parallel Training Evaluation 
+
+5.5.1 Training Accuracy. We evaluate TACO’s accuracy under full 3D parallelism on GPT-6.7B. To isolate the impact of TP compres-sion, we consider three settings applied consistently to both models: (1) a baseline without compression, (2) 2D parallelism, where DP and PP communications are quantized using SDP4bit and TahQuant respectively while TP remains uncompressed, and (3) 3D paral-lelism, where TACO additionally use in TP alongside SDP4bit and TahQuant. Figure 17 presents the validation loss curves of GPT-6.7B under these settings. The baseline model achieves a final loss of 2.663061, while the 2D-parallel configuration slightly degrades to 2.676003 due to quantization noise in DP and PP communications. In contrast, TACO under full 3D parallelism closely tracks the baseline throughout training, reaching a final loss of 2.679906, correspond-ing to only a 0.14% loss increase over the 2D setting, demonstrating that adding TP compression does not introduce additional optimiza-tion instability. Across the entire training trajectory, TACO exhibits HPDC ’26, July 13–16, 2026, Cleveland, OH, USA Liu et al. 0 500 1000 1500 2000 2500 3000    
+
+> Iteration
+> 3
+> 4
+> Validation Loss
+> 2500 2650 2800
+> 2.850
+> 2.875
+> 2.900
+> Baseline 2D_DP(SDP4bit)_PP(TahQuant)_TP(w/o compress)
+> 3D_DP(SDP4bit)_PP(TahQuant)_TP(TACO)
+> Figure 17: Validation loss of GPT-6.7B under full 3D parallelism.
+
+stable convergence behavior comparable to full-precision training, indicating that the proposed method effectively preserves gradient fidelity even under aggressive communication compression across all parallel dimensions. These results highlight that TACO enables end-to-end compression of DP, PP, and TP communications in large-scale training while maintaining near-lossless optimization quality, demonstrating strong robustness and scalability in full 3D parallel training settings, and consistently delivering reliable performance across different model scales and training configurations. 
+
+5.5.2 End-to-End Throughput. Finally, we present an end-to-end training throughput evaluation of TACO on GPT models. As shown in Table 3, compared with the uncompressed baseline, TACO achieves consistent and significant performance improvements across different model sizes. For GPT models, the speedup reaches up to 1.53 ×. Notably, the improvements from 2D to full 3D paral-lelism are substantially amplified once TP communication compres-sion is enabled, indicating that tensor parallel communication is a major bottleneck in large-scale distributed training. These results demonstrate that, under tightly synchronized 3D parallel training, reducing TP communication volume is critical for achieving high system efficiency. TACO’s optimized compression operators ensure that the additional quantization overhead is fully amortized by the reduction in communication cost, resulting in a net throughput gain. Moreover, the consistent speedups across GPT model scales suggest that TACO scales robustly with increas-ing model size and communication intensity. Training remains numerically stable throughout optimization. As shown in Figure 17, TACO preserves a validation loss trajectory that closely matches the full-precision baseline, confirming that the system-level gains are achieved without sacrificing convergence or accuracy. 
+
+## 6 Discussion 
+
+Design objective. TACO is not designed to maximize raw com-munication speed, but to enable near-lossless compression of TP intermediate tensors while preserving convergence in large-scale training. This is motivated by the observation that existing methods often introduce optimization instability under high-frequency syn-chronization or require delicate tuning of error compensation and scaling strategies, limiting their robustness. To achieve this, TACO adopts FP8 as a practical precision point, striking a balance between compression efficiency and numerical fidelity, and enabling stable training under aggressive communication reduction.              
+
+> Table 3: End-to-end throughput (TFLOPS) under 3D parallelism on GPT models (TP=4, PP=2, DP=2). Models Size Baseline 2D (w/o TACO) 3D (w/ TACO)
+> GPT 2.7B 39.9 40.3 (1.01 ×)59.7 ( 1.50 ×)6.7B 61.1 62.3 (1.02 ×)93.3 ( 1.53 ×)13B 73.8 75.2 (1.02 ×)111.7 ( 1.51 ×)
+
+Generality across hardware. Although TACO is implemented with FP8 as the primary precision format, its design is not depen-dent on FP8-specific hardware support. Instead, FP8 serves as a target precision level that defines the compression semantics of TP communication. On platforms without native FP8 support, TACO degrades gracefully to an INT8-based implementation, where quan-tization is performed using our ASH together with DS. In this configuration, intermediate tensors are still compressed to low-bit integer representations during communication, while scaling and reconstruction are handled in a software-assisted manner. This design preserves the same communication semantics as FP8-based execution, while trading off additional lightweight arithmetic over-head for broader hardware compatibility. As a result, TACO main-tains its communication reduction benefits across heterogeneous accelerators without requiring specialized FP8 support. 
+
+## 7 Conclusion and Future Work 
+
+In this paper, we presented TACO , an efficient framework for ac-celerating distributed training by optimizing the communication of TP intermediate tensors. By leveraging FP8-based compression and system-level kernel fusion, TACO effectively alleviates the commu-nication bottlenecks inherent in high-degree TP. Our systematic evaluations across multiple model scales, including GPT and Qwen, demonstrate that TACO consistently achieves superior throughput, with speedups of up to 1.87 ×. Moreover, experiments under full 3D parallelism confirm that TACO delivers robust, architecture-agnostic performance gains while maintaining convergence nearly identical to uncompressed baselines. Future work will focus on ex-tending TACO ’s compression strategies to encompass gradient and optimizer state communication within 3D-parallel training stacks. Additionally, we aim to investigate adaptive quantization schemes that dynamically adjust the precision of TP intermediate tensors according to layer-wise sensitivity, further enhancing hardware utilization and efficiency in exascale distributed training systems. 
+
+## Acknowledgments 
+
+This work was supported by the National Key Research and De-velopment Program of China (Grant No. 2025YFB3003702), the Innovation Funding of ICT, CAS (Grant No. E461050), and the Na-tional Natural Science Foundation of China (Grant Nos. 62032023 and T2125013). The AI-driven experiments, simulations, and model training were conducted on the robotic AI-Scientist platform at the Chinese Academy of Sciences. TACO HPDC ’26, July 13–16, 2026, Cleveland, OH, USA 
+
+## References 
+
+[1] Dan Alistarh, Demjan Grubic, Jerry Z. Li, Ryota Tomioka, and Milan Vojnovic. 2017. QSGD: communication-efficient SGD via gradient quantization and en-coding. In Proceedings of the 31st International Conference on Neural Information Processing Systems (Long Beach, California, USA) (NIPS’17) . Curran Associates Inc., Red Hook, NY, USA, 1707–1718. [2] Quentin Anthony, Benjamin Michalowicz, Jacob Hatef, Lang Xu, Mustafa Abdul-jabbar, Aamir Shafi, Hari Subramoni, and Dhabaleswar Panda. 2024. Demysti-fying the Communication Characteristics for Distributed Transformer Models. arXiv:2408.10197 [cs.DC] https://arxiv.org/abs/2408.10197 [3] Saleh Ashkboos, Ilia Markov, Elias Frantar, Tingxuan Zhong, Xincheng Wang, Jie Ren, Torsten Hoefler, and Dan Alistarh. 2024. QUIK: Towards End-to-end 4-Bit Inference on Generative Large Language Models. In Proceedings of the 2024 Con-ference on Empirical Methods in Natural Language Processing , Yaser Al-Onaizan, Mohit Bansal, and Yun-Nung Chen (Eds.). Association for Computational Lin-guistics, Miami, Florida, USA, 3355–3371. doi:10.18653/v1/2024.emnlp-main.197 [4] Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. 2024. Quarot: Outlier-free 4-bit inference in rotated llms. Advances in Neural Information Processing Systems 37 (2024), 100213–100240. [5] Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, et al . 2020. Language models are few-shot learners. Advances in neural information processing systems 33 (2020), 1877–1901. [6] Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher M De Sa. 2023. Quip: 2-bit quantization of large language models with guarantees. Advances in Neural Information Processing Systems 36 (2023), 4396–4429. [7] Chia-Yu Chen, Jiamin Ni, Songtao Lu, Xiaodong Cui, Pin-Yu Chen, Xiao Sun, Naigang Wang, Swagath Venkataramani, Vijayalakshmi Viji Srinivasan, Wei Zhang, et al . 2020. Scalecom: Scalable sparsified gradient compression for communication-efficient distributed training. Advances in Neural Information Processing Systems 33 (2020), 13551–13563. [8] Jianfei Chen, Lianmin Zheng, Zhewei Yao, Dequan Wang, Ion Stoica, Michael W. Mahoney, and Joseph E. Gonzalez. 2021. ActNN: Reducing Training Memory Footprint via 2-Bit Activation Compressed Training. arXiv:2104.14129 [cs.LG] https://arxiv.org/abs/2104.14129 [9] Shiyang Chen, Da Zheng, Caiwen Ding, Chengying Huan, Yuede Ji, and Hang Liu. 2023. TANGO: re-thinking quantization for graph neural network training on GPUs. In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (Denver, CO, USA) (SC ’23) . As-sociation for Computing Machinery, New York, NY, USA, Article 38, 14 pages. doi:10.1145/3581784.3607037 [10] Yanxi Chen, Xuchen Pan, Yaliang Li, Bolin Ding, and Jingren Zhou. 2024. EE-LLM: large-scale training and inference of early-exit large language models with 3D parallelism. In Proceedings of the 41st International Conference on Machine Learning (ICML’24) . JMLR.org, Vienna, Austria, Article 277, 27 pages. [11] Aakanksha Chowdhery, Sharan Narang, Jacob Devlin, Maarten Bosma, Gaurav Mishra, Adam Roberts, Paul Barham, Hyung Won Chung, Charles Sutton, Se-bastian Gehrmann, et al . 2023. Palm: Scaling language modeling with pathways. 
+
+Journal of Machine Learning Research 24, 240 (2023), 1–113. [12] Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. 2023. Qlora: Efficient finetuning of quantized llms. Advances in neural information processing systems 36 (2023), 10088–10115. [13] Harry Dong, Tyler Johnson, Minsik Cho, and Emad Soroush. 2024. Towards Low-bit Communication for Tensor Parallel LLM Inference. arXiv:2411.07942 [cs.AI] https://arxiv.org/abs/2411.07942 [14] Vage Egiazarian, Roberto L. Castro, Denis Kuznedelev, Andrei Panferov, El-dar Kurtic, Shubhra Pandit, Alexandre Marques, Mark Kurtz, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. 2026. Bridging the Gap Between Promise and Performance for Microscaling FP4 Quantization. arXiv:2509.23202 [cs.LG] https://arxiv.org/abs/2509.23202 [15] Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. 2023. GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers. arXiv:2210.17323 [cs.LG] https://arxiv.org/abs/2210.17323 [16] Trevor Gale, Deepak Narayanan, Cliff Young, and Matei Zaharia. 2022. MegaBlocks: Efficient Sparse Training with Mixture-of-Experts. arXiv:2211.15841 [cs.LG] https://arxiv.org/abs/2211.15841 [17] Leo Gao, Stella Biderman, Sid Black, Laurence Golding, Travis Hoppe, Charles Foster, Jason Phang, Horace He, Anish Thite, Noa Nabeshima, Shawn Presser, and Connor Leahy. 2020. The Pile: An 800GB Dataset of Diverse Text for Language Modeling. arXiv:2101.00027 [cs.CL] https://arxiv.org/abs/2101.00027 [18] Aaron Grattafiori et al . 2024. The Llama 3 Herd of Models. arXiv:2407.21783 [cs.AI] https://arxiv.org/abs/2407.21783 [19] Guangxin He, Yuan Cao, Yutong He, Tianyi Bai, Kun Yuan, and Binhang Yuan. 2025. TAH-QUANT: Effective Activation Quantization in Pipeline Parallelism over Slow Network. arXiv:2506.01352 [cs.LG] https://arxiv.org/abs/2506.01352 [20] Yanping Huang, Youlong Cheng, Ankur Bapna, Orhan Firat, Mia Xu Chen, Dehao Chen, HyoukJoong Lee, Jiquan Ngiam, Quoc V. Le, Yonghui Wu, and Zhifeng Chen. 2019. GPipe: efficient training of giant neural networks using pipeline parallelism. In Proceedings of the 33rd International Conference on Neural Informa-tion Processing Systems . Curran Associates Inc., Red Hook, NY, USA, Article 10, 10 pages. [21] Jinda Jia, Cong Xie, Hanlin Lu, Daoce Wang, Hao Feng, Chengming Zhang, Baixi Sun, Haibin Lin, Zhi Zhang, Xin Liu, et al . 2024. Sdp4bit: Toward 4-bit communi-cation quantization in sharded data parallelism for LLM training. Advances in Neural Information Processing Systems 37 (2024), 8734–8759. [22] Ziheng Jiang, Haibin Lin, Yinmin Zhong, Qi Huang, Yangrui Chen, Zhi Zhang, Yanghua Peng, Xiang Li, Cong Xie, Shibiao Nong, Yulu Jia, Sun He, Hongmin Chen, Zhihao Bai, Qi Hou, Shipeng Yan, Ding Zhou, Yiyao Sheng, Zhuo Jiang, Haohan Xu, Haoran Wei, Zhang Zhang, Pengfei Nie, Leqi Zou, Sida Zhao, Liang Xiang, Zherui Liu, Zhe Li, Xiaoying Jia, Jianxi Ye, Xin Jin, and Xin Liu. 2024. MegaScale: Scaling Large Language Model Training to More Than 10,000 GPUs. arXiv:2402.15627 [cs.LG] https://arxiv.org/abs/2402.15627 [23] Andrey Kuzmin, Mart Van Baalen, Yuwei Ren, Markus Nagel, Jorn Peters, and Tijmen Blankevoort. 2022. Fp8 quantization: The power of the exponent. Advances in Neural Information Processing Systems 35 (2022), 14651–14662. [24] Itay Lamprecht, Asaf Karnieli, Yair Hanani, Niv Giladi, and Daniel Soudry. 2025. Tensor-Parallelism with Partially Synchronized Activations. NeurIPS 2025 Poster. https://openreview.net/forum?id=fyeSq3m8CY Accepted as NeurIPS 2025 Poster. [25] Qingyuan Li, Bo Zhang, Liang Ye, Yifan Zhang, Wei Wu, Yerui Sun, Lin Ma, and Yuchen Xie. 2024. Flash Communication: Reducing Tensor Parallelization Bottleneck for Fast Large Language Model Inference. arXiv:2412.04964 [cs.AI] https://arxiv.org/abs/2412.04964 [26] Shigang Li and Torsten Hoefler. 2022. Near-optimal sparse allreduce for dis-tributed deep learning. In Proceedings of the 27th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming (Seoul, Republic of Korea) 
+
+(PPoPP ’22) . Association for Computing Machinery, New York, NY, USA, 135–149. doi:10.1145/3503221.3508399 [27] Shenggui Li, Fuzhao Xue, Chaitanya Baranwal, Yongbin Li, and Yang You. 2023. Sequence Parallelism: Long Sequence Training from System Perspective. In Pro-ceedings of the 61st Annual Meeting of the Association for Computational Linguistics .Association for Computational Linguistics, Toronto, Canada, 2391–2404. [28] Yujun Lin, Song Han, Huizi Mao, Yu Wang, and William J. Dally. 2020. Deep Gradient Compression: Reducing the Communication Bandwidth for Distributed Training. arXiv:1712.01887 [cs.CV] https://arxiv.org/abs/1712.01887 [29] Xingchen Liu, Haoran Kong, Hairui Zhao, Shengkai Lyu, Zheng Wei, Man Liu, Xingjian Tian, Liyang Zhao, Zhuohan Chen, Fakang Wang, Zizhong Chen, Zhan Wang, Guangming Tan, and Dingwen Tao. 2026. COCCL: A Collective Commu-nication Library Supporting Easy Integration and Configuration of Customized Compression for Scalable LLM Training. In Proceedings of the 31st ACM SIGPLAN Annual Symposium on Principles and Practice of Parallel Programming (Sydney, NSW, Australia) (PPoPP ’26) . Association for Computing Machinery, New York, NY, USA, 384–397. doi:10.1145/3774934.3786432 [30] Zechun Liu, Barlas Oguz, Changsheng Zhao, Ernie Chang, Pierre Stock, Yashar Mehdad, Yangyang Shi, Raghuraman Krishnamoorthi, and Vikas Chandra. 2023. LLM-QAT: Data-Free Quantization Aware Training for Large Language Models. arXiv:2305.17888 [cs.CL] https://arxiv.org/abs/2305.17888 [31] Ilia Markov, Adrian Vladu, Qi Guo, and Dan Alistarh. 2023. Quantized distributed training of large models with convergence guarantees. In Proceedings of the 40th International Conference on Machine Learning (Honolulu, Hawaii, USA) (ICML’23) .JMLR.org, Honolulu, Hawaii, USA, Article 1001, 25 pages. [32] Paulius Micikevicius, Sharan Narang, Jonah Alben, Gregory Diamos, Erich Elsen, David Garcia, Boris Ginsburg, Michael Houston, Oleksii Kuchaiev, Ganesh Venkatesh, and Hao Wu. 2018. Mixed Precision Training. arXiv:1710.03740 [cs.AI] https://arxiv.org/abs/1710.03740 [33] Paulius Micikevicius, Dusan Stosic, Neil Burgess, Marius Cornea, Pradeep Dubey, Richard Grisenthwaite, Sangwon Ha, Alexander Heinecke, Patrick Judd, John Kamalu, Naveen Mellempudi, Stuart Oberman, Mohammad Shoeybi, Michael Siu, and Hao Wu. 2022. FP8 Formats for Deep Learning. arXiv:2209.05433 [cs.LG] https://arxiv.org/abs/2209.05433 [34] Deepak Narayanan, Aaron Harlap, Amar Phanishayee, Vivek Seshadri, Nikhil R. Devanur, Gregory R. Ganger, Phillip B. Gibbons, and Matei Zaharia. 2019. PipeDream: generalized pipeline parallelism for DNN training. In Proceedings of the 27th ACM Symposium on Operating Systems Principles (Huntsville, Ontario, Canada) (SOSP ’19) . Association for Computing Machinery, New York, NY, USA, 1–15. doi:10.1145/3341301.3359646 [35] Deepak Narayanan, Mohammad Shoeybi, Jared Casper, Patrick LeGresley, Mostofa Patwary, Vijay Korthikanti, Dmitri Vainbrand, Prethvi Kashinkunti, Julie Bernauer, Bryan Catanzaro, Amar Phanishayee, and Matei Zaharia. 2021. Efficient large-scale language model training on GPU clusters using megatron-LM. In Proceedings of the International Conference for High Performance Com-puting, Networking, Storage and Analysis (St. Louis, Missouri) (SC ’21) . Asso-ciation for Computing Machinery, New York, NY, USA, Article 58, 15 pages. doi:10.1145/3458817.3476209 [36] Keiran Paster, Marco Dos Santos, Zhangir Azerbayev, and Jimmy Ba. 2023. OpenWebMath: An Open Dataset of High-Quality Mathematical Web Text. HPDC ’26, July 13–16, 2026, Cleveland, OH, USA Liu et al. 
+
+arXiv:2310.06786 [cs.AI] https://arxiv.org/abs/2310.06786 [37] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison, Andreas Köpf, Edward Yang, Zach DeVito, Martin Raison, Alykhan Tejani, Sasank Chilamkurthy, Benoit Steiner, Lu Fang, Junjie Bai, and Soumith Chintala. 2019. PyTorch: an imperative style, high-performance deep learning library. In Proceedings of the 33rd International Conference on Neural Information Processing Systems . Curran Associates Inc., Red Hook, NY, USA, Article 721, 12 pages. [38] Igor Polyakov, Alexey Dukhanov, and Egor Spirin. 2025. TAGC: Optimizing Gradient Communication in Distributed Transformer Training. In Proceedings of the 5th Workshop on Machine Learning and Systems (World Trade Center, Rotterdam, Netherlands) (EuroMLSys ’25) . Association for Computing Machinery, New York, NY, USA, 254–260. doi:10.1145/3721146.3721946 [39] Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, and Yuxiong He. 2020. ZeRO: Memory Optimizations Toward Training Trillion Parameter Models. arXiv:1910.02054 [cs.LG] https://arxiv.org/abs/1910.02054 [40] M. I. Rudakov, A. N. Beznosikov, Ya. A. Kholodov, and A. V. Gasnikov. 2023. Activations and Gradients Compression for Model-Parallel Training. Doklady Mathematics 108, S2 (Dec. 2023), S272–S281. doi:10.1134/s1064562423701314 [41] Semyon Savkin. 2025. Quantization Methods for Matrix Multiplication and Ef-ficient Transformers . Ph. D. Dissertation. MASSACHUSETTS INSTITUTE OF TECHNOLOGY. [42] Haihao Shen, Naveen Mellempudi, Xin He, Qun Gao, Chang Wang, and Mengni Wang. 2024. Efficient post-training quantization with fp8 formats. Proceedings of Machine Learning and Systems 6 (2024), 483–498. [43] Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catanzaro. 2020. Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism. arXiv:1909.08053 [cs.CL] https: //arxiv.org/abs/1909.08053 [44] Shaden Smith, Mostofa Patwary, Brandon Norick, Patrick LeGresley, Samyam Rajbhandari, Jared Casper, Zhun Liu, Shrimai Prabhumoye, George Zerveas, Vijay Korthikanti, Elton Zhang, Rewon Child, Reza Yazdani Aminabadi, Julie Bernauer, Xia Song, Mohammad Shoeybi, Yuxiong He, Michael Houston, Saurabh Tiwary, and Bryan Catanzaro. 2022. Using DeepSpeed and Megatron to Train Megatron-Turing NLG 530B, A Large-Scale Generative Language Model. arXiv:2201.11990 [cs.CL] https://arxiv.org/abs/2201.11990 [45] Yuxuan Sun, Ruikang Liu, Haoli Bai, Han Bao, Kang Zhao, Yuening Li, Jiaxin Hu, Xianzhi Yu, Lu Hou, Chun Yuan, Xin Jiang, Wulong Liu, and Jun Yao. 2025. FlatQuant: Flatness Matters for LLM Quantization. arXiv:2410.09426 [cs.CL] https://arxiv.org/abs/2410.09426 [46] Qwen Team. 2024. Qwen2.5: A Party of Foundation Models. https://qwenlm. github.io/blog/qwen2.5/ [47] Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timothée Lacroix, Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, Aurelien Rodriguez, Armand Joulin, Edouard Grave, and Guil-laume Lample. 2023. LLaMA: Open and Efficient Foundation Language Models. arXiv:2302.13971 [cs.CL] https://arxiv.org/abs/2302.13971 [48] Albert Tseng, Jerry Chee, Qingyao Sun, Volodymyr Kuleshov, and Christopher De Sa. 2024. QuIP#: even better LLM quantization with hadamard incoherence and lattice codebooks. In Proceedings of the 41st International Conference on Machine Learning (Vienna, Austria) (ICML’24) . JMLR.org, Vienna, Austria, Article 1987, 27 pages. [49] Thijs Vogels, Sai Praneeth Karimireddy, and Martin Jaggi. 2019. PowerSGD: prac-tical low-rank gradient compression for distributed optimization. In Proceedings of the 33rd International Conference on Neural Information Processing Systems .Curran Associates Inc., Red Hook, NY, USA, Article 1278, 10 pages. [50] Haiquan Wang, Chaoyi Ruan, Jia He, Jiaqi Ruan, Chengjie Tang, Xiaosong Ma, and Cheng Li. 2024. Hiding Communication Cost in Distributed LLM Training via Micro-batch Co-execution. arXiv:2411.15871 [cs.DC] https://arxiv.org/abs/ 2411.15871 [51] Jue Wang, Binhang Yuan, Luka Rimanic, Yongjun He, Tri Dao, Beidi Chen, Christo-pher Ré, and Ce Zhang. 2022. Fine-tuning language models over slow networks using activation quantization with guarantees. Advances in Neural Information Processing Systems 35 (2022), 19215–19230. [52] BigScience Workshop, Teven Le Scao, Angela Fan, Christopher Akiki, et al .2023. BLOOM: A 176B-Parameter Open-Access Multilingual Language Model. arXiv:2211.05100 [cs.CL] https://arxiv.org/abs/2211.05100 [53] Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. 2024. SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models. arXiv:2211.10438 [cs.CL] https://arxiv.org/abs/2211.10438 [54] Lang Xu, Quentin Anthony, Qinghua Zhou, Nawras Alnaasan, Radha Gulhane, Aamir Shafi, Hari Subramoni, and Dhabaleswar K DK Panda. 2024. Accelerating large language model training with hybrid gpu-based compression. In 2024 IEEE 24th International Symposium on Cluster, Cloud and Internet Computing (CCGrid) .IEEE, Philadelphia, PA, USA, 196–205. [55] Qingao Yi, Jiaang Duan, Hanwen Hu, Qin Hua, Haiyan Zhao, Shiyou Qian, Dingyu Yang, Jian Cao, Jinghua Tang, Yinghao Yu, Chenzhi Liao, Kangjin Wang, and Liping Zhang. 2025. EDGC: Entropy-driven Dynamic Gradient Compression for Efficient LLM Training. arXiv:2511.10333 [cs.LG] https://arxiv.org/abs/2511. 10333 [56] Lin Zhang, Longteng Zhang, Shaohuai Shi, Xiaowen Chu, and Bo Li. 2023. Eval-uation and optimization of gradient compression for distributed deep learning. In 2023 IEEE 43rd International Conference on Distributed Computing Systems (ICDCS) . IEEE, Hong Kong, China, 361–371. [57] Hao Zheng, Peng Liang, Yu Tang, Yanqi Shi, Linbo Qiao, and Dongsheng Li. 2024. 3D Parallelism for transformers via Integer programming. In ICASSP 2024-2024 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP) .IEEE, Seoul, Korea, 6440–6444.
